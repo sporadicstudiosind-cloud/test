@@ -1,0 +1,11 @@
+{
+  "required": true,
+  "package": "com.example.vulkanfsr3.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "client": [
+    "GameRendererMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
