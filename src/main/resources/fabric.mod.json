@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "vulkan-fsr3-bridge",
+  "version": "${version}",
+  "name": "Vulkan FSR3 Bridge",
+  "description": "Experimental Fabric client mod that bridges VulkanMod rendering to a native AMD FSR3 pipeline.",
+  "authors": ["Codex"],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "main": [
+      "com.example.vulkanfsr3.VulkanFsr3BridgeMod"
+    ],
+    "client": [
+      "com.example.vulkanfsr3.VulkanFsr3BridgeClient"
+    ]
+  },
+  "mixins": [
+    "vulkan-fsr3-bridge.client.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "minecraft": "~${minecraft_version}",
+    "fabric-api": ">=${fabric_version}",
+    "vulkanmod": "=${vulkanmod_version}"
+  }
+}
