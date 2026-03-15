@@ -1,0 +1,29 @@
+# Gradle
+.gradle/
+build/
+out/
+!gradle/
+!*.gradle
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project
+*.jar
+*.zip
+*.log
+.classpath
+.project
+.settings/
+
+# Config
+config/
+fsr3-config.json

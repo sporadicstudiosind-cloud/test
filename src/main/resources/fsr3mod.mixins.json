@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.sporadicstudios.fsr3.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": [
+  ],
+  "client": [
+    "GameRendererMixin",
+    "WorldRendererMixin",
+    "RenderSystemMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "category.fsr3mod": "FSR3 Mod",
+  "key.fsr3mod.toggle_fsr3": "Toggle FSR3",
+  "key.fsr3mod.toggle_frame_generation": "Toggle Frame Generation",
+  "key.fsr3mod.toggle_upscaling": "Toggle Upscaling",
+  "key.fsr3mod.cycle_upscaling_mode": "Cycle Upscaling Mode",
+  "key.fsr3mod.show_debug_info": "Show FSR3 Debug Info",
+  "key.fsr3mod.increase_sharpness": "Increase Sharpness",
+  "key.fsr3mod.decrease_sharpness": "Decrease Sharpness",
+  "fsr3mod.upscaling.performance": "Performance",
+  "fsr3mod.upscaling.balanced": "Balanced",
+  "fsr3mod.upscaling.quality": "Quality",
+  "fsr3mod.upscaling.ultra_quality": "Ultra Quality",
+  "fsr3mod.message.enabled": "FSR3 Enabled",
+  "fsr3mod.message.disabled": "FSR3 Disabled",
+  "fsr3mod.message.frame_gen_enabled": "Frame Generation Enabled",
+  "fsr3mod.message.frame_gen_disabled": "Frame Generation Disabled",
+  "fsr3mod.message.upscaling_enabled": "Upscaling Enabled",
+  "fsr3mod.message.upscaling_disabled": "Upscaling Disabled"
+}
