@@ -1,0 +1,39 @@
+services:
+  proxy:
+    build: .
+    image: tls-proxy:latest
+    container_name: tls-proxy
+    restart: unless-stopped
+
+    # Load environment from .env file (create from .env.example)
+    env_file: .env
+
+    ports:
+      # HOST_PORT:CONTAINER_PORT — change left side if you want a different host port
+      - "${PORT:-8443}:${PORT:-8443}"
+
+    volumes:
+      # Mount the certs directory read-only into the container.
+      # Run  npm run gen-cert  on the host first to populate ./certs/
+      - ./certs:/app/certs:ro
+
+    # Limit resource consumption for a personal proxy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+
+    # Don't expose internal Docker network ports beyond what's needed
+    networks:
+      - proxy-net
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  proxy-net:
+    driver: bridge

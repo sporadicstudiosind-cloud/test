@@ -1,0 +1,17 @@
+{
+  "name": "tls-proxy",
+  "version": "1.0.0",
+  "description": "Personal TLS-encrypted forward proxy for untrusted networks",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "gen-cert": "bash generate-cert.sh"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}

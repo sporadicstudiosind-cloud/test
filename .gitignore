@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Environment (contains secrets)
+.env
+
+# TLS certificates (generated locally — do not commit private keys)
+certs/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Logs
+*.log
+npm-debug.log*
