@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>EarthFlight — Photoreal Web Flight Sim</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cesium@1.118/Build/Cesium/Widgets/widgets.css" />
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/cesium@1.118/Build/Cesium/Cesium.js"></script>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+
+  <!-- Heads-up display -->
+  <div id="hud" class="hidden">
+    <div class="hud-corner top-left">
+      <div class="hud-row"><span class="lbl">AIRSPEED</span><span id="hud-ias">0</span><span class="unit">kt</span></div>
+      <div class="hud-row"><span class="lbl">ALT</span><span id="hud-alt">0</span><span class="unit">ft</span></div>
+      <div class="hud-row"><span class="lbl">V/S</span><span id="hud-vs">0</span><span class="unit">fpm</span></div>
+    </div>
+    <div class="hud-corner top-right">
+      <div class="hud-row"><span class="lbl">HDG</span><span id="hud-hdg">000</span></div>
+      <div class="hud-row"><span class="lbl">THR</span><span id="hud-thr">0</span><span class="unit">%</span></div>
+      <div class="hud-row"><span class="lbl">G</span><span id="hud-g">1.0</span></div>
+    </div>
+    <div class="hud-center">
+      <div id="hud-pitch-ladder"></div>
+      <div id="hud-flightpath">⊕</div>
+    </div>
+    <div class="hud-corner bottom-left" id="hud-aircraft">—</div>
+    <div id="stall-warn" class="hidden">STALL</div>
+  </div>
+
+  <!-- Start / setup menu -->
+  <div id="menu">
+    <div class="menu-card">
+      <h1>EarthFlight</h1>
+      <p class="tag">Photorealistic web flight simulator over real-world terrain.</p>
+
+      <label class="field">
+        <span>Google Maps Platform API key <em>(Map Tiles API)</em></span>
+        <input id="apiKey" type="password" placeholder="Paste key for Google Photorealistic 3D Tiles…" autocomplete="off" />
+        <small>Leave blank to fly over Cesium World Terrain instead. Key is stored only in your browser.</small>
+      </label>
+
+      <label class="field">
+        <span>Aircraft</span>
+        <select id="aircraftSelect"></select>
+      </label>
+
+      <label class="field">
+        <span>Start location</span>
+        <select id="locationSelect"></select>
+      </label>
+
+      <button id="startBtn">Take off ✈</button>
+
+      <div class="controls-help">
+        <h3>Controls</h3>
+        <ul>
+          <li><b>Mouse</b> — pitch &amp; roll (click canvas to capture)</li>
+          <li><b>A / D</b> — rudder (yaw)</li>
+          <li><b>W / S</b> — throttle up / down</li>
+          <li><b>Shift</b> — afterburner / full throttle</li>
+          <li><b>G</b> — gear &nbsp; <b>B</b> — airbrake</li>
+          <li><b>C</b> — cycle camera &nbsp; <b>Tab</b> — switch aircraft</li>
+          <li><b>R</b> — reset attitude &nbsp; <b>Esc</b> — release mouse / menu</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div id="loading" class="hidden"><div class="spinner"></div><span>Streaming terrain…</span></div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

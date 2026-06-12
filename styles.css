@@ -1,0 +1,143 @@
+:root {
+  --hud: #3dff7a;
+  --hud-dim: #1f9c49;
+  --warn: #ff5a4d;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  color: #fff;
+}
+
+#cesiumContainer {
+  position: absolute;
+  inset: 0;
+}
+
+/* Hide Cesium chrome — we render our own HUD */
+.cesium-viewer-bottom,
+.cesium-viewer-animationContainer,
+.cesium-viewer-timelineContainer,
+.cesium-viewer-toolbar,
+.cesium-viewer-fullscreenContainer { display: none !important; }
+
+.hidden { display: none !important; }
+
+/* ---------- HUD ---------- */
+#hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 6px rgba(0, 0, 0, 0.9);
+}
+
+.hud-corner { position: absolute; padding: 18px 22px; }
+.top-left { top: 0; left: 0; }
+.top-right { top: 0; right: 0; text-align: right; }
+.bottom-left {
+  bottom: 0; left: 0;
+  font-size: 13px; letter-spacing: 2px; color: var(--hud-dim);
+}
+
+.hud-row {
+  display: flex; align-items: baseline; gap: 8px;
+  font-size: 26px; font-weight: 600; color: var(--hud);
+  line-height: 1.35;
+}
+.top-right .hud-row { justify-content: flex-end; }
+.hud-row .lbl { font-size: 11px; letter-spacing: 2px; color: var(--hud-dim); min-width: 56px; }
+.hud-row .unit { font-size: 12px; color: var(--hud-dim); }
+
+.hud-center {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+}
+#hud-flightpath {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--hud); font-size: 30px; opacity: .85;
+}
+#hud-pitch-ladder {
+  width: 320px; height: 320px;
+  border: 1px solid rgba(61, 255, 122, .25);
+  border-radius: 50%;
+}
+
+#stall-warn {
+  position: absolute; top: 28%; left: 50%; transform: translateX(-50%);
+  color: var(--warn); font-size: 30px; font-weight: 800; letter-spacing: 4px;
+  animation: blink .5s steps(1) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* ---------- Menu ---------- */
+#menu {
+  position: absolute; inset: 0; z-index: 20;
+  display: grid; place-items: center;
+  background: radial-gradient(120% 120% at 50% 0%, #16263f 0%, #060912 70%);
+}
+.menu-card {
+  width: min(440px, 92vw);
+  background: rgba(12, 18, 30, .82);
+  border: 1px solid rgba(120, 170, 255, .18);
+  border-radius: 16px;
+  padding: 28px 30px 30px;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .55);
+}
+.menu-card h1 {
+  margin: 0; font-size: 34px; letter-spacing: 1px;
+  background: linear-gradient(90deg, #6fe3ff, #4dff9a);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.tag { margin: 4px 0 22px; color: #9fb3cf; font-size: 14px; }
+
+.field { display: block; margin-bottom: 16px; }
+.field > span { display: block; font-size: 13px; color: #cdd9ec; margin-bottom: 6px; }
+.field em { color: #6fe3ff; font-style: normal; }
+.field input, .field select {
+  width: 100%; padding: 10px 12px; border-radius: 9px;
+  border: 1px solid rgba(120, 170, 255, .22);
+  background: #0b1220; color: #fff; font-size: 14px;
+}
+.field small { display: block; margin-top: 5px; color: #6f7e94; font-size: 11px; }
+
+#startBtn {
+  width: 100%; margin-top: 6px; padding: 13px;
+  border: 0; border-radius: 10px; cursor: pointer;
+  font-size: 16px; font-weight: 700; color: #04130a;
+  background: linear-gradient(90deg, #6fe3ff, #4dff9a);
+  transition: transform .08s ease, filter .15s ease;
+}
+#startBtn:hover { filter: brightness(1.08); }
+#startBtn:active { transform: translateY(1px); }
+
+.controls-help {
+  margin-top: 22px; padding-top: 16px;
+  border-top: 1px solid rgba(120, 170, 255, .12);
+}
+.controls-help h3 { margin: 0 0 8px; font-size: 12px; letter-spacing: 2px; color: #6f7e94; }
+.controls-help ul { margin: 0; padding-left: 18px; color: #b9c6da; font-size: 12.5px; line-height: 1.7; }
+.controls-help b { color: #6fe3ff; }
+
+/* ---------- Loading ---------- */
+#loading {
+  position: absolute; inset: 0; z-index: 15;
+  display: grid; place-items: center; gap: 14px;
+  grid-auto-flow: row; align-content: center;
+  background: rgba(4, 7, 14, .7); color: #9fb3cf; font-size: 14px;
+}
+.spinner {
+  width: 42px; height: 42px; border-radius: 50%;
+  border: 3px solid rgba(120, 170, 255, .2);
+  border-top-color: #4dff9a;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
