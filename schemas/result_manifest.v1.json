@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iridium.invalid/schemas/result_manifest.v1.json",
+  "title": "iridium.result.v1",
+  "description": "Binds every deliverable to one scenario revision, one metric table and one evidence record. The runtime derives evidence status from verifier records; a generated evidence string is never accepted at face value.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "result_id",
+    "status",
+    "model_version",
+    "scenario_revision",
+    "execution_mode",
+    "artifacts",
+    "metrics_ref",
+    "provenance_root"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "iridium.result.v1" },
+    "result_id": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["complete", "partial", "failed", "cancelled"] },
+    "model_version": { "type": "string", "minLength": 1 },
+    "scenario_revision": { "type": "string", "minLength": 1 },
+    "inputs": { "type": "array", "items": { "type": "string" } },
+    "intervention": { "type": ["object", "null"] },
+    "execution_mode": { "enum": ["learned", "constrained", "reference"] },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["kind", "ref", "evidence"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": ["video", "image", "audio", "report", "field", "scene", "mesh", "table", "motion", "code"]
+          },
+          "ref": { "type": "string", "minLength": 1 },
+          "evidence": {
+            "enum": ["illustrative", "learned_estimate", "numerically_verified", "empirically_validated"],
+            "description": "Architecture §7.3. Evidence level cannot be raised by relabelling or by improving visual quality."
+          },
+          "units": {},
+          "grid_ref": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "metrics_ref": { "type": "string", "minLength": 1 },
+    "verification_ref": { "type": ["string", "null"] },
+    "empirical_validation_ref": { "type": ["string", "null"] },
+    "uncertainty_ref": { "type": ["string", "null"] },
+    "omissions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Phenomena present in the real system but absent from the computation. Reported, never rendered in."
+    },
+    "provenance_root": { "type": "string", "minLength": 1 }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "artifacts": {
+            "contains": {
+              "properties": { "evidence": { "const": "numerically_verified" } },
+              "required": ["evidence"]
+            }
+          }
+        }
+      },
+      "then": {
+        "required": ["verification_ref"],
+        "properties": { "verification_ref": { "type": "string", "minLength": 1 } }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "artifacts": {
+            "contains": {
+              "properties": { "evidence": { "const": "empirically_validated" } },
+              "required": ["evidence"]
+            }
+          }
+        }
+      },
+      "then": {
+        "required": ["empirical_validation_ref"],
+        "properties": { "empirical_validation_ref": { "type": "string", "minLength": 1 } }
+      }
+    }
+  ]
+}

@@ -1,123 +1,92 @@
-# ORRERY
+# Iridium-1
 
-**An architecture specification for a physics-native omnimodal foundation model.**
+**One dense multimodal foundation model** that perceives, reasons, generates, simulates and
+acts across text, code, mathematics, images, video, speech, sound, structured measurements,
+geometry and physical fields — served as one persistent instance that allocates its own
+computation across concurrent work.
 
-An orrery is a machine that models a solar system — not a picture of one, a mechanism whose gears
-are constrained to move the way the planets actually move. That distinction is the entire thesis of
-this document.
+No mixture of experts. No external neural models: solvers, renderers, proof checkers,
+compilers and software APIs are permitted programs, and every learned component belongs to
+one versioned Iridium-1 checkpoint.
+
+> **Status: specification, plus a partial reference implementation and one trained
+> correctness slice.** Nothing here demonstrates a general system. What is trained is ~0.8 M
+> parameters on one linear PDE family. [`docs/capability-register.md`](docs/capability-register.md)
+> states, per capability, whether it is specified, implemented, trained, evaluated or
+> unsupported — read it before quoting anything from this repository as a result.
 
 ---
 
-## What this is
+## Start here
 
-A buildable specification for a single dense model that ingests text, images, video, audio, tabular
-data, mathematics, and live physics simulations, and emits any of those back — including velocity
-fields, motion vectors, and GUI actions. One parameter set. No expert routing. No calling out to
-other models; code and APIs only. One always-resident instance that allocates its own compute across
-concurrent streams.
-
-It is written to be honest about which parts are engineering and which are open research. Section
-[`10-open-problems.md`](spec/10-open-problems.md) carries the failures, each with a kill criterion,
-and [`00-premise.md`](spec/00-premise.md) closes with the strongest argument *against* building this
-at all.
-
-## The thesis in three claims
-
-1. **Represent physics dimensionlessly or don't bother.** Every latent carries a physical coordinate
-   and a vector of SI dimension exponents, so the trunk can work in Π-space (Re, Fr, We, Ma). This is
-   a direct response to the finding that no neural PDE method has been shown to learn
-   Reynolds-invariance, and that *representation geometry* — not learned-vs-retrieved dynamics — is
-   the variable that governs cross-regime transfer.
-2. **Never generate physics video. Render it.** The model emits velocity and density fields; video is
-   a differentiable rasterization of those fields. Video heads sampled from a visual prior violate
-   conservation of mass and momentum at roughly a 40% rate each, and 83–94% of generated clips
-   contain at least one expert-identifiable physics flaw. There is no prompt that fixes this, only an
-   architecture that routes around it.
-3. **Focus is recursion depth.** A dense trunk applied a variable number of times per token gives
-   "divert more compute to this stream" a mechanical meaning: a budget of recursion steps, allocated
-   by the model and enforced by the scheduler.
-
-## Read in this order
-
-| Doc | What it settles |
+| Document | What it is |
 |---|---|
-| [`00-premise.md`](spec/00-premise.md) | Goals, hard constraints, and the case against the whole design |
-| [`01-representation.md`](spec/01-representation.md) | Typed latents, the shared coordinate frame, Π-space, in-weight codecs |
-| [`02-trunk.md`](spec/02-trunk.md) | Dense weights, recursive depth, what "focus" physically is |
-| [`03-physics.md`](spec/03-physics.md) | The two-tier solver and when each tier fires |
-| [`04-generation.md`](spec/04-generation.md) | Decode heads, motion vectors, render-the-field |
-| [`05-agency.md`](spec/05-agency.md) | Action latents, Blender, and an unflattering reliability number |
-| [`06-runtime.md`](spec/06-runtime.md) | The resident instance, scheduling, duplex streaming, KV isolation |
-| [`07-data.md`](spec/07-data.md) | Why internet access solves the easy half and none of the hard half |
-| [`08-training.md`](spec/08-training.md) | Seven-stage curriculum, losses, stability risks |
-| [`09-self-improvement.md`](spec/09-self-improvement.md) | The bounded loop, and why residuals are a good reward |
-| [`10-open-problems.md`](spec/10-open-problems.md) | What is unsolved, with kill criteria |
-| [`11-evaluation.md`](spec/11-evaluation.md) | How you would know any of this worked |
-| [`12-blueprint-reconciliation.md`](spec/12-blueprint-reconciliation.md) | What was adopted, corrected, and found wrong in an alternative blueprint |
-| [`references.md`](references.md) | Every quantitative claim, with source |
+| [`docs/architecture.md`](docs/architecture.md) | The canonical architecture. Everything normative. |
+| [`docs/requirements-traceability.md`](docs/requirements-traceability.md) | The original request → requirement → specification → test |
+| [`docs/decisions.md`](docs/decisions.md) | Every correction made, with the test that holds it |
+| [`docs/capability-register.md`](docs/capability-register.md) | Honest status per capability |
+| [`docs/first-slice.md`](docs/first-slice.md) | Measured results from the trained slice |
+| [`docs/backlog.md`](docs/backlog.md) | M0–M11 with acceptance evidence, and the next milestone |
+| [`docs/evidence.md`](docs/evidence.md) | Sources, with what each does *not* establish |
+| [`docs/scenarios.md`](docs/scenarios.md) | Capability targets A–G beyond the waterfall |
+| [`docs/history/orrery/`](docs/history/orrery/) | The superseded ORRERY specification, preserved unaltered |
 
-[`12`](spec/12-blueprint-reconciliation.md) is worth reading even out of order. An alternative
-architecture document was supplied during design; several of its mechanisms were better than what
-this spec originally had and were adopted (Clifford multivector latents, ND-RoPE, attention sinks,
-PonderNet-style halting). Its worked example also contained six mutually inconsistent quantities that
-no part of its architecture would have caught — which is the clearest available argument for the
-verification gates in [`03`](spec/03-physics.md) and [`04`](spec/04-generation.md).
+## Run it
 
----
+```bash
+pip install numpy torch pytest jsonschema
+python3 -m pytest                                     # 136 tests, all passing
+python3 experiments/run_first_slice.py --steps 4000  # trains, evaluates, reconciles
+python3 -m iridium.model.inventory                 # parameter and cache accounting
+```
 
-## The canonical query, traced end to end
+## Layout
 
-> *"Here's a simulation of fluid going down a waterfall. Calculate the flow if I double the input
-> water, then give me an accurate physics-based video and a short report."*
+```
+docs/          canonical architecture, decisions, evidence, backlog, history
+schemas/       event, action, result manifest, coupling interface (JSON Schema, enforced)
+iridium/
+  contracts/   units, typed frames, events + exact array store, metric reconciliation
+  model/       dense recurrent core, stopping-time semantics, parameter inventory
+  physics/     conservative finite-volume updates, open-system budgets
+  data/        episode generation
+  training/    the first slice
+tests/         unit / integration / scientific
+experiments/   runnable experiments and their recorded results
+configs/       prototype, pilot, flagship
+```
 
-This query is the spec's test case because it exercises every subsystem and because the obvious
-architecture answers it wrongly and confidently.
+## Three ideas the design turns on
 
-**1 · Ingest** — [`01`](spec/01-representation.md)
-The uploaded simulation arrives as fields on a mesh. Each cell becomes one latent stamped with its
-true position `(t, x, y, z)` in metres and seconds, its type (`field-cell`), and a dimension vector
-marking it as a velocity (`L¹T⁻¹`), a pressure (`M¹L⁻¹T⁻²`), or a density (`M¹L⁻³`). The prompt text
-becomes latents in the same stream with sequence positions. Nothing is converted, captioned, or
-handed to a subsystem — the fluid and the sentence are adjacent tokens in one sequence.
+**Exact arrays beneath lossy learned representations.** Compressed latents are for reasoning;
+the authoritative numbers stay in typed binary storage and survive round-trip bit-exactly. A
+hidden vector is never the only record of a scientific result.
 
-**2 · Nondimensionalize** — [`01`](spec/01-representation.md)
-The trunk reads the geometry and the dimension vectors and forms the governing dimensionless groups:
-Reynolds, Froude, Weber. The scenario is now a *point in Π-space* rather than a specific waterfall.
+**Conservation by construction, not by hope.** A learned correction applied per cell can
+invent mass. The same correction applied to *oriented shared faces* cannot, because each face
+enters two cells with opposite sign and the interior telescopes. Both are demonstrated in
+`tests/scientific/test_conservation.py`, and the trained slice reproduces it with a learned
+correction at 9.5e-09 relative drift while its unconstrained control drifts 1.8%.
 
-**3 · Locate the request** — [`03`](spec/03-physics.md)
-"Double the input water" is not a doubling of Reynolds number — it is a coupled move along Re and Fr
-with a free-surface height change. The model computes the new Π-point and measures its distance from
-the training manifold. This is the decision that everything downstream depends on, and it is a
-*measured* distance, not a vibe.
+**Evidence is earned, not labelled.** Illustrative, learned estimate, numerically verified and
+empirically validated are four different claims. The result manifest schema refuses a
+`numerically_verified` artifact without a verification record, and every numeral in a report
+must resolve to an exact metric table — a check whose regression fixture is a real
+contradiction that human review missed.
 
-**4 · Choose a tier** — [`03`](spec/03-physics.md)
-Near the manifold, Tier A answers in one forward pass: the fused differentiable solver runs a coarse
-integration and the trunk predicts a correction plus closure parameters. Far from it — which a
-doubled inflow on a turbulent free surface usually is — the model escalates to Tier B: it writes a
-real solver configuration, runs it as code, and checks continuity and momentum residuals plus grid
-convergence before believing the result. Neither tier is a different model. Tier B is a numerical
-program, which is exactly the tool use the constraints permit.
+## What this deliberately does not claim
 
-**5 · Render, don't dream** — [`04`](spec/04-generation.md)
-The solved velocity and density fields are rasterized by a differentiable renderer. The video is a
-*view* of the verified field. Motion vectors are not extracted from the video; the video is derived
-from them. This is why the word "accurate" survives contact with the output.
+- That it scales. One trained slice at 0.8 M parameters says nothing about the ~992 B
+  flagship configuration.
+- That native physics works in general. The trained flux head does beat a first-order upwind
+  solver in distribution (0.056 vs 0.113 NRMSE) — but it **collapses out of distribution**
+  (1.48, barely better than persistence, while the solver degrades only to 0.21). Both numbers
+  are in [`docs/first-slice.md`](docs/first-slice.md); the second is why escalation exists.
+- That attention can flow between concurrent users. That one reading of "one instance" is
+  rejected as a cross-tenant read; everything else about persistence is kept.
+- That "understands everything" has been decomposed into anything finite. It has no
+  acceptance test, so the backlog replaces it with expanding measured competence.
 
-**6 · Report** — [`04`](spec/04-generation.md)
-Text decodes from the same trunk that holds the solved field in context — so the report describes
-*this* solve, with its actual numbers, and states which tier produced it, what the residuals were,
-and how far outside the training distribution the query sat. A model that cannot say "I extrapolated
-1.8 Π-units past my data and here's the residual" should not be trusted with the question.
-
-**7 · Allocate** — [`06`](spec/06-runtime.md)
-Throughout, the stream holds a recursion budget. Cells in the turbulent shear layer recurse deep;
-the report's boilerplate exits shallow. The Tier B solve runs asynchronously while the resident
-instance keeps serving other streams — the model is never "busy," only differently weighted.
-
----
-
-## Status
-
-Specification only. No implementation in this repository. Every number in these documents traces to
-[`references.md`](references.md), and every claim that is a bet rather than a finding is labelled as
-one.
+Prior errors — including three arithmetic and scope errors made in this project's own earlier
+analysis — are recorded in [`docs/decisions.md`](docs/decisions.md) D25–D28 rather than
+quietly fixed.

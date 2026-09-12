@@ -1,0 +1,26 @@
+# iridium-1-prototype — proposed experiment configuration, not a product.
+# Parameter counts are verified by tests/unit/test_inventory.py.
+name: iridium-1-prototype
+transformer:
+  d_model: 1024
+  n_prelude: 2
+  n_core: 8
+  n_coda: 2
+  d_ff: 2816
+  n_query_heads: 16
+  n_kv_heads: 4
+  d_head: 64
+  transformer_params: 135266304
+recurrence:
+  policy: fixed          # fixed depth first; adaptive only after §4.4 gates pass
+  depth: 2
+  max_recurrence: 8
+cache:
+  key: [weight_version, workspace, prefix_revision, layer, recurrence, mask_version, codec_version]
+  reference: uncached_recompute
+  parity_tolerance: {rtol: 1.0e-5, atol: 1.0e-5, reference_dtype: float32}
+generation:
+  continuous_objective: conditional_flow_matching
+  flow_steps: measured          # never a fixed promise; see §5.1
+evidence:
+  default_level: illustrative   # raised only by verifier records
