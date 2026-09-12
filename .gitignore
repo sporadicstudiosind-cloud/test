@@ -1,4 +1,6 @@
 __pycache__/
-*.py[cod]
+*.pyc
 .pytest_cache/
-*.pt
+*.egg-info/
+runs/
+checkpoints/
