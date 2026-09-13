@@ -37,6 +37,10 @@ def main(argv=None) -> int:
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--out", default="runs/phase1")
     ap.add_argument("--eval-per-family", type=int, default=24)
+    ap.add_argument("--checkpoint-every", type=int, default=0,
+                    help="periodic checkpoints; a long run that is killed "
+                         "without one loses everything, which is how the "
+                         "first attempt at this run ended")
     args = ap.parse_args(argv)
 
     torch.set_num_threads(args.threads)
@@ -55,6 +59,7 @@ def main(argv=None) -> int:
         steps=args.steps, batch_size=args.batch_size, lr=args.lr,
         n_loops=args.n_loops, seed=args.seed, label="phase1",
         log_every=max(args.steps // 60, 1),
+        checkpoint_every=args.checkpoint_every,
     )
     trainer = Trainer(model, train, tcfg, LossWeights(), out_dir=Path(args.out))
 

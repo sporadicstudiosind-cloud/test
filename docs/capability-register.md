@@ -31,7 +31,43 @@ checked.
 | Spectral axis typing (wavelength ≠ audio freq ≠ mode) | specified | schema field only; no test — backlog |
 | Mesh topology, boundary types, discretization conversions | specified | — |
 
-## Model
+## Routed architecture (control core + superstacks)
+
+| Capability | Status | Evidence |
+|---|---|---|
+| Control core, two stages, indexed ponder loop | implemented | `tests/integration/test_kv_parity.py` |
+| Causal macro-router: top-k stacks, focus, halting | implemented | `tests/unit/test_router.py` |
+| Superstacks with sparse stack-local KV + core bridge | implemented | `test_kv_parity.py` (bit-exact at one loop) |
+| PonderNet depth ladder inside a stack | implemented | `test_torch_stopping_matches_the_numpy_contract` |
+| Span-coherent routing keeps field grids whole | implemented | `grid_intact_fraction`: 0% per-token, 100% span-coherent |
+| Spectral operator, correct corner blocks, 1/2/3-D | implemented | shift-equivariant to 3e-16; exactly resolution-invariant |
+| Parameter/memory accounting to 9 T | implemented | formula == modules, delta 0 (`test_config_inventory.py`) |
+| Omnimodal codecs: 8 modalities in and out | implemented | `tests/integration/test_model.py`, patchify round-trip exact |
+| Flow-matching continuous heads | implemented | trains; sample quality not evaluated |
+| Capacity-based token dropping | **unsupported** | refused as non-causal (`test_capacity_dropping_is_refused_as_non_causal`) |
+| Per-token ponder granularity (copy-through KV) | specified | `model/iridium1.py` docstring; chunk-uniform implemented instead |
+| Distributed dispatcher across nodes | specified | `parallel/plan.py` costs it; no implementation |
+| Any capability at micro/small/base/extreme rungs | **unsupported** | costed, never built |
+
+## Physics, runtime and agency
+
+| Capability | Status | Evidence |
+|---|---|---|
+| Pseudo-spectral incompressible Navier-Stokes | implemented | Taylor-Green to 6e-15 relative; divergence 1e-14 |
+| Leray projection as a hard constraint | implemented | idempotent to 7e-16 (after the Nyquist fix, F-15) |
+| Open-channel flow; Manning and critical depth | implemented | converges to analytic normal depth from both sides |
+| The doubling intervention, end to end | evaluated | measured 1.515647 vs analytic 1.515717 |
+| Dual-system escalation with an evidence ladder | implemented | `physics/verifier.py`; drifting prediction escalates |
+| Resource-limited sandbox | implemented | timeout, memory, network, env-scrub all blocked |
+| Sandbox with seccomp / filesystem namespace | **unsupported** | `SandboxResult.isolation` records their absence |
+| Per-stream isolation, no cross-stream state | implemented | output bit-identical with and without neighbours |
+| Focus-weighted scheduling with fairness floor | implemented | budget conserved; per-owner cap holds |
+| Typed action space; deterministic scene editor | implemented | every op has a checked bpy translation |
+| Real Blender actuation (`bpy` in the loop) | specified | script emitted, never executed here |
+| MXFP4 / FP8 quantization, measured | implemented | 4.25 bits/param; SQNR 18.9 / 31.5 dB |
+| Report reconciliation against an exact metric table | implemented | malformed markers now fail the gate too |
+
+## Model (dense reference, retained)
 
 | Capability | Status | Evidence |
 |---|---|---|

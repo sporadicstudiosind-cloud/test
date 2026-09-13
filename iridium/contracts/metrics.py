@@ -76,6 +76,14 @@ class Finding:
 # A bound claim looks like {{metric:key}} or {{metric:key|3 significant digits}}.
 _CLAIM = re.compile(r"\{\{metric:([A-Za-z0-9_.\-]+)(?:\|([^}]*))?\}\}")
 
+# Anything that opens a claim. A marker that opens but does not parse - a typo
+# in the format separator, an unclosed brace - would otherwise be invisible to
+# both `render` and `reconcile`: the substitution never fires, so the numeral
+# never appears in the prose, so the bare-number scan finds nothing to object
+# to, and a report containing no numbers at all passes the release gate
+# reporting zero findings. Found exactly that way. See `_MALFORMED` below.
+_CLAIM_OPEN = re.compile(r"\{\{\s*metric\b[^}]*\}*")
+
 # A bare number, optionally followed by a unit token. Used to find prose
 # numerals that were never bound to the table.
 _BARE_NUMBER = re.compile(
@@ -123,6 +131,18 @@ def reconcile(
     structural constant, or (c) sit in a structural context such as "Section 3".
     """
     findings: list[Finding] = []
+
+    for match in _CLAIM_OPEN.finditer(report_text):
+        if not _CLAIM.fullmatch(match.group(0)):
+            findings.append(
+                Finding(
+                    "malformed_claim",
+                    match.group(0),
+                    "claim marker did not parse, so no value was substituted; "
+                    "the separator before a format spec is '|', as in "
+                    "{{metric:key|.4f}}",
+                )
+            )
 
     for match in _CLAIM.finditer(report_text):
         findings.append(

@@ -151,3 +151,33 @@ def test_unregistered_unit_does_not_silently_match_wrong_dimension():
     t.add(MetricEntry("q", 3.0, "m3/s", "src", REV))
     # Right number, wrong registered unit -> still flagged.
     assert reconcile(t, "The discharge is 3 kg/s.") != []
+
+
+def test_a_malformed_claim_marker_fails_the_gate():
+    """A typo in a claim marker must not vanish silently.
+
+    Found in ``examples/waterfall.py``: the format separator was written as
+    ``:`` instead of ``|``, so no marker matched. ``render`` substituted
+    nothing, the numerals never reached the prose, the bare-number scan found
+    nothing to object to, and a report containing no numbers at all was
+    released with zero findings. The gate has to notice a marker that opens
+    and does not parse.
+    """
+    from iridium.contracts.metrics import MetricEntry, MetricTable, reconcile
+
+    table = MetricTable(scenario_revision="r1")
+    table.add(MetricEntry(key="depth", value=1.5157, unit="m",
+                          source="a.npy", scenario_revision="r1"))
+    findings = reconcile(table, "The depth is {{metric:depth:.4f}}.")
+    assert any(f.kind == "malformed_claim" for f in findings)
+
+
+def test_a_well_formed_claim_renders_and_reconciles():
+    from iridium.contracts.metrics import MetricEntry, MetricTable, reconcile, render
+
+    table = MetricTable(scenario_revision="r1")
+    table.add(MetricEntry(key="depth", value=1.5157, unit="m",
+                          source="a.npy", scenario_revision="r1"))
+    text = render(table, "The depth is {{metric:depth|.4f}}.")
+    assert "1.5157 m" in text
+    assert reconcile(table, text) == []
