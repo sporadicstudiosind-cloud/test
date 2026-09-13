@@ -68,8 +68,9 @@ class NavierStokes2D:
         self.kx = np.broadcast_to(kx, (n, n)).copy()
         self.ky = np.broadcast_to(ky, (n, n)).copy()
         self.k2 = self.kx ** 2 + self.ky ** 2
-        self.k2_safe = self.k2.copy()
-        self.k2_safe[0, 0] = 1.0
+        # Every zero of k2 must be guarded, not just the mean mode: with the
+        # Nyquist multiplier zeroed, k2 vanishes on that row and column too.
+        self.k2_safe = np.where(self.k2 == 0.0, 1.0, self.k2)
         cutoff = (2.0 / 3.0) * np.max(np.abs(wavenumbers(n, length)))
         self.mask = (
             (np.abs(self.kx) <= cutoff) & (np.abs(self.ky) <= cutoff)

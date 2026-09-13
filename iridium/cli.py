@@ -1,0 +1,227 @@
+"""``python -m iridium <command>`` — one entry point for the whole system."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+def cmd_ladder(args) -> int:
+    from .config import ladder_table
+    print(ladder_table())
+    return 0
+
+
+def cmd_report(args) -> int:
+    from .config import get_config
+    cfg = get_config(args.rung)
+    print(cfg.report().render())
+    print()
+    lo, hi = cfg.flops_per_token()
+    print(f"  forward FLOPs/token   {lo / 1e9:,.2f} - {hi / 1e9:,.2f} GFLOP")
+    print(f"  KV bytes/token        {cfg.kv_bytes_per_token(cfg.router.max_loops):,}")
+    for bits, label in ((16.0, "BF16"), (8.0, "FP8"), (4.25, "MXFP4")):
+        print(f"  weights @ {label:<6}      {cfg.weight_bytes(bits) / 1e12:,.4f} TB")
+    if args.verify:
+        import torch
+        from .model.iridium1 import Iridium1
+        actual = sum(p.numel() for p in Iridium1(cfg).parameters())
+        print(f"  instantiated          {actual:,} (delta {actual - cfg.n_params:+,})")
+    return 0
+
+
+def cmd_plan(args) -> int:
+    from .parallel.plan import Accelerator, Cluster, minimum_gpus_for_training, plan
+    from .config import get_config
+    accel = {"b200": Accelerator.b200, "h200": Accelerator.h200}[args.accelerator]()
+    cluster = Cluster(accel, args.gpus, mfu=args.mfu)
+    result = plan(
+        args.rung, cluster, training=args.training,
+        context_tokens=args.context, bridge_strategy=args.bridge,
+    )
+    print(result.render())
+    if args.training:
+        cfg = get_config(args.rung)
+        print(f"  minimum {accel.name}s for weights+grads+Adam: "
+              f"{minimum_gpus_for_training(cfg, accel):,}")
+    return 0
+
+
+def cmd_quant(args) -> int:
+    import torch
+    from .quant.mxfp4 import bits_per_param, measure
+    from .config import get_config
+    cfg = get_config(args.rung)
+    print(f"{cfg.name}: {cfg.n_params:,} parameters")
+    print(f"  MXFP4 block {args.block}: {bits_per_param(args.block)} bits/param")
+    for bits, label in ((16.0, "BF16"), (8.0, "FP8 E4M3"),
+                        (bits_per_param(args.block), "MXFP4")):
+        print(f"  {label:<12} {cfg.weight_bytes(bits) / 1e12:10.4f} TB")
+    torch.manual_seed(0)
+    sample = torch.randn(2048, 512) * 0.02
+    for mode in ("mxfp4", "fp8", "bf16"):
+        s = measure(sample, args.block, mode)
+        print(f"  {mode:<6} SQNR {s.sqnr_db:6.2f} dB   relative L2 {s.relative_l2:.5f}")
+    return 0
+
+
+def cmd_waterfall(args) -> int:
+    from .physics.shallow_water import Channel, intervention
+    ch = Channel(length=args.length, n_cells=args.cells, slope=args.slope,
+                 manning=args.manning)
+    result = intervention(
+        ch, args.q, args.q * args.factor, max_time=args.max_time, tol=1e-8,
+        initial_depth=args.initial_depth,
+    )
+    print(json.dumps(result, indent=2, default=float))
+    return 0
+
+
+def cmd_fluid(args) -> int:
+    import numpy as np
+    from .physics.fluid2d import NavierStokes2D, taylor_green
+    solver = NavierStokes2D(args.n, nu=args.nu)
+    state = taylor_green(args.n, 0.0, args.nu)
+    dt = args.dt
+    for _ in range(int(args.time / dt)):
+        state = solver.step(state, dt)
+    exact = taylor_green(args.n, state.t, args.nu)
+    err = float(np.sqrt(np.mean((state.u - exact.u) ** 2 + (state.v - exact.v) ** 2)))
+    ref = float(np.sqrt(np.mean(exact.u ** 2 + exact.v ** 2)))
+    print(json.dumps({
+        "t": state.t, "relative_l2_vs_exact": err / ref,
+        **solver.diagnostics(state)
+    }, indent=2))
+    return 0
+
+
+def cmd_serve(args) -> int:
+    import torch
+    from .codecs.spans import Sample, text_span
+    from .config import get_config
+    from .model.iridium1 import Iridium1
+    from .runtime.scheduler import SchedulerPolicy
+    from .runtime.service import IridiumService
+    from .training.trainer import load_checkpoint
+
+    if args.checkpoint:
+        model, _ = load_checkpoint(args.checkpoint)
+    else:
+        torch.manual_seed(0)
+        model = Iridium1(get_config(args.rung)).eval()
+    service = IridiumService(model, SchedulerPolicy(token_budget=args.budget))
+    for i, prompt in enumerate(args.prompt or ["hello from stream one"]):
+        service.admit(f"stream-{i}", f"owner-{i % 2}", Sample([text_span(prompt)]))
+    for report in service.run(max_ticks=args.ticks):
+        print(report.summary())
+    print(json.dumps(service.status(), indent=2))
+    return 0
+
+
+def cmd_generate(args) -> int:
+    from .codecs.spans import Sample, text_span
+    from .runtime.generate import generate
+    from .training.trainer import load_checkpoint
+    model, _ = load_checkpoint(args.checkpoint)
+    sample = Sample([text_span(args.prompt, offset=16)])
+    out = generate(model, sample, max_new_tokens=args.max_new_tokens,
+                   temperature=args.temperature)
+    print(json.dumps({
+        "prompt": args.prompt, "output": out.text, "stopped": out.stopped,
+        "mean_focus": out.mean_focus,
+    }, indent=2))
+    return 0
+
+
+def cmd_evaluate(args) -> int:
+    from .evaluation.harness import evaluate
+    from .training.datasets import build_corpus
+    from .training.trainer import load_checkpoint
+    model, manifest = load_checkpoint(args.checkpoint)
+    results = {}
+    for split in ("test", "extrapolation"):
+        corpus = build_corpus(args.items, seed=1234, split=split)
+        results[split] = evaluate(model, corpus, args.per_family)
+    print(json.dumps(results, indent=2))
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="iridium", description=__doc__)
+    sub = ap.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("ladder", help="the whole configuration ladder")
+    p.set_defaults(func=cmd_ladder)
+
+    p = sub.add_parser("report", help="parameter and memory report for a rung")
+    p.add_argument("rung", default="nano", nargs="?")
+    p.add_argument("--verify", action="store_true",
+                   help="instantiate the model and compare the counts")
+    p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("plan", help="4-D parallelism plan and cost model")
+    p.add_argument("rung", default="base", nargs="?")
+    p.add_argument("--gpus", type=int, default=1024)
+    p.add_argument("--accelerator", choices=("b200", "h200"), default="b200")
+    p.add_argument("--mfu", type=float, default=0.35)
+    p.add_argument("--context", type=int, default=32768)
+    p.add_argument("--training", action="store_true")
+    p.add_argument("--bridge", choices=("broadcast", "cache_kv", "colocate"),
+                   default="cache_kv")
+    p.set_defaults(func=cmd_plan)
+
+    p = sub.add_parser("quant", help="quantization memory and error")
+    p.add_argument("rung", default="base", nargs="?")
+    p.add_argument("--block", type=int, default=32)
+    p.set_defaults(func=cmd_quant)
+
+    p = sub.add_parser("waterfall", help="the open-channel intervention")
+    p.add_argument("--q", type=float, default=3.0)
+    p.add_argument("--factor", type=float, default=2.0)
+    p.add_argument("--slope", type=float, default=0.002)
+    p.add_argument("--manning", type=float, default=0.030)
+    p.add_argument("--length", type=float, default=100.0)
+    p.add_argument("--cells", type=int, default=200)
+    p.add_argument("--max-time", type=float, default=20000.0)
+    p.add_argument("--initial-depth", type=float, default=0.5)
+    p.set_defaults(func=cmd_waterfall)
+
+    p = sub.add_parser("fluid", help="Taylor-Green validation of the NS solver")
+    p.add_argument("--n", type=int, default=32)
+    p.add_argument("--nu", type=float, default=0.05)
+    p.add_argument("--dt", type=float, default=0.005)
+    p.add_argument("--time", type=float, default=0.5)
+    p.set_defaults(func=cmd_fluid)
+
+    p = sub.add_parser("serve", help="run the persistent instance on some streams")
+    p.add_argument("--rung", default="nano")
+    p.add_argument("--checkpoint", default="")
+    p.add_argument("--prompt", action="append")
+    p.add_argument("--budget", type=int, default=64)
+    p.add_argument("--ticks", type=int, default=8)
+    p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("generate", help="continue a prompt from a checkpoint")
+    p.add_argument("checkpoint")
+    p.add_argument("prompt")
+    p.add_argument("--max-new-tokens", type=int, default=16)
+    p.add_argument("--temperature", type=float, default=0.0)
+    p.set_defaults(func=cmd_generate)
+
+    p = sub.add_parser("evaluate", help="graded accuracy on held-out splits")
+    p.add_argument("checkpoint")
+    p.add_argument("--items", type=int, default=300)
+    p.add_argument("--per-family", type=int, default=24)
+    p.set_defaults(func=cmd_evaluate)
+    return ap
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

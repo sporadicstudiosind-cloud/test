@@ -10,8 +10,35 @@ from __future__ import annotations
 import numpy as np
 
 
-def wavenumbers(n: int, length: float = 2.0 * np.pi) -> np.ndarray:
-    return 2.0 * np.pi * np.fft.fftfreq(n, d=length / n)
+def wavenumbers(
+    n: int, length: float = 2.0 * np.pi, zero_nyquist: bool = True
+) -> np.ndarray:
+    """Angular wavenumbers, with the Nyquist mode zeroed by default.
+
+    **Why the Nyquist mode must be zeroed for odd-order operators.** On an even
+    grid, ``fftfreq`` assigns ``-n/2`` to the bin at the Nyquist frequency, but
+    that bin is its own conjugate partner: ``+n/2`` and ``-n/2`` are the same
+    coefficient. A multiplier that is *odd* in ``k`` - which every first
+    derivative is - therefore cannot be Hermitian there, whichever sign is
+    chosen. The transform of a real field then comes back with a large
+    imaginary part, and ``np.real(...)`` silently discards it.
+
+    The damage is not subtle. Leray projection is exact in spectral space
+    (residual 2e-13) and then loses it entirely on the way back to physical
+    space: measured divergence of a projected random field went from 2e-13 to
+    443 purely through that discarded component, and the projection stopped
+    being idempotent. Taylor-Green hides it completely, because a two-mode
+    analytic flow has no Nyquist content - which is exactly why validating
+    only against smooth analytic solutions is not enough.
+
+    Zeroing the Nyquist multiplier is the standard treatment: the first
+    derivative of a real field at that mode is not representable on the grid,
+    so the honest value is zero rather than an arbitrary sign.
+    """
+    k = 2.0 * np.pi * np.fft.fftfreq(n, d=length / n)
+    if zero_nyquist and n % 2 == 0:
+        k[n // 2] = 0.0
+    return k
 
 
 def grid(n: int, length: float = 2.0 * np.pi) -> tuple[np.ndarray, np.ndarray]:
@@ -72,7 +99,10 @@ def project_divergence_free(
     kx = wavenumbers(n, length).reshape(-1, 1)
     ky = wavenumbers(u.shape[1], length).reshape(1, -1)
     k2 = kx ** 2 + ky ** 2
-    k2[0, 0] = 1.0
+    # Zeroing the Nyquist multiplier makes k2 vanish on the whole Nyquist row
+    # and column, not only at the mean mode. Guarding [0, 0] alone leaves
+    # divisions by zero on an even grid.
+    k2 = np.where(k2 == 0.0, 1.0, k2)
     uh, vh = np.fft.fft2(u), np.fft.fft2(v)
     dot = kx * uh + ky * vh
     uh -= kx * dot / k2

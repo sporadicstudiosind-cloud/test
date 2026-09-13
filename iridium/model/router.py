@@ -206,6 +206,14 @@ class MacroRouter(nn.Module):
         ``f_i`` counts *every* dispatch, not only the top-1 choice, and is
         normalized so that ``sum_i f_i == 1`` — otherwise the minimum of the
         objective moves with ``k`` and the coefficient stops meaning anything.
+
+        What this term actually penalises is the *correlation* between dispatch
+        frequency and router probability, not unevenness as such. When ``P`` is
+        uniform the value is exactly ``alpha`` whatever ``f`` does, because
+        ``sum_i f_i P_i = (1/N) sum_i f_i``. That is the intended behaviour —
+        ``f`` comes from a ``topk`` and carries no gradient, so the only thing
+        the optimizer can move is ``P``, and the term should bite exactly when
+        the router is both confident and concentrated.
         """
         n = self.n_stacks
         dispatched = F.one_hot(index, n).sum(2).float()          # [B, T, N]
