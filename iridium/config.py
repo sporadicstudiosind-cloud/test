@@ -712,6 +712,51 @@ def _ladder() -> dict[str, IridiumConfig]:
         notes="Trained rung. Every claim in docs/results.md comes from here.",
     )
 
+    # -- test1b: the smallest rung with the *full* stack geometry. --------
+    # Five general-purpose superstacks rather than 32 domain ones, a core
+    # narrow enough to instantiate on a laptop, and every mechanism of the
+    # base configuration present: two-stage core, top-2 macro-routing, the
+    # bridge, the focus ladder, the ponder loop, spectral blocks in the
+    # science stack. This is the rung to point a smoke test at when the
+    # question is "does the architecture hold together at a real size".
+    rungs["test1b"] = IridiumConfig(
+        name="iridium-1-test1b",
+        core=CoreConfig(
+            d_model=768, n_layers=16, n_query_heads=12, n_kv_heads=4,
+            d_head=64, d_ff=2048,
+        ),
+        stacks=SuperstackConfig(
+            n_stacks=5,
+            n_layers=26,            # deeper than the core, as the design requires
+            d_model=768,
+            n_query_heads=12,
+            n_kv_heads=4,
+            d_head=64,
+            d_ff=2048,
+            cross_stride=8,
+            spectral_stride=8,
+            spectral_modes=16,
+            spectral_channels=64,
+            spectral_stacks=(0,),
+            min_depth=4,
+            specializations=(
+                "science_physics_simulation",
+                "mathematics_symbolic_proof",
+                "code_systems_tools",
+                "language_reasoning_intent",
+                "perception_geometry_action",
+            ),
+        ),
+        router=RouterConfig(top_k=2, max_loops=3),
+        codecs=CodecConfig(vocab_size=32_768),
+        max_seq_len=4096,
+        notes=(
+            "1.00 B test rung: 5 general superstacks, full mechanism set. "
+            "Instantiates and runs on CPU; fp32 Adam does not fit in 15 GB, "
+            "so it is trained through LoRA adapters."
+        ),
+    )
+
     # -- micro: one modern accelerator. -----------------------------------
     rungs["micro"] = IridiumConfig(
         name="iridium-1-micro",
