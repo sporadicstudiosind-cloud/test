@@ -148,7 +148,8 @@ async function send() {
   $("send").disabled = true;
   addMessage("user", prompt);
   $("prompt").value = "";
-  const pending = addMessage("assistant", "…", "running the forward pass");
+  const pending = addMessage("assistant", "…",
+    "running the forward pass — first request after a deploy can take ~20 s");
   try {
     const res = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -159,8 +160,25 @@ async function send() {
         loops: +$("loops").value,
       }),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || res.statusText);
+    // Never surface a blank reason. HTTP/2 leaves `statusText` empty, and a
+    // proxy error (a 502 while the container restarts) is HTML or a JSON shape
+    // this endpoint never produces - both used to render as "request failed:"
+    // with nothing after it.
+    const raw = await res.text();
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      throw new Error(
+        res.status === 502 || res.status === 503
+          ? `${res.status} — the model container is restarting. Give it ~30 s and try again.`
+          : `${res.status} — unexpected response: ${raw.slice(0, 120) || "(empty body)"}`
+      );
+    }
+    if (!res.ok) {
+      throw new Error(data.error ? `${res.status} — ${data.error}`
+                                 : `${res.status} — ${data.message || "request rejected"}`);
+    }
     pending.querySelector(".body").textContent =
       data.text && data.text.trim() ? data.text : "(emitted no printable bytes)";
     pending.querySelector(".meta").textContent =
@@ -169,8 +187,11 @@ async function send() {
       `${data.telemetry.stacks_used}/${data.telemetry.routing.length} stacks used`;
     renderTelemetry(data);
   } catch (err) {
-    pending.querySelector(".body").textContent = "request failed: " + err.message;
-    pending.querySelector(".meta").textContent = "";
+    const why = (err && err.message) ? err.message
+      : "the request did not complete (network error or the container went away)";
+    pending.querySelector(".body").textContent = "request failed — " + why;
+    pending.querySelector(".meta").textContent =
+      "nothing was computed; the telemetry panel still shows the last successful run";
   } finally {
     $("send").disabled = false;
     $("prompt").focus();
