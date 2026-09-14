@@ -27,6 +27,9 @@ class LossWeights:
     audio: float = 0.5
     field: float = 1.0
     geometry: float = 0.5
+    # The quantity head carries the answer on the numeric families, so it is
+    # weighted above the modelling losses that only have to predict context.
+    quantity: float = 3.0
     slot_type: float = 0.2
     router_balance: float = 1.0
     router_z: float = 1.0

@@ -30,7 +30,7 @@ from urllib.parse import parse_qs, urlparse
 
 import torch
 
-from iridium.codecs.spans import Sample, text_span
+from iridium.codecs.spans import Sample, quantity_span, text_span
 from iridium.config import IridiumConfig, get_config
 from iridium.model.iridium1 import Iridium1
 from iridium.runtime.generate import generate
@@ -156,6 +156,164 @@ def available() -> list[dict]:
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# typed physics queries
+# --------------------------------------------------------------------------
+
+import re as _re
+
+_NUM = r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?"
+_PARAM = _re.compile(rf"\b(S|n|q|x|factor)\s*=?\s*({_NUM})", _re.I)
+
+QUERY_HELP = (
+    "Ask for a number and it answers with one. Two forms:\n"
+    "  normal depth | S=0.0020 n=0.030 q=3.0\n"
+    "  depth ratio  | S=0.0020 n=0.030 q=3.0 x2.0\n"
+    "Anything else is read as a claim and gets a TRUE/FALSE verdict."
+)
+
+
+def parse_query(text: str) -> dict:
+    """Read a physics query into typed quantities, or fall back to a claim."""
+    params: dict[str, float] = {}
+    for key, value in _PARAM.findall(text):
+        key = key.lower()
+        key = "x" if key == "factor" else key
+        try:
+            params[key] = float(value)
+        except ValueError:
+            continue
+    lowered = text.lower()
+    wants_ratio = ("ratio" in lowered or "double" in lowered or "x" in params)
+    if {"s", "n", "q"} <= set(params):
+        if wants_ratio:
+            factor = params.get("x", 2.0)
+            return {"kind": "ratio", "slope": params["s"], "manning": params["n"],
+                    "discharge": params["q"], "factor": factor}
+        return {"kind": "depth", "slope": params["s"], "manning": params["n"],
+                "discharge": params["q"]}
+    return {"kind": "verdict", "claim": text}
+
+
+def analytic(query: dict) -> dict:
+    """The exact answer, so the model's number can be checked, not believed."""
+    from iridium.physics.shallow_water import critical_depth, normal_depth
+
+    if query["kind"] == "depth":
+        value = normal_depth(query["discharge"], query["slope"], query["manning"])
+        return {"value": value, "law": "Manning normal depth  h = (q n / sqrt(S))^(3/5)",
+                "unit": "m",
+                "also": {"critical_depth_m": critical_depth(query["discharge"])}}
+    if query["kind"] == "ratio":
+        f = query["factor"]
+        return {"value": f ** 0.6, "unit": "1",
+                "law": "normal-depth ratio  = factor^(3/5)",
+                "also": {"critical_depth_ratio": f ** (2.0 / 3.0),
+                         "velocity_ratio": f ** 0.4,
+                         "naive_answer": f}}
+    return {}
+
+
+def build_sample(query: dict) -> Sample:
+    from iridium.training.tasks import BOS, SEP, control_span, encode_text
+
+    if query["kind"] == "depth":
+        return Sample([
+            control_span(BOS),
+            encode_text("normal depth", supervised=False),
+            quantity_span([("slope", query["slope"]), ("manning", query["manning"]),
+                           ("discharge", query["discharge"])], supervised=False),
+            control_span(SEP),
+        ])
+    if query["kind"] == "ratio":
+        return Sample([
+            control_span(BOS),
+            encode_text("depth ratio", supervised=False),
+            quantity_span([("slope", query["slope"]), ("manning", query["manning"]),
+                           ("discharge", query["discharge"]),
+                           ("factor", query["factor"])], supervised=False),
+            control_span(SEP),
+        ])
+    return Sample([
+        control_span(BOS),
+        encode_text(query["claim"][:MAX_PROMPT], supervised=False),
+        control_span(SEP),
+    ])
+
+
+@torch.no_grad()
+def run_query(prompt: str, model_name: str, loops: int) -> dict:
+    """Answer a typed query with a number (or a verdict) plus the telemetry."""
+    from iridium.codecs.bank import TensorBatch, continuous_dims
+    from iridium.codecs.spans import collate
+    from iridium.runtime.decode import atomic_chunks, slice_batch
+    from iridium.training.tasks import VERDICT_FALSE, VERDICT_TRUE
+
+    entry = load(model_name)
+    model, cfg = entry["model"], entry["cfg"]
+    loops = max(1, min(int(loops), cfg.router.max_loops))
+    query = parse_query(prompt)
+    sample = build_sample(query)
+
+    dims = continuous_dims(cfg.codecs)
+    batch = TensorBatch(collate([sample], dims))
+    cache: dict = {}
+    started = time.time()
+    result = None
+    for lo, hi in atomic_chunks(batch, int(batch.modality.shape[1])):
+        result = model(slice_batch(batch, lo, hi), n_loops=loops, cache=cache)
+    elapsed = time.time() - started
+    hidden = result.hidden[:, -1:]
+
+    truth = analytic(query)
+    answer: dict = {"kind": query["kind"]}
+    if query["kind"] in ("depth", "ratio"):
+        log10_value = float(model.codecs.decode_continuous(hidden, "quantity")[0, 0, 0])
+        predicted = 10.0 ** log10_value
+        answer["predicted"] = predicted
+        answer["analytic"] = truth["value"]
+        answer["relative_error"] = abs(predicted - truth["value"]) / max(abs(truth["value"]), 1e-12)
+        answer["within_2pct"] = answer["relative_error"] <= 0.02
+        answer["law"] = truth["law"]
+        answer["unit"] = truth["unit"]
+        answer["also"] = truth["also"]
+    else:
+        logits = model.codecs.text_head(hidden)[0, 0]
+        answer["verdict"] = ("TRUE" if float(logits[VERDICT_TRUE]) > float(logits[VERDICT_FALSE])
+                             else "FALSE")
+        margin = float(logits[VERDICT_TRUE]) - float(logits[VERDICT_FALSE])
+        answer["margin"] = margin
+        answer["help"] = QUERY_HELP
+
+    stats = result.stats["stack_stats"][0]
+    tokens = stats["per_stack_tokens"]
+    total = max(sum(tokens), 1)
+    names = entry["specializations"] or [f"stack {i}" for i in range(cfg.stacks.n_stacks)]
+    return {
+        "query": query,
+        "answer": answer,
+        "seconds": elapsed,
+        "model": {"name": entry["name"], "label": entry["label"],
+                  "parameters": entry["parameters"], "trained": entry["trained"],
+                  "source": entry["source"], "caveat": entry["caveat"]},
+        "telemetry": {
+            "prompt_tokens": int(batch.valid.sum()),
+            "loops_requested": loops,
+            "expected_loops": float(result.expected_loops.mean()),
+            "mean_focus": float(result.decisions[0].focus.mean()),
+            "router_entropy": float(result.decisions[0].entropy()),
+            "stacks_used": int(sum(1 for t in tokens if t > 0)),
+            "max_depth": cfg.stacks.n_layers,
+            "routing": [
+                {"stack": i, "name": names[i].replace("_", " "),
+                 "tokens": int(tokens[i]), "share": tokens[i] / total,
+                 "expected_depth": round(stats["per_stack_expected_depth"][i], 3)}
+                for i in range(cfg.stacks.n_stacks)
+            ],
+        },
+    }
+
+
 @torch.no_grad()
 def run_chat(prompt: str, model_name: str, max_new_tokens: int,
              temperature: float, loops: int) -> dict:
@@ -255,7 +413,7 @@ class Handler(BaseHTTPRequestHandler):
         route = urlparse(self.path).path
         if route == "/api/health":
             return self._json(200, {
-                "ok": True, "loaded": sorted(_models),
+                "ok": True, "loaded": sorted(_models), "help": QUERY_HELP,
                 "torch": torch.__version__,
                 "threads": torch.get_num_threads(),
             })
@@ -281,7 +439,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         route = urlparse(self.path).path
-        if route != "/api/chat":
+        if route not in ("/api/chat", "/api/ask"):
             return self._json(404, {"error": "not found"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -299,6 +457,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": f"unknown model {name!r}"})
         try:
             with _lock:
+                if route == "/api/ask":
+                    return self._json(200, run_query(
+                        prompt, name, payload.get("loops", 1)
+                    ))
                 result = run_chat(
                     prompt, name,
                     payload.get("max_new_tokens", 24),

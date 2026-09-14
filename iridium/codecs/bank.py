@@ -41,6 +41,7 @@ def continuous_dims(cfg: CodecConfig) -> dict[str, int]:
         "audio": cfg.audio_mels * cfg.audio_frames,
         "field": cfg.field_channels * cfg.field_patch ** 2,
         "geometry": cfg.point_features,
+        "quantity": 3 + cfg.quantity_roles,
     }
 
 
@@ -85,20 +86,15 @@ class CodecBank(nn.Module):
             cfg.action_ops + cfg.action_scalars, d_model
         )
 
-        head_cls = FlowMatchingHead if cfg.continuous_head == "flow" else RegressionHead
-        if cfg.continuous_head == "flow":
-            self.decoders = nn.ModuleDict(
-                {
-                    name: FlowMatchingHead(
-                        d_model, dim, n_tau=cfg.flow_tau_features
-                    )
-                    for name, dim in self.dims.items()
-                }
-            )
-        else:
-            self.decoders = nn.ModuleDict(
-                {name: RegressionHead(d_model, dim) for name, dim in self.dims.items()}
-            )
+        decoders: dict[str, nn.Module] = {}
+        for name, dim in self.dims.items():
+            if name == "quantity":
+                decoders[name] = RegressionHead(d_model, 1)
+            elif cfg.continuous_head == "flow":
+                decoders[name] = FlowMatchingHead(d_model, dim, n_tau=cfg.flow_tau_features)
+            else:
+                decoders[name] = RegressionHead(d_model, dim)
+        self.decoders = nn.ModuleDict(decoders)
         self.head_kind = cfg.continuous_head
 
         self.text_head = TextHead(
@@ -207,8 +203,16 @@ class CodecBank(nn.Module):
             if not bool(mask.any()) or key not in tgt:
                 losses[name] = zero
                 continue
+            if name == "quantity":
+                # Supervise the log magnitude only; sign and role are inputs,
+                # not things to predict.
+                losses[name] = self.decoders[name].loss(
+                    h, tgt[key][..., :1], mask.to(h.dtype)
+                )
+                continue
             losses[name] = self.decoders[name].loss(
-                h, tgt[key], mask.to(h.dtype), **({"generator": generator} if self.head_kind == "flow" else {})
+                h, tgt[key], mask.to(h.dtype),
+                **({"generator": generator} if self.head_kind == "flow" else {}),
             )
 
         slot_logits = self.slot_type_head(h)
@@ -226,6 +230,8 @@ class CodecBank(nn.Module):
         generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         head = self.decoders[modality]
+        if modality == "quantity":
+            return head(hidden)
         if isinstance(head, FlowMatchingHead):
             return head.sample(hidden, steps=steps, generator=generator)
         return head(hidden)

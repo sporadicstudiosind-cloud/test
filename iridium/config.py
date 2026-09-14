@@ -348,8 +348,9 @@ class CodecConfig:
     point_features: int = 10
     action_ops: int = 24
     action_scalars: int = 6
+    quantity_roles: int = 16
     max_position: int = 8192
-    n_modalities: int = 8
+    n_modalities: int = 9
     tie_text_embedding: bool = True
     continuous_head: str = "flow"      # "flow" (CFM) or "regression" (MSE)
     flow_tau_features: int = 64
@@ -361,6 +362,7 @@ class CodecConfig:
             "audio": self.audio_mels * self.audio_frames,
             "field": self.field_channels * self.field_patch ** 2,
             "geometry": self.point_features,
+            "quantity": 3 + self.quantity_roles,
         }
 
     def _flow_head_params(self, d: int, d_out: int) -> int:
@@ -384,6 +386,12 @@ class CodecConfig:
         }
         for name, dim in dims.items():
             out[f"{name}_encoder"] = dim * d + d
+            if name == "quantity":
+                # A quantity decodes to one number - its log magnitude - not to
+                # a patch, and it is a regression rather than a flow: there is
+                # no distribution to sample here, there is an answer.
+                out["quantity_decoder"] = d + d * 1 + 1
+                continue
             out[f"{name}_decoder"] = (
                 self._flow_head_params(d, dim)
                 if self.continuous_head == "flow"

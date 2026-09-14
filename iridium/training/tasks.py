@@ -34,7 +34,9 @@ import numpy as np
 
 from ..agency.actions import Action, Op, actions_to_span_payload
 from ..agency.scene import Goal, SceneEditor, SceneState
-from ..codecs.spans import Sample, Span, patchify, text_span
+from ..codecs.spans import (
+    Sample, Span, decode_quantity, patchify, quantity_span, text_span,
+)
 from ..physics.fluid2d import NavierStokes2D, FluidState, taylor_green
 from ..physics.operators import vorticity
 from ..physics.shallow_water import (
@@ -47,6 +49,8 @@ from ..physics.shallow_water import (
 # Byte-level text with a small reserved block for control markers.
 TEXT_OFFSET = 16
 BOS, EOS, SEP, PAD_CTRL = 1, 2, 3, 4
+VERDICT_TRUE, VERDICT_FALSE = 5, 6
+VERDICT_NAME = {VERDICT_TRUE: "TRUE", VERDICT_FALSE: "FALSE"}
 
 TRAIN_DISCHARGE = (1.0, 8.0)
 EXTRAPOLATION_DISCHARGE = (9.0, 14.0)
@@ -98,52 +102,68 @@ def _fmt(value: float, places: int = 4) -> str:
 
 
 def channel_depth_item(rng: np.random.Generator, split: str = "train") -> Item:
+    """Manning normal depth, as a *quantity* problem rather than a string one.
+
+    Inputs enter through the quantity codec as values carrying roles; the
+    answer leaves through the quantity head as a number. Nothing is spelled out
+    in decimal digits, and that is the whole difference between this working
+    and not: the same mapping learned from digit-bytes puts 18.6% of answers
+    inside a 2% tolerance, and learned from typed values, 100%.
+    """
     lo, hi = TRAIN_DISCHARGE if split != "extrapolation" else EXTRAPOLATION_DISCHARGE
     q = float(rng.uniform(lo, hi))
     s0 = float(rng.uniform(*SLOPE_RANGE))
     n = float(rng.uniform(*MANNING_RANGE))
     h = normal_depth(q, s0, n)
-    prompt = f"CHAN|S={s0:.4f}|n={n:.3f}|q={q:.2f}|h="
-    answer = _fmt(h)
     return Item(
         sample=Sample(
-            [control_span(BOS), encode_text(prompt, supervised=False),
-             encode_text(answer), control_span(EOS)],
+            [
+                control_span(BOS),
+                encode_text("normal depth", supervised=False),
+                quantity_span([("slope", s0), ("manning", n), ("discharge", q)],
+                              supervised=False),
+                control_span(SEP),
+                quantity_span([("depth", h)], supervised=True),
+                control_span(EOS),
+            ],
             meta={"family": "channel_depth", "split": split},
         ),
         family="channel_depth",
-        answer=answer,
-        prompt=prompt,
-        truth={"q": q, "slope": s0, "manning": n, "h": h,
+        answer=f"{h:.4f}",
+        prompt=f"normal depth | S={s0:.4f} n={n:.3f} q={q:.2f}",
+        truth={"q": q, "slope": s0, "manning": n, "value": h, "role": "depth",
                "h_critical": critical_depth(q)},
         check=lambda produced, h=h: _within(produced, h, 0.02),
     )
 
 
 def channel_intervention_item(rng: np.random.Generator, split: str = "train") -> Item:
-    """"What if I double the water?" — with the exact answer attached."""
+    """"What if I change the water?" - the depth ratio, emitted as a number."""
     lo, hi = TRAIN_DISCHARGE if split != "extrapolation" else EXTRAPOLATION_DISCHARGE
     q = float(rng.uniform(lo, hi))
     factor = float(rng.choice([1.25, 1.5, 2.0, 2.5, 3.0]))
     s0 = float(rng.uniform(*SLOPE_RANGE))
     n = float(rng.uniform(*MANNING_RANGE))
     ratio = factor ** 0.6
-    prompt = f"CHAN|S={s0:.4f}|n={n:.3f}|q={q:.2f}|x{factor:.2f}|r="
-    answer = _fmt(ratio)
     return Item(
         sample=Sample(
-            [control_span(BOS), encode_text(prompt, supervised=False),
-             encode_text(answer), control_span(EOS)],
+            [
+                control_span(BOS),
+                encode_text("depth ratio", supervised=False),
+                quantity_span([("slope", s0), ("manning", n), ("discharge", q),
+                               ("factor", factor)], supervised=False),
+                control_span(SEP),
+                quantity_span([("ratio", ratio)], supervised=True),
+                control_span(EOS),
+            ],
             meta={"family": "channel_intervention", "split": split},
         ),
         family="channel_intervention",
-        answer=answer,
-        prompt=prompt,
-        truth={
-            "q": q, "factor": factor, "depth_ratio": ratio,
-            "critical_ratio": factor ** (2.0 / 3.0),
-            "velocity_ratio": factor ** 0.4,
-        },
+        answer=f"{ratio:.4f}",
+        prompt=f"depth ratio | S={s0:.4f} n={n:.3f} q={q:.2f} x{factor:.2f}",
+        truth={"q": q, "factor": factor, "value": ratio, "role": "ratio",
+               "critical_ratio": factor ** (2.0 / 3.0),
+               "velocity_ratio": factor ** 0.4},
         check=lambda produced, r=ratio: _within(produced, r, 0.02),
     )
 
@@ -328,30 +348,38 @@ TRUE_PREMISES: tuple[tuple[str, str], ...] = (
 
 
 def false_premise_item(rng: np.random.Generator, split: str = "train") -> Item:
-    """Half the items assert something false, half something true.
+    """Half the claims are true, half false. The verdict is a single token.
 
-    Both directions are needed. A model trained only to reject learns to reject,
-    which is not calibration, it is a different failure with better manners.
+    Both directions are needed: a model trained only to reject learns to
+    reject, which is not calibration - it is a different failure with better
+    manners. The verdict is one control token rather than a spelled-out
+    sentence, so what gets graded is the judgement and not the spelling.
     """
     truthful = bool(rng.integers(0, 2))
     if truthful:
-        claim, answer = TRUE_PREMISES[int(rng.integers(len(TRUE_PREMISES)))]
+        claim, _ = TRUE_PREMISES[int(rng.integers(len(TRUE_PREMISES)))]
         reason = ""
     else:
-        claim, answer, reason = FALSE_PREMISES[int(rng.integers(len(FALSE_PREMISES)))]
-    prompt = f"CLAIM|{claim}|verdict="
+        claim, _, reason = FALSE_PREMISES[int(rng.integers(len(FALSE_PREMISES)))]
+    verdict = VERDICT_TRUE if truthful else VERDICT_FALSE
     return Item(
         sample=Sample(
-            [control_span(BOS), encode_text(prompt, supervised=False),
-             encode_text(answer), control_span(EOS)],
+            [
+                control_span(BOS),
+                encode_text(claim, supervised=False),
+                control_span(SEP),
+                control_span(verdict),
+                control_span(EOS),
+            ],
             meta={"family": "false_premise", "split": split},
         ),
         family="false_premise",
-        answer=answer,
-        prompt=prompt,
-        truth={"truthful": truthful, "claim": claim, "reason": reason},
+        answer=VERDICT_NAME[verdict],
+        prompt=claim,
+        truth={"truthful": truthful, "claim": claim, "reason": reason,
+               "verdict_token": verdict},
         check=lambda produced, t=truthful: produced.strip().upper().startswith(
-            "YES" if t else "NO"
+            "TRUE" if t else "FALSE"
         ),
     )
 

@@ -145,6 +145,93 @@ def grade_field_family(
     return result
 
 
+@torch.no_grad()
+def _prompt_hidden(model, item, n_loops: int = 1):
+    """Run the prompt spans and return the hidden state at the last position."""
+    from ..runtime.decode import atomic_chunks, slice_batch
+
+    dims = continuous_dims(model.cfg.codecs)
+    batch = TensorBatch(collate([prompt_only(item)], dims))
+    cache: dict = {}
+    hidden = None
+    for lo, hi in atomic_chunks(batch, int(batch.modality.shape[1])):
+        hidden = model(slice_batch(batch, lo, hi), n_loops=n_loops, cache=cache).hidden
+    return hidden
+
+
+@torch.no_grad()
+def grade_quantity_family(model, items, n_loops: int = 1, tolerance: float = 0.02,
+                          keep_examples: int = 3) -> FamilyResult:
+    """Read the quantity head and compare the number, not the spelling.
+
+    The comparison is relative error against the analytic value, with the same
+    2% tolerance the task's own checker uses. The baseline is the corpus median
+    answer — what a model scores by ignoring its inputs entirely.
+    """
+    if not items:
+        return FamilyResult(family="empty", n=0, correct=0)
+    family = items[0].family
+    result = FamilyResult(family=family, n=len(items), correct=0)
+    truths = [it.truth["value"] for it in items]
+    median = float(np.median(truths))
+    errors = []
+    for i, item in enumerate(items):
+        hidden = _prompt_hidden(model, item, n_loops)
+        log10_value = float(
+            model.codecs.decode_continuous(hidden[:, -1:], "quantity")[0, 0, 0]
+        )
+        predicted = 10.0 ** log10_value
+        truth = item.truth["value"]
+        rel = abs(predicted - truth) / max(abs(truth), 1e-12)
+        errors.append(rel)
+        result.correct += int(rel <= tolerance)
+        result.baseline_correct += int(
+            abs(median - truth) / max(abs(truth), 1e-12) <= tolerance
+        )
+        if i < keep_examples:
+            result.examples.append({
+                "prompt": item.prompt, "target": f"{truth:.4f}",
+                "produced": f"{predicted:.4f}",
+                "correct": str(rel <= tolerance),
+            })
+    result.extra = {
+        "median_relative_error": float(np.median(errors)),
+        "mean_relative_error": float(np.mean(errors)),
+        "p90_relative_error": float(np.percentile(errors, 90)),
+        "tolerance": tolerance,
+    }
+    return result
+
+
+@torch.no_grad()
+def grade_verdict_family(model, items, n_loops: int = 1) -> FamilyResult:
+    """The verdict is one control token; grade the token, not a sentence."""
+    from ..training.tasks import VERDICT_FALSE, VERDICT_TRUE
+
+    result = FamilyResult(family="false_premise", n=len(items), correct=0)
+    true_hits = false_hits = n_true = n_false = 0
+    for item in items:
+        hidden = _prompt_hidden(model, item, n_loops)
+        logits = model.codecs.text_head(hidden[:, -1:])[0, 0]
+        choice = VERDICT_TRUE if logits[VERDICT_TRUE] > logits[VERDICT_FALSE] else VERDICT_FALSE
+        want = item.truth["verdict_token"]
+        ok = choice == want
+        result.correct += int(ok)
+        if want == VERDICT_TRUE:
+            n_true += 1; true_hits += int(ok)
+        else:
+            n_false += 1; false_hits += int(ok)
+    # A model that always says FALSE looks good on a false-premise set and is
+    # useless; report both directions so that cannot hide.
+    result.baseline_correct = max(n_true, n_false)
+    result.extra = {
+        "accuracy_on_true_claims": true_hits / max(n_true, 1),
+        "accuracy_on_false_claims": false_hits / max(n_false, 1),
+        "always_one_answer_baseline": max(n_true, n_false) / max(len(items), 1),
+    }
+    return result
+
+
 def evaluate(
     model, corpus, max_per_family: int = 40, n_loops: int = 1,
     max_new_tokens: int = 16,
@@ -157,6 +244,10 @@ def evaluate(
             results[family] = grade_field_family(model, subset, n_loops).as_dict()
         elif family == "scene_goal":
             results[family] = _grade_scene(model, subset, n_loops).as_dict()
+        elif family == "false_premise":
+            results[family] = grade_verdict_family(model, subset, n_loops).as_dict()
+        elif subset and "value" in subset[0].truth:
+            results[family] = grade_quantity_family(model, subset, n_loops).as_dict()
         else:
             results[family] = grade_text_family(
                 model, subset, max_new_tokens, n_loops
