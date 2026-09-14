@@ -85,7 +85,7 @@ def _cpu() -> DeviceInfo:
                       f"{os.cpu_count()} threads available")
 
 
-def generator_for(device: str | torch.device, seed: int) -> torch.Generator:
+def generator_for(device: str | torch.device, seed: int) -> Optional[torch.Generator]:
     """A generator on the *same* device as the tensors it will seed.
 
     ``torch.randn(..., device="cuda", generator=torch.Generator())`` raises,
@@ -96,6 +96,10 @@ def generator_for(device: str | torch.device, seed: int) -> torch.Generator:
     dev = torch.device(device)
     if dev.type == "cuda":
         return torch.Generator(device=dev).manual_seed(seed)
+    if dev.type == "xla":
+        # torch_xla uses the runtime RNG state; a CPU generator cannot seed an
+        # XLA allocation. Callers pass None to torch random operations.
+        return None
     return torch.Generator().manual_seed(seed)
 
 
