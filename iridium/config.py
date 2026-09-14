@@ -765,6 +765,48 @@ def _ladder() -> dict[str, IridiumConfig]:
         ),
     )
 
+    # -- nano100m: ~0.1 B, the largest rung that trains on a laptop CPU. ---
+    # Five general-purpose superstacks and the full mechanism set, at a width
+    # chosen so a CPU-only box can reach convergence rather than merely
+    # execute a forward pass.
+    rungs["nano100m"] = IridiumConfig(
+        name="iridium-1-nano100m",
+        core=CoreConfig(
+            d_model=512, n_layers=6, n_query_heads=8, n_kv_heads=2,
+            d_head=64, d_ff=1152,
+        ),
+        stacks=SuperstackConfig(
+            n_stacks=5,
+            n_layers=6,
+            d_model=512,
+            n_query_heads=8,
+            n_kv_heads=2,
+            d_head=64,
+            d_ff=1152,
+            cross_stride=4,
+            spectral_stride=4,
+            spectral_modes=8,
+            spectral_channels=32,
+            spectral_stacks=(0,),
+            min_depth=2,
+            specializations=(
+                "science_physics_simulation",
+                "mathematics_symbolic_proof",
+                "code_systems_tools",
+                "language_reasoning_intent",
+                "perception_geometry_action",
+            ),
+        ),
+        router=RouterConfig(top_k=2, max_loops=3),
+        codecs=CodecConfig(vocab_size=8192),
+        max_seq_len=2048,
+        notes=(
+            "~0.1 B trainable-on-CPU rung. The stacks are the same depth as "
+            "the core rather than deeper: at this width the depth ratio buys "
+            "less than the steps it costs, and converging is the point."
+        ),
+    )
+
     # -- micro: one modern accelerator. -----------------------------------
     rungs["micro"] = IridiumConfig(
         name="iridium-1-micro",

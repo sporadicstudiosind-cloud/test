@@ -37,6 +37,8 @@ def main(argv=None) -> int:
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--out", default="runs/phase1")
     ap.add_argument("--eval-per-family", type=int, default=24)
+    ap.add_argument("--mixture", default="",
+                    help="family=weight,... ; default is DEFAULT_MIXTURE")
     ap.add_argument("--checkpoint-every", type=int, default=0,
                     help="periodic checkpoints; a long run that is killed "
                          "without one loses everything, which is how the "
@@ -48,10 +50,19 @@ def main(argv=None) -> int:
     model = Iridium1(cfg)
     print(f"{cfg.name}: {sum(p.numel() for p in model.parameters()):,} parameters")
 
-    train = build_corpus(args.train_items, seed=args.seed, split="train")
-    test = build_corpus(args.eval_items, seed=args.seed + 1000, split="test")
+    mixture = None
+    if args.mixture:
+        mixture = {}
+        for part in args.mixture.split(","):
+            name, _, weight = part.partition("=")
+            mixture[name.strip()] = float(weight or 1.0)
+        print("mixture:", mixture, flush=True)
+    train = build_corpus(args.train_items, seed=args.seed, split="train",
+                         mixture=mixture)
+    test = build_corpus(args.eval_items, seed=args.seed + 1000, split="test",
+                        mixture=mixture)
     extra = build_corpus(args.eval_items // 2, seed=args.seed + 2000,
-                         split="extrapolation")
+                         split="extrapolation", mixture=mixture)
     print(describe(train))
     print(describe(test))
 

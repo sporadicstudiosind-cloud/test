@@ -93,7 +93,8 @@ class Trainer:
         self.optimizer = torch.optim.AdamW(
             params, lr=cfg.lr, weight_decay=cfg.weight_decay, betas=(0.9, 0.95)
         )
-        self.generator = torch.Generator().manual_seed(cfg.seed)
+        from ..runtime.device import generator_for
+        self.generator = generator_for(device, cfg.seed)
 
     def _apply_freeze(self) -> None:
         if not self.cfg.freeze:
@@ -193,7 +194,7 @@ class Trainer:
 
     @staticmethod
     def _format(record: dict[str, Any]) -> str:
-        keys = ("total", "text", "field", "action_op", "slot_type")
+        keys = ("total", "quantity", "text", "field", "slot_type")
         parts = [f"step {record['step']:5d}"]
         parts += [f"{k}={record[k]:.4f}" for k in keys if k in record]
         parts.append(f"H(stack)={record.get('stack_usage_entropy', 0):.3f}")

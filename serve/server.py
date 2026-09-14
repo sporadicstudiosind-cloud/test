@@ -33,6 +33,7 @@ import torch
 from iridium.codecs.spans import Sample, quantity_span, text_span
 from iridium.config import IridiumConfig, get_config
 from iridium.model.iridium1 import Iridium1
+from iridium.runtime.device import detect as detect_device
 from iridium.runtime.generate import generate
 
 ROOT = Path(__file__).resolve().parent
@@ -108,6 +109,8 @@ def load(name: str) -> dict:
         manifest = {}
         source = "random initialisation"
     model.eval()
+    info = detect_device(os.environ.get("IRIDIUM_DEVICE"))
+    model = model.to(info.device)
     cfg = model.cfg
     entry = {
         "name": name,
@@ -117,6 +120,7 @@ def load(name: str) -> dict:
         "load_seconds": time.time() - started,
         "parameters": sum(p.numel() for p in model.parameters()),
         "specializations": list(cfg.stacks.specializations),
+        "device": info.describe(),
         **{k: v for k, v in spec.items() if k != "checkpoint"},
     }
     _models[name] = entry
@@ -146,6 +150,7 @@ def available() -> list[dict]:
                 "top_k": cfg.router.top_k,
                 "max_loops": cfg.router.max_loops,
                 "specializations": list(cfg.stacks.specializations),
+        "device": info.describe(),
             },
         })
     return out
@@ -416,6 +421,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True, "loaded": sorted(_models), "help": QUERY_HELP,
                 "torch": torch.__version__,
                 "threads": torch.get_num_threads(),
+                "device": detect_device(os.environ.get("IRIDIUM_DEVICE")).describe(),
             })
         if route == "/api/models":
             return self._json(200, {"models": available()})
@@ -477,8 +483,9 @@ def main() -> int:
     threads = int(os.environ.get("IRIDIUM_THREADS", "0")) or (os.cpu_count() or 2)
     torch.set_num_threads(threads)
     port = int(os.environ.get("PORT", "8080"))
-    print(f"[iridium] torch {torch.__version__}, {threads} threads, port {port}",
-          flush=True)
+    info = detect_device(os.environ.get("IRIDIUM_DEVICE"))
+    print(f"[iridium] torch {torch.__version__}, {info.describe()}, "
+          f"{threads} threads, port {port}", flush=True)
     if os.environ.get("IRIDIUM_PRELOAD", "1") not in ("0", "false", ""):
         try:
             load("nano-trained")
