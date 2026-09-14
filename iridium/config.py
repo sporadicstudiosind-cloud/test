@@ -835,6 +835,43 @@ def _ladder() -> dict[str, IridiumConfig]:
         notes="Single-accelerator rung: the first scale where routing can pay.",
     )
 
+    # -- 8b: full routed architecture at a practical research scale. ------
+    # This keeps the same two-stage control core, bridge-attending superstacks,
+    # top-2 causal router, focus/depth ladder, ponder loop, and spectral stack
+    # as the larger target. It is deliberately costed as a distributed training
+    # job: it cannot be full-parameter trained in a 48 GiB Colab process.
+    rungs["8b"] = IridiumConfig(
+        name="iridium-1-8b",
+        core=CoreConfig(
+            d_model=1536, n_layers=24, n_query_heads=12, n_kv_heads=4,
+            d_head=128, d_ff=4096,
+        ),
+        stacks=SuperstackConfig(
+            n_stacks=10,
+            n_layers=28,
+            d_model=1536,
+            n_query_heads=12,
+            n_kv_heads=4,
+            d_head=128,
+            d_ff=4096,
+            cross_stride=8,
+            spectral_stride=8,
+            spectral_modes=16,
+            spectral_channels=96,
+            spectral_stacks=(0,),
+            min_depth=4,
+            specializations=SPECIALIZATIONS_32[:10],
+        ),
+        router=RouterConfig(top_k=2, max_loops=3),
+        codecs=CodecConfig(vocab_size=65_536),
+        max_seq_len=32_768,
+        notes=(
+            "8.07 B full routed-architecture rung. Full BF16 Adam training "
+            "state is about 120 GiB before activations and therefore requires "
+            "sharding across multiple accelerators; costed, not trained."
+        ),
+    )
+
     # -- small: a real cluster job. ---------------------------------------
     rungs["small"] = IridiumConfig(
         name="iridium-1-small",

@@ -47,7 +47,7 @@ checked.
 | Capacity-based token dropping | **unsupported** | refused as non-causal (`test_capacity_dropping_is_refused_as_non_causal`) |
 | Per-token ponder granularity (copy-through KV) | specified | `model/iridium1.py` docstring; chunk-uniform implemented instead |
 | Distributed dispatcher across nodes | specified | `parallel/plan.py` costs it; no implementation |
-| Any capability at micro/small/base/extreme rungs | **unsupported** | costed, never built |
+| Any capability at micro/8b/small/base/extreme rungs | **unsupported** | costed, never built; 8B boundary: [`training-8b.md`](training-8b.md) |
 
 ## Physics, runtime and agency
 

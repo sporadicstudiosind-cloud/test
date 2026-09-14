@@ -132,7 +132,13 @@ class Trainer:
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.cfg.grad_clip
                 )
-            self.optimizer.step()
+            if torch.device(self.device).type == "xla":
+                # XLA batches are lazy. optimizer_step both applies the update
+                # and marks the graph boundary that executes the queued work.
+                import torch_xla.core.xla_model as xm
+                xm.optimizer_step(self.optimizer, barrier=True)
+            else:
+                self.optimizer.step()
             self.optimizer.zero_grad(set_to_none=True)
 
             if step % self.cfg.log_every == 0 or step == self.cfg.steps - 1:
@@ -229,14 +235,18 @@ class Trainer:
             return None
         self.out_dir.mkdir(parents=True, exist_ok=True)
         path = self.out_dir / f"{self.cfg.label}-{tag}.pt"
-        torch.save(
-            {
-                "state_dict": self.model.state_dict(),
-                "manifest": self.manifest(extra),
-                "history": self.history,
-            },
-            path,
-        )
+        payload = {
+            "state_dict": self.model.state_dict(),
+            "manifest": self.manifest(extra),
+            "history": self.history,
+        }
+        if torch.device(self.device).type == "xla":
+            # xm.save materialises lazy XLA tensors on the host before writing,
+            # unlike torch.save which cannot serialize XLA device storage.
+            import torch_xla.core.xla_model as xm
+            xm.save(payload, path, master_only=True)
+        else:
+            torch.save(payload, path)
         (self.out_dir / f"{self.cfg.label}-{tag}.json").write_text(
             json.dumps(
                 {"manifest": self.manifest(extra), "history": self.history},

@@ -54,7 +54,7 @@ def test_codec_bank_matches_formula(rung):
 
 
 def test_ladder_is_monotonic():
-    order = ["tiny", "nano", "micro", "small", "base", "extreme"]
+    order = ["tiny", "nano", "micro", "8b", "small", "base", "extreme"]
     sizes = [LADDER[k].n_params for k in order]
     assert sizes == sorted(sizes), "the ladder must grow monotonically"
 
@@ -117,3 +117,13 @@ def test_roundtrip_through_dict():
     again = IridiumConfig.from_dict(cfg.to_dict())
     assert again.n_params == cfg.n_params
     assert again.stacks.spectral_stacks == cfg.stacks.spectral_stacks
+
+
+def test_8b_rung_is_full_architecture_and_costed_for_distributed_training():
+    cfg = get_config("8b")
+    assert 8.0e9 < cfg.n_params < 8.2e9
+    assert cfg.stacks.n_stacks == 10
+    assert cfg.router.top_k == 2
+    # BF16 weights + grads + FP32 master and two moments. This excludes
+    # activations, so a 48 GiB Colab must never be presented as sufficient.
+    assert cfg.training_state_bytes() / 2**30 > 120

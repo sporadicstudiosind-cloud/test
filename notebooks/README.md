@@ -1,59 +1,59 @@
-# Training Iridium-1 in the cloud
+# Training Iridium-1 in a high-RAM Colab
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sporadicstudiosind-cloud/test/blob/claude/gallant-faraday-lhycva/notebooks/train_iridium_colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sporadicstudiosind-cloud/test/blob/main/notebooks/train_iridium_colab.ipynb)
 
-`train_iridium_colab.ipynb` runs end to end: clone, verify, train, grade, save,
-serve. **Runtime → Change runtime type → GPU**, then **Run all**.
+`train_iridium_colab.ipynb` is an end-to-end Colab for a **CPU-only 48 GiB
+system-RAM runtime**. Select **Runtime → Change runtime type → High-RAM** and
+Run all. A GPU accelerates it when Colab gives you one, but it is neither
+required nor used as a memory prerequisite.
 
-What it does, in order, and why that order:
+The default `micro`/`test1b` rung is about 1.0 B parameters. Full fp32 Adam
+requires about 16 GB for parameters, gradients, and optimizer state, before
+activations and checkpoint-writing overhead. The notebook uses a batch size of
+one to keep that work inside a 48 GiB host-RAM session. This is deliberately a
+slow CPU configuration; increase `STEPS` only after its first checkpoint fits.
+Choose `nano100m` for a faster end-to-end smoke test.
 
-1. **Checks the GPU** and reports whether bf16 is real on it.
-2. **Verifies the architecture before spending GPU time** — the parameter
-   formulae against the instantiated modules (expected difference: exactly
-   zero) and the cache-parity gate (cached decoding must compute what teacher
-   forcing trained). If either fails, nothing downstream means anything, so it
-   is cheaper to find out in twenty seconds than after an hour of training.
-3. **Trains** the rung you pick, checkpointing every fifth of the run.
-4. **Grades** by free-running generation against an independent computation —
-   the analytic Manning law, the spectral solver, the scene environment's own
-   goal predicate — each reported beside the baseline a model earns by ignoring
-   its input entirely, and separately on an extrapolation split drawn from
-   outside the training band.
-5. **Saves** an fp16 checkpoint and offers it for download.
-6. **Serves** the probe UI on a forwarded port, where a physics question gets a
-   number back beside the analytic value, so it can be checked and not believed.
+What it does, in order:
 
-## Which rung
+1. **Reports system RAM** and warns if the runtime is not high-RAM; it also
+   reports any GPU present, without requiring one.
+2. **Verifies before training**: parameter accounting and cached-decoding
+   parity must pass before the notebook creates the training workload.
+3. **Trains in fp32 on CPU** (or uses CUDA if available), checkpointing every
+   fifth of the selected run.
+4. **Grades by free-running generation** against independent computations and
+   separate interpolation/extrapolation splits.
+5. **Saves an fp16 checkpoint** for download, while keeping CPU training fp32.
+6. **Serves the probe UI** through a forwarded Colab port.
 
-| rung | params | GPU needed | wall time |
-|---|---|---|---|
-| `nano` | 34 M | anything | ~5 min |
-| `nano100m` | 104 M | anything | ~12 min |
-| `micro` / `test1b` | 1.0 B | 24 GB preferred | ~40 min |
+## Memory and runtime expectations
 
-## Before you pick a free T4
+| rung | parameters | full fp32 Adam | high-RAM CPU suitability |
+|---|---:|---:|---|
+| `nano` | 34 M | ~0.5 GB | easy |
+| `nano100m` | 104 M | ~1.7 GB | good for a quick run |
+| `micro` / `test1b` | 1.0 B | ~16 GB | fits 48 GiB at batch 1; slow |
 
-A free Colab T4 is Turing and **has no bf16**. For a routed model that matters
-more than usual: the gating softmax that selects a superstack and the attention
-logits both live exactly where fp16's exponent overflows, and when they do, the
-router collapses onto one stack and the failure reads as a bad hyperparameter
-rather than a numerics bug. The notebook therefore runs **fp32 on a T4** and
-bf16 only on Ampere or newer. If you want the 1 B rung trained properly, an
-A100/L4 on Colab Pro, or a 4090 on RunPod or Vast at roughly $0.30/hour for a
-few hours, is the honest path.
+The 16 GB figure is an optimizer-state estimate, not a promise of peak RAM:
+activations, temporary tensors, Python, the corpus, and saving a checkpoint
+need extra room. That is why the high-RAM preset uses `BATCH = 1` and only 25
+steps initially. It does not depend on bf16, T4 memory, or any other GPU HBM.
 
-## Other services that work
+## Optional GPU acceleration
 
-Same notebook, or `PYTHONPATH=. python -m iridium.training.phase1_pretrain`:
+A GPU is strictly optional. If one is available, the notebook selects CUDA and
+uses bf16 only on Ampere-or-newer hardware; otherwise it remains in safe fp32.
+A T4 has no bf16, so it also stays fp32. See [`../docs/gpu.md`](../docs/gpu.md)
+for NVIDIA and ROCm details.
 
-- **Kaggle Notebooks** — 30 GPU-hours/week free, P100 16 GB or 2×T4. The best
-  free quota of the lot.
-- **Lightning AI Studios** — free monthly GPU hours, persistent environment.
-- **Modal** — free monthly credits, and a good structural fit since this repo
-  is already an importable package.
-- **RunPod / Vast.ai** — cheapest route to an Ampere-or-newer card.
-- **AMD hardware** — see [`../docs/gpu.md`](../docs/gpu.md); ROCm needs no code
-  changes, only the right wheel and the device nodes.
+## TPU v5e-1 builder
 
-Hugging Face Jobs and ZeroGPU both require a Pro subscription for GPU, so they
-are not a free option.
+[![Open TPU Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sporadicstudiosind-cloud/test/blob/main/notebooks/train_iridium_tpu_colab.ipynb)
+
+`train_iridium_tpu_colab.ipynb` is a separate TPU notebook. It offers `34m`,
+`100m`, `1b`, `8b`, and `25b` configuration presets plus controls for control
+core layers, superstack layers, and the number of superstacks. It trains only
+the 34M/100M presets on a single TPU and costs the larger builds without
+materialising them; a single v5e-1 is not enough for their full optimizer
+state.
