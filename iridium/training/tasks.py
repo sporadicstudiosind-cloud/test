@@ -58,8 +58,18 @@ SLOPE_RANGE = (0.0008, 0.0060)
 MANNING_RANGE = (0.018, 0.045)
 
 
-def control_span(code: int) -> Span:
-    return Span("control", np.array([code], dtype=np.int64), supervised=True)
+def control_span(code: int, supervised: bool = True) -> Span:
+    """A structural marker.
+
+    ``supervised=False`` makes it part of the *prompt* rather than part of the
+    answer, which matters more than it looks: ``evaluation.prompt_only`` keeps
+    exactly the unsupervised spans, so a separator marked supervised is dropped
+    at evaluation time and the model is asked for its answer one position
+    earlier than training ever put it. That produces a model with a training
+    loss of exactly zero and a graded error of 32%, which is a confusing
+    afternoon.
+    """
+    return Span("control", np.array([code], dtype=np.int64), supervised=supervised)
 
 
 def encode_text(text: str, supervised: bool = True) -> Span:
@@ -118,11 +128,11 @@ def channel_depth_item(rng: np.random.Generator, split: str = "train") -> Item:
     return Item(
         sample=Sample(
             [
-                control_span(BOS),
+                control_span(BOS, supervised=False),
                 encode_text("normal depth", supervised=False),
                 quantity_span([("slope", s0), ("manning", n), ("discharge", q)],
                               supervised=False),
-                control_span(SEP),
+                control_span(SEP, supervised=False),
                 quantity_span([("depth", h)], supervised=True),
                 control_span(EOS),
             ],
@@ -148,11 +158,11 @@ def channel_intervention_item(rng: np.random.Generator, split: str = "train") ->
     return Item(
         sample=Sample(
             [
-                control_span(BOS),
+                control_span(BOS, supervised=False),
                 encode_text("depth ratio", supervised=False),
                 quantity_span([("slope", s0), ("manning", n), ("discharge", q),
                                ("factor", factor)], supervised=False),
-                control_span(SEP),
+                control_span(SEP, supervised=False),
                 quantity_span([("ratio", ratio)], supervised=True),
                 control_span(EOS),
             ],
@@ -226,10 +236,10 @@ def field_rollout_item(
     return Item(
         sample=Sample(
             [
-                control_span(BOS),
+                control_span(BOS, supervised=False),
                 encode_text(prompt, supervised=False),
                 Span("field", tok_a.astype(np.float32), grid=grid, supervised=False),
-                control_span(SEP),
+                control_span(SEP, supervised=False),
                 Span("field", tok_b.astype(np.float32), grid=grid, supervised=True,
                      observed=True),
                 control_span(EOS),
@@ -277,11 +287,11 @@ def scene_goal_item(
     return Item(
         sample=Sample(
             [
-                control_span(BOS),
+                control_span(BOS, supervised=False),
                 encode_text(spec, supervised=False),
                 Span("image", img_tokens.astype(np.float32), grid=img_grid,
                      supervised=False),
-                control_span(SEP),
+                control_span(SEP, supervised=False),
                 Span("action", actions_to_span_payload(actions), supervised=True,
                      atomic=False),
                 control_span(EOS),
@@ -365,9 +375,9 @@ def false_premise_item(rng: np.random.Generator, split: str = "train") -> Item:
     return Item(
         sample=Sample(
             [
-                control_span(BOS),
+                control_span(BOS, supervised=False),
                 encode_text(claim, supervised=False),
-                control_span(SEP),
+                control_span(SEP, supervised=False),
                 control_span(verdict),
                 control_span(EOS),
             ],
