@@ -139,6 +139,13 @@ def setup(target: str):
             "    return total",
             "",
             "print(f'host RAM: {host_ram_bytes()/1e9:.1f} GB')",
+            "",
+            "# DEVICE is defined here, in the cell that always runs. The TPU cell",
+            "# below may override it. An optional cell must never *own* a name the",
+            "# rest of the notebook needs: run the cells out of order, or skip the",
+            "# optional one, and everything downstream dies on NameError.",
+            "DEVICE = info.device",
+            "print('DEVICE =', DEVICE)",
         ),
     ]
 
