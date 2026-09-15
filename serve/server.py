@@ -91,6 +91,65 @@ CATALOG = {
 }
 
 
+def _si(n: int) -> str:
+    for unit, scale in (("B", 1e9), ("M", 1e6), ("k", 1e3)):
+        if n >= scale:
+            return f"{n / scale:.2f} {unit}"
+    return str(n)
+
+
+def describe_label(cfg, spec: dict, manifest: dict) -> str:
+    """Name the model that is actually loaded.
+
+    The catalogue entry is a *default*, written when the bundled checkpoint was
+    the only one. Point ``IRIDIUM_CHECKPOINT`` at a notebook's output — which is
+    exactly what the studio notebooks do — and a hardcoded label goes on
+    announcing 34 M for a model of some other size. A serving layer that
+    misreports which weights it loaded undermines every number beside it.
+    """
+    if not manifest:
+        return spec["label"]
+    trained = bool((manifest.get("train_config") or {}).get("steps"))
+    return f"{cfg.name} · {_si(cfg.n_params)} · {'trained' if trained else 'untrained'}"
+
+
+def describe_caveat(spec: dict, manifest: dict) -> str:
+    """Say what this checkpoint's own manifest says, not what a past run's did.
+
+    The caveat is the most load-bearing string the server returns: it is what
+    stops somebody reading the generated text as an answer. Reciting a stored
+    sentence about a different run is worse than saying nothing, so an unknown
+    provenance is reported as unknown.
+    """
+    if not manifest:
+        return spec["caveat"]
+    train = manifest.get("train_config", {}) or {}
+    steps = train.get("steps")
+    licences = manifest.get("data_licences", "unrecorded")
+    parts = []
+    if steps:
+        parts.append(f"{steps:,} training steps (batch {train.get('batch_size', '?')})")
+    parts.append(f"data: {licences}")
+
+    ev = (manifest.get("evaluation") or {}).get("interpolation") or {}
+    scored = [
+        (fam, r) for fam, r in ev.items()
+        if isinstance(r, dict) and "accuracy" in r and "baseline" in r
+    ]
+    if scored:
+        beat = sum(1 for _, r in scored if r["accuracy"] > r["baseline"] + 0.1)
+        verdict = (
+            f"graded above a prompt-ignoring baseline on {beat} of {len(scored)} "
+            f"task families"
+        )
+        if beat == 0:
+            verdict += " — so the text is noise, and the telemetry is the real output"
+        parts.append(verdict)
+    else:
+        parts.append("no grading recorded in this checkpoint, so treat it as unverified")
+    return ". ".join(p[0].upper() + p[1:] for p in parts) + "."
+
+
 def load(name: str) -> dict:
     if name in _models:
         return _models[name]
@@ -117,11 +176,14 @@ def load(name: str) -> dict:
         "model": model,
         "cfg": cfg,
         "source": source,
+        "label": describe_label(cfg, spec, manifest),
+        "caveat": describe_caveat(spec, manifest),
         "load_seconds": time.time() - started,
         "parameters": sum(p.numel() for p in model.parameters()),
         "specializations": list(cfg.stacks.specializations),
         "device": info.describe(),
-        **{k: v for k, v in spec.items() if k != "checkpoint"},
+        **{k: v for k, v in spec.items()
+           if k not in ("checkpoint", "label", "caveat")},
     }
     _models[name] = entry
     print(f"[iridium] loaded {name}: {entry['parameters']:,} params from {source} "
@@ -134,12 +196,15 @@ def available() -> list[dict]:
     for name, spec in CATALOG.items():
         if name == "test1b-untrained" and not ENABLE_1B:
             continue
-        cfg = get_config(spec["rung"])
+        # A loaded model describes itself; an unloaded one can only be described
+        # from its catalogue rung, which is a guess until the weights arrive.
+        loaded = _models.get(name)
+        cfg = loaded["cfg"] if loaded else get_config(spec["rung"])
         out.append({
             "name": name,
-            "label": spec["label"],
+            "label": loaded["label"] if loaded else spec["label"],
             "trained": spec["trained"],
-            "caveat": spec["caveat"],
+            "caveat": loaded["caveat"] if loaded else spec["caveat"],
             "parameters": cfg.n_params,
             "loaded": name in _models,
             "geometry": {

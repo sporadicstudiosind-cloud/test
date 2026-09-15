@@ -64,7 +64,7 @@ python -m iridium quant base                   # MXFP4 memory and measured SQNR
 python -m iridium fluid                        # Taylor-Green validation
 python -m iridium waterfall --q 3 --factor 2   # the originating question
 python -m iridium serve --prompt "hello" --prompt "second stream"
-pytest -q                                      # 208 tests
+pytest -q                                      # 375 tests
 ```
 
 Training phases, each runnable:

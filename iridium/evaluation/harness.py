@@ -232,6 +232,58 @@ def grade_verdict_family(model, items, n_loops: int = 1) -> FamilyResult:
     return result
 
 
+@torch.no_grad()
+def grade_text_lm(model, items, n_loops: int = 1) -> FamilyResult:
+    """Bits per byte on held-out real text.
+
+    There is no exact checker here — the target is a likelihood, not an answer.
+    The baseline is the entropy of a uniform byte model, 8 bits per byte, which
+    is what "learned nothing about language" looks like.
+    """
+    import torch.nn.functional as F
+    from ..codecs.spans import MODALITY_INDEX
+
+    if not items:
+        return FamilyResult(family="text_lm", n=0, correct=0)
+    dims = continuous_dims(model.cfg.codecs)
+    total_bits = 0.0
+    total_bytes = 0
+    for item in items:
+        batch = TensorBatch(collate([item.sample], dims))
+        out = model(batch, n_loops=n_loops)
+        h = out.hidden[:, :-1]
+        target = batch.discrete[:, 1:]
+        mask = (batch.supervised[:, 1:] & batch.valid[:, 1:]
+                & (batch.modality[:, 1:] == MODALITY_INDEX["text"]))
+        if not bool(mask.any()):
+            continue
+        logits = model.codecs.text_head(h)
+        nll = F.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]),
+            target.reshape(-1).clamp(0, logits.shape[-1] - 1),
+            reduction="none",
+        ).view_as(mask)
+        total_bits += float((nll * mask).sum()) / np.log(2.0)
+        total_bytes += int(mask.sum())
+    bpb = total_bits / max(total_bytes, 1)
+    result = FamilyResult(family="text_lm", n=len(items), correct=0)
+    # Fraction of a uniform byte model's entropy this model removes. There is no
+    # exact checker here, so this stands in the accuracy column, and it is scaled
+    # rather than thresholded deliberately: a binary "did it beat 8 bits" reports
+    # 1.000 next to families where 1.000 means every answer was right, and 7.9
+    # bits per byte — which is very nearly knowing nothing — then reads as a
+    # perfect score. The scaled figure cannot be misread that way.
+    reduction = max(0.0, min(1.0, 1.0 - bpb / 8.0))
+    result.extra = {
+        "bits_per_byte": bpb,
+        "uniform_baseline_bits_per_byte": 8.0,
+        "entropy_reduction": reduction,
+        "bytes_scored": float(total_bytes),
+    }
+    result.correct = int(round(len(items) * reduction))
+    return result
+
+
 def evaluate(
     model, corpus, max_per_family: int = 40, n_loops: int = 1,
     max_new_tokens: int = 16,
@@ -244,6 +296,8 @@ def evaluate(
             results[family] = grade_field_family(model, subset, n_loops).as_dict()
         elif family == "scene_goal":
             results[family] = _grade_scene(model, subset, n_loops).as_dict()
+        elif family == "text_lm":
+            results[family] = grade_text_lm(model, subset, n_loops).as_dict()
         elif family == "false_premise":
             results[family] = grade_verdict_family(model, subset, n_loops).as_dict()
         elif subset and "value" in subset[0].truth:

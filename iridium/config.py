@@ -522,11 +522,27 @@ class IridiumConfig:
         hold. Use :meth:`flops_per_token` for cost.
 
         Codecs are excluded: a text token does not run the video decoder.
+
+        The upper bound sums the ``top_k`` *most expensive actual stacks*, not
+        ``top_k`` copies of the most expensive one. Only some stacks carry
+        spectral blocks, and assuming every routed stack does can push the
+        reported "active" count above the model's total parameter count — which
+        is how a specification ends up quoting an active figure that is
+        arithmetically impossible.
         """
         core = self.core.params
-        k = self.router.top_k
+        k = min(self.router.top_k, self.stacks.n_stacks)
+        costs = sorted(
+            (
+                self._stack_cost(
+                    self.stacks.n_layers, spectral=self.stacks.has_spectral(i)
+                )
+                for i in range(self.stacks.n_stacks)
+            ),
+            reverse=True,
+        )
         lo = core + k * self._stack_cost(self.stacks.min_depth, spectral=False)
-        hi = core + k * self._stack_cost(self.stacks.n_layers, spectral=True)
+        hi = core + sum(costs[:k])
         return lo, hi
 
     def flops_per_token(self) -> tuple[int, int]:
@@ -538,11 +554,18 @@ class IridiumConfig:
         depend on context length and are reported by the parallel planner.
         """
         core = self.core.params
-        k = self.router.top_k
-        lo = 2 * (core + k * self._stack_cost(self.stacks.min_depth, spectral=False))
-        hi = 2 * self.router.max_loops * (
-            core + k * self._stack_cost(self.stacks.n_layers, spectral=True)
+        k = min(self.router.top_k, self.stacks.n_stacks)
+        costs = sorted(
+            (
+                self._stack_cost(
+                    self.stacks.n_layers, spectral=self.stacks.has_spectral(i)
+                )
+                for i in range(self.stacks.n_stacks)
+            ),
+            reverse=True,
         )
+        lo = 2 * (core + k * self._stack_cost(self.stacks.min_depth, spectral=False))
+        hi = 2 * self.router.max_loops * (core + sum(costs[:k]))
         return lo, hi
 
     def report(self) -> ParameterReport:

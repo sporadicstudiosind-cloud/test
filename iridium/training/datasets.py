@@ -57,8 +57,19 @@ def build_corpus(
     seed: int = 0,
     split: str = "train",
     mixture: Optional[dict[str, float]] = None,
+    text_mix: Optional[dict[str, float]] = None,
+    text_window: int = 256,
 ) -> Corpus:
-    mixture = mixture or DEFAULT_MIXTURE
+    """Assemble a corpus. ``text_lm`` in the mixture streams *real* text.
+
+    The synthetic families are generated locally and are exactly checkable;
+    ``text_lm`` pulls from the licensed corpora in ``iridium.data.text_corpus``
+    and is graded in bits per byte rather than by an exact checker, because
+    there is no right answer to score against — only a likelihood.
+    """
+    mixture = dict(mixture) if mixture else dict(DEFAULT_MIXTURE)
+    text_weight = float(mixture.get("text_lm", 0.0))
+    mixture = {k: v for k, v in mixture.items() if k != "text_lm"}
     unknown = set(mixture) - set(GENERATORS)
     if unknown:
         raise ValueError(f"unknown families in mixture: {sorted(unknown)}")
@@ -66,10 +77,18 @@ def build_corpus(
     rng = np.random.default_rng(seed)
     families = list(mixture)
     weights = np.array([mixture[f] for f in families]) / total
+    n_text = int(round(n_items * text_weight)) if text_weight > 0 else 0
     items: list[Item] = []
-    for _ in range(n_items):
-        family = families[int(rng.choice(len(families), p=weights))]
-        items.append(make_item(family, rng, split))
+    if n_text:
+        from ..data.text_corpus import text_items
+        items.extend(text_items(n_text, window=text_window, mix=text_mix,
+                                seed=seed, split=split))
+        n_items = max(n_items - len(items), 0)
+    if families:
+        for _ in range(n_items):
+            family = families[int(rng.choice(len(families), p=weights))]
+            items.append(make_item(family, rng, split))
+    rng.shuffle(items)
     return Corpus(items, split)
 
 

@@ -21,7 +21,7 @@ Iridium-1 checkpoint.
 > **Status: a working implementation of the routed architecture at small scale, plus a
 > costed ladder up to 9 T parameters.** The control core, macro-router, superstack bank,
 > omnimodal codecs, physics solvers, agentic environment, sandbox, persistent runtime,
-> quantizer and parallelism planner are built and tested (208 tests). Nothing here
+> quantizer and parallelism planner are built and tested (375 tests). Nothing here
 > demonstrates a general system: the trained rung is 34 M parameters on a synthetic corpus.
 > [`docs/build.md`](docs/build.md) says what to run,
 > [`docs/verification.md`](docs/verification.md) lists the twenty findings against the
@@ -46,20 +46,24 @@ Iridium-1 checkpoint.
 | [`docs/evidence.md`](docs/evidence.md) | Sources, with what each does *not* establish |
 | [`docs/scenarios.md`](docs/scenarios.md) | Capability targets A–G beyond the waterfall |
 | [`docs/history/orrery/`](docs/history/orrery/) | The superseded ORRERY specification, preserved unaltered |
+| [`notebooks/`](notebooks/) | **Train it yourself on free hardware** — Colab, Kaggle or any Jupyter host, at any rung from 50 M to 1 T |
 
 ## Run it
 
 ```bash
 pip install numpy torch pytest jsonschema
-python3 -m pytest                                # 208 tests, all passing
+python3 -m pytest                                # 375 tests, all passing
 python3 -m iridium ladder                        # tiny -> nano -> ... -> 9 T
 python3 -m iridium report nano --verify          # accounting, checked against the modules
 python3 -m iridium plan base --gpus 1024         # 4-D parallelism and its cost model
 python3 -m iridium waterfall --q 3 --factor 2    # the originating question, answered
 python3 -m iridium.training.phase1_pretrain --rung nano --steps 1800
+python3 -m iridium.config_builder                # the 50 M -> 1 T preset ladder
 ```
 
-[`docs/build.md`](docs/build.md) has the rest.
+[`docs/build.md`](docs/build.md) has the rest, and
+[`notebooks/README.md`](notebooks/README.md) runs the whole thing — design, fit
+check, licensed data, train, grade, chat — on free hardware.
 
 ## Layout
 
