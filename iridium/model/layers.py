@@ -18,6 +18,7 @@ Point 3 is the one that bites. ``_masked_softmax`` handles it explicitly.
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional
 
 import torch
@@ -53,6 +54,83 @@ class SwiGLU(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.down(F.silu(self.gate(x)) * self.up(x))
+
+
+#: How attention is computed. ``"sdpa"`` calls PyTorch's fused kernels, which
+#: never materialise the ``[B, H, Tq, Tk]`` score matrix; ``"manual"`` builds it
+#: explicitly. Override with ``IRIDIUM_ATTENTION=manual`` or
+#: :func:`set_attention_backend`.
+#:
+#: The score matrix is what runs a GPU out of memory. At batch 32, 8 heads and
+#: a 2048-token context it is 4.3 GB in fp32 **per layer**, and autograd holds
+#: every one of them until the backward pass. Nothing else in this model comes
+#: close. The fused kernels compute the same result in tiles and keep only what
+#: the backward pass genuinely needs.
+#:
+#: The cost is exactness: a fused kernel's reduction order depends on sequence
+#: length, so a cached single-token step and a full forward pass no longer agree
+#: to the last bit — they agree to floating-point tolerance. ``"manual"`` is
+#: what the bit-exact parity gate runs under, and is why it is still here.
+_ATTENTION_BACKEND = os.environ.get("IRIDIUM_ATTENTION", "sdpa").lower()
+
+
+def set_attention_backend(backend: str) -> str:
+    """Set ``"sdpa"`` or ``"manual"``; returns the previous value."""
+    global _ATTENTION_BACKEND
+    if backend not in ("sdpa", "manual"):
+        raise ValueError(f"backend must be 'sdpa' or 'manual', got {backend!r}")
+    previous, _ATTENTION_BACKEND = _ATTENTION_BACKEND, backend
+    return previous
+
+
+def attention_backend() -> str:
+    return _ATTENTION_BACKEND
+
+
+class use_attention_backend:
+    """Context manager form, so a test can pin exactness locally."""
+
+    def __init__(self, backend: str) -> None:
+        self.backend = backend
+        self.previous = ""
+
+    def __enter__(self) -> str:
+        self.previous = set_attention_backend(self.backend)
+        return self.backend
+
+    def __exit__(self, *exc) -> None:
+        set_attention_backend(self.previous)
+
+
+def _attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+            keep: torch.Tensor, d_head: int) -> torch.Tensor:
+    """Attention with an explicit boolean mask, both ways.
+
+    Both paths agree on the awkward case: a query row with *no* admissible key
+    returns zeros rather than NaN. Softmax over an all-``-inf`` row is NaN, and
+    a fused kernel propagates that into the residual stream, where it silently
+    turns the whole batch into NaN several layers later.
+    """
+    if _ATTENTION_BACKEND == "sdpa":
+        mask = keep.expand(q.shape[0], q.shape[1], q.shape[2], k.shape[2])
+        dead = ~mask.any(dim=-1, keepdim=True)
+        # Give a dead row one admissible key so the kernel produces a finite
+        # number, then zero the row afterwards. Masking it back out is what
+        # keeps this identical to the manual path rather than merely close.
+        safe = mask.masked_fill(dead.expand_as(mask) & _first_column(mask), True)
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=safe)
+        return out.masked_fill(dead, 0.0)
+
+    scores = (q @ k.transpose(-2, -1)) / math.sqrt(d_head)
+    probs = _masked_softmax(scores, keep)
+    return probs @ v
+
+
+def _first_column(mask: torch.Tensor) -> torch.Tensor:
+    """A mask selecting only key position 0, broadcast over ``mask``'s shape."""
+    column = torch.zeros_like(mask)
+    column[..., :1] = True
+    return column
 
 
 def _masked_softmax(scores: torch.Tensor, keep: torch.Tensor) -> torch.Tensor:
@@ -131,9 +209,7 @@ class GroupedQueryAttention(nn.Module):
 
         kr = k.repeat_interleave(self.repeat, dim=1)
         vr = v.repeat_interleave(self.repeat, dim=1)
-        scores = (q @ kr.transpose(-2, -1)) / math.sqrt(self.d_head)
-        probs = _masked_softmax(scores, keep)
-        out = probs @ vr
+        out = _attend(q, kr, vr, keep, self.d_head)
         return self.wo(out.transpose(1, 2).reshape(b, t, -1))
 
 
@@ -191,9 +267,7 @@ class BridgeCrossAttention(nn.Module):
             k = self.rope(k, core_positions)
         kr = k.repeat_interleave(self.repeat, dim=1)
         vr = v.repeat_interleave(self.repeat, dim=1)
-        scores = (q @ kr.transpose(-2, -1)) / math.sqrt(self.d_head)
-        probs = _masked_softmax(scores, keep)
-        out = probs @ vr
+        out = _attend(q, kr, vr, keep, self.d_head)
         return self.wo(out.transpose(1, 2).reshape(b, t, -1))
 
 

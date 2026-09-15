@@ -96,6 +96,39 @@ class Iridium1(nn.Module):
 
     # -- forward ----------------------------------------------------------
 
+    def enable_gradient_checkpointing(self, enabled: bool = True,
+                                      stacks: bool = False) -> None:
+        """Not available in this architecture. Measured, not assumed.
+
+        Gradient checkpointing recomputes a layer's activations during the
+        backward pass instead of storing them, and is normally free apart from
+        the time. Here it is not correct, in two separate ways:
+
+        * **Superstacks** raise ``CheckpointError: a different number of tensors
+          was saved during the original forward and recomputation``. Their
+          layers branch on data — which field grids survived routing, which
+          tokens are still alive on the depth ladder — so the recomputed pass is
+          a different graph.
+        * **The control core** accepts checkpointing and silently returns
+          *different gradients*: with the stochastic path pinned and the
+          unchecked run reproducible to 0.0, enabling it moved the modality
+          embedding's gradient by **2.75**. The loss is unchanged, so nothing
+          in a training curve would ever show it.
+
+        PyTorch's ``determinism_check="none"`` silences the first symptom and
+        would have shipped the second. A wrong gradient degrades a run
+        invisibly; an OOM at least announces itself. So this raises instead.
+
+        The memory it would have saved is available elsewhere, and cheaply:
+        fused attention removed the dominant allocation already, and
+        ``TrainConfig.accumulate`` trades steps for peak memory exactly.
+        """
+        raise NotImplementedError(
+            "gradient checkpointing returns incorrect gradients in this "
+            "architecture (see the docstring; measured, not assumed). Use "
+            "TrainConfig.accumulate to cut peak memory instead."
+        )
+
     def forward(
         self,
         batch: TensorBatch,

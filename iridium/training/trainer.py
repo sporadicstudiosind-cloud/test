@@ -17,7 +17,7 @@ import json
 import math
 import subprocess
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, replace, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -46,6 +46,16 @@ class TrainConfig:
     checkpoint_every: int = 0
     freeze: tuple[str, ...] = ()
     label: str = "phase1"
+    #: Micro-batches summed before each optimizer step. ``batch_size`` is the
+    #: micro-batch, so the effective batch is ``batch_size * accumulate``. This
+    #: is the cheapest way to train at a large batch on a small card: the
+    #: gradient is identical, only the peak activation memory differs.
+    accumulate: int = 1
+    #: "adamw" | "adamw_8bit" | "paged_adamw" | "adafactor" | "sgd".
+    #: ``paged_adamw`` keeps the moments in host RAM.
+    optimizer: str = "adamw"
+    #: On CUDA OOM, halve the micro-batch and retry rather than losing the run.
+    oom_retry: bool = True
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -90,11 +100,40 @@ class Trainer:
         self.history: list[dict[str, Any]] = []
         self._apply_freeze()
         params = [p for p in model.parameters() if p.requires_grad]
-        self.optimizer = torch.optim.AdamW(
-            params, lr=cfg.lr, weight_decay=cfg.weight_decay, betas=(0.9, 0.95)
+        from ..runtime.memory import build_optimizer
+        self.optimizer = build_optimizer(
+            params, kind=cfg.optimizer, lr=cfg.lr, weight_decay=cfg.weight_decay
         )
         from ..runtime.device import generator_for
         self.generator = generator_for(device, cfg.seed)
+
+    def _forward_with_retry(self, batch):
+        """Forward + loss, halving the micro-batch once on CUDA OOM.
+
+        An OOM mid-run otherwise throws away everything done so far. The
+        allocator's cache has to be emptied before retrying, or the retry hits
+        the same wall against memory that is reserved but not in use.
+        """
+        try:
+            return self.model.losses(
+                batch, n_loops=self.cfg.n_loops, generator=self.generator
+            )
+        except torch.cuda.OutOfMemoryError:
+            if not self.cfg.oom_retry or self.loader.batch_size <= 1:
+                raise
+            self.optimizer.zero_grad(set_to_none=True)
+            from ..runtime.memory import free_memory
+            free_memory(verbose=False)
+            new_size = max(1, self.loader.batch_size // 2)
+            print(f"[trainer] CUDA OOM at micro-batch {self.loader.batch_size}; "
+                  f"retrying at {new_size} and doubling accumulation to keep the "
+                  f"effective batch", flush=True)
+            self.loader.batch_size = new_size
+            self.cfg = replace(self.cfg, accumulate=self.cfg.accumulate * 2)
+            batch, _ = next(self._infinite_batches())
+            return self.model.losses(
+                batch, n_loops=self.cfg.n_loops, generator=self.generator
+            )
 
     def _apply_freeze(self) -> None:
         if not self.cfg.freeze:
@@ -122,11 +161,16 @@ class Trainer:
             for group in self.optimizer.param_groups:
                 group["lr"] = lr
 
-            losses, out = self.model.losses(
-                batch, n_loops=self.cfg.n_loops, generator=self.generator
-            )
-            total, report = combine(losses, self.weights)
-            total.backward()
+            # Accumulate: the gradient of a batch is the sum of the gradients
+            # of its parts, so N micro-batches cost N times the compute and one
+            # micro-batch of activation memory.
+            report = {}
+            for micro in range(self.cfg.accumulate):
+                if micro:
+                    batch, items = next(stream)
+                losses, out = self._forward_with_retry(batch)
+                total, report = combine(losses, self.weights)
+                (total / self.cfg.accumulate).backward()
             norm = grad_global_norm(self.model.parameters())
             if self.cfg.grad_clip:
                 torch.nn.utils.clip_grad_norm_(

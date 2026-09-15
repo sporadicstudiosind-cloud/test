@@ -174,6 +174,16 @@ class ChatSession:
         params.update(overrides)
         reply = generate(self.model, sample, **params).text.strip()
 
+        if not reply:
+            # An untrained or barely-trained model ends its turn immediately.
+            # Printing a blank line looks like a bug in the notebook; saying so
+            # points at the actual cause, which is the training, not the chat.
+            reply = ("(no output — the model ended its turn immediately. That is "
+                     "what an undertrained model does; train for more steps, or "
+                     "raise CHAT_WEIGHT so more of the corpus is conversation.)")
+            self.turns.pop()    # don't poison the history with the explanation
+            return reply
+
         self.seed += 1          # so a repeated question is not a repeated answer
         self.turns.append(Turn("assistant", reply))
         return reply
