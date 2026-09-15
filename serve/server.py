@@ -33,7 +33,7 @@ import torch
 from iridium.codecs.spans import Sample, quantity_span, text_span
 from iridium.config import IridiumConfig, get_config
 from iridium.model.iridium1 import Iridium1
-from iridium.runtime.device import detect as detect_device
+from iridium.runtime.device import detect as detect_device, device_of
 from iridium.runtime.generate import generate
 
 ROOT = Path(__file__).resolve().parent
@@ -326,7 +326,7 @@ def run_query(prompt: str, model_name: str, loops: int) -> dict:
     sample = build_sample(query)
 
     dims = continuous_dims(cfg.codecs)
-    batch = TensorBatch(collate([sample], dims))
+    batch = TensorBatch(collate([sample], dims), device=device_of(model))
     cache: dict = {}
     started = time.time()
     result = None
@@ -405,7 +405,7 @@ def run_chat(prompt: str, model_name: str, max_new_tokens: int,
     from iridium.runtime.decode import atomic_chunks, slice_batch
 
     dims = continuous_dims(cfg.codecs)
-    batch = TensorBatch(collate([sample], dims))
+    batch = TensorBatch(collate([sample], dims), device=device_of(model))
     cache: dict = {}
     result = None
     for lo, hi in atomic_chunks(batch, int(batch.modality.shape[1])):

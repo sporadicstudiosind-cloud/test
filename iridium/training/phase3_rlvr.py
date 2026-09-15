@@ -37,7 +37,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ..codecs.bank import TensorBatch, continuous_dims
+from ..codecs.bank import TensorBatch
+from ..runtime.device import device_of, continuous_dims
 from ..codecs.spans import MODALITY_INDEX, Sample, Span, collate
 from ..evaluation.harness import evaluate, prompt_only
 from ..runtime.generate import generate
@@ -91,13 +92,14 @@ def verifiable_reward(item: Item, produced: str, shape: RewardShape) -> tuple[fl
     )
 
 
-def _answer_batch(item: Item, answer: str, dims: dict[str, int]) -> TensorBatch:
+def _answer_batch(item: Item, answer: str, dims: dict[str, int],
+                  device=None) -> TensorBatch:
     """Prompt + a candidate answer, with only the answer supervised."""
     from .tasks import control_span, encode_text
 
     spans = [s for s in item.sample.spans if not s.supervised]
     spans = spans + [encode_text(answer, supervised=True), control_span(2)]
-    return TensorBatch(collate([Sample(spans)], dims))
+    return TensorBatch(collate([Sample(spans)], dims), device=device)
 
 
 def sequence_logprob(model, batch: TensorBatch, n_loops: int = 1) -> torch.Tensor:
@@ -187,7 +189,7 @@ def train_rlvr(
         loss = None
         kl_total = 0.0
         for adv, text in zip(advantage, samples):
-            batch = _answer_batch(item, text, dims)
+            batch = _answer_batch(item, text, dims, device=device_of(model))
             logp = sequence_logprob(model, batch)
             with torch.no_grad():
                 ref_logp = sequence_logprob(reference, batch)

@@ -19,6 +19,7 @@ import torch
 
 from ..codecs.bank import TensorBatch, continuous_dims
 from ..codecs.spans import MODALITY_INDEX, MODALITIES, Sample, collate
+from .device import device_of, generator_for
 
 
 @dataclass
@@ -72,6 +73,9 @@ def generate(
     sample: Sample,
     max_new_tokens: int = 32,
     temperature: float = 0.0,
+    top_p: float = 0.0,
+    top_k: int = 0,
+    repetition_penalty: float = 1.0,
     stop_ids: Sequence[int] = (2,),
     n_loops: int = 1,
     flow_steps: int = 8,
@@ -81,9 +85,10 @@ def generate(
 ) -> Generated:
     """Greedy (``temperature=0``) or sampled continuation of ``sample``."""
     dims = continuous_dims(model.cfg.codecs)
-    batch = TensorBatch(collate([sample], dims))
+    device = device_of(model)
+    batch = TensorBatch(collate([sample], dims), device=device)
     cache: dict = {}
-    rng = torch.Generator().manual_seed(seed)
+    rng = generator_for(device, seed)
 
     from .decode import atomic_chunks, slice_batch
 
@@ -107,10 +112,11 @@ def generate(
         continuous_payload = None
         if name in ("text", "control"):
             logits = codecs.text_head(h)[0, -1]
-            token = _pick(logits, temperature, rng)
+            token = _pick(logits, temperature, rng, top_p, top_k,
+                          repetition_penalty, result.ids)
         elif name == "action":
             op_logits, _ = codecs.action_head(h)
-            token = _pick(op_logits[0, -1], temperature, rng)
+            token = _pick(op_logits[0, -1], temperature, rng, top_p, top_k)
         else:
             token = 0
             value = codecs.decode_continuous(h, name, steps=flow_steps, generator=rng)
@@ -140,8 +146,62 @@ def generate(
     return result
 
 
-def _pick(logits: torch.Tensor, temperature: float, rng: torch.Generator) -> int:
+def _pick(
+    logits: torch.Tensor,
+    temperature: float,
+    rng: torch.Generator,
+    top_p: float = 0.0,
+    top_k: int = 0,
+    repetition_penalty: float = 1.0,
+    emitted: Optional[Sequence[int]] = None,
+) -> int:
+    """Sample one token.
+
+    Three knobs beyond temperature, and a small model needs all three:
+
+    * **repetition_penalty** divides the logit of anything already emitted.
+      Undertrained networks fall into two-word cycles within a sentence, and
+      no amount of temperature breaks a loop whose logit gap is large.
+    * **top_k / top_p** cut the tail before sampling. Raising temperature
+      without truncating makes the long tail of near-zero-probability bytes
+      reachable, which is how "creative" turns into mojibake.
+
+    Greedy (``temperature <= 0``) ignores all of them by construction, and is
+    still the right default for a grader that wants a reproducible answer.
+    """
+    logits = logits.float()
     if temperature <= 0:
         return int(logits.argmax(-1).item())
-    probs = torch.softmax(logits.float() / temperature, dim=-1)
+
+    if repetition_penalty != 1.0 and emitted:
+        seen = torch.tensor(sorted(set(int(t) for t in emitted)),
+                            device=logits.device, dtype=torch.long)
+        seen = seen[seen < logits.shape[-1]]
+        if seen.numel():
+            scores = logits[seen]
+            # Penalise toward zero from whichever side the logit sits on;
+            # dividing a negative logit would *raise* it.
+            logits[seen] = torch.where(
+                scores > 0, scores / repetition_penalty, scores * repetition_penalty
+            )
+
+    logits = logits / temperature
+
+    if top_k and top_k < logits.shape[-1]:
+        kth = torch.topk(logits, top_k).values[-1]
+        logits = logits.masked_fill(logits < kth, float("-inf"))
+
+    if 0.0 < top_p < 1.0:
+        ordered, index = torch.sort(logits, descending=True)
+        cumulative = torch.softmax(ordered, dim=-1).cumsum(dim=-1)
+        # Keep the first token whose cumulative mass crosses top_p, so the
+        # nucleus is never empty even when one token holds all the mass.
+        drop = cumulative - torch.softmax(ordered, dim=-1) >= top_p
+        drop[0] = False
+        ordered = ordered.masked_fill(drop, float("-inf"))
+        logits = torch.full_like(logits, float("-inf")).scatter(0, index, ordered)
+
+    probs = torch.softmax(logits, dim=-1)
+    if not torch.isfinite(probs).all() or float(probs.sum()) <= 0:
+        return int(logits.argmax(-1).item())
     return int(torch.multinomial(probs, 1, generator=rng).item())

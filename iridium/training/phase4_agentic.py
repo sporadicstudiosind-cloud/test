@@ -30,7 +30,8 @@ import torch.nn.functional as F
 
 from ..agency.actions import Action, Op, actions_to_span_payload
 from ..agency.scene import Goal, SceneEditor
-from ..codecs.bank import TensorBatch, continuous_dims
+from ..codecs.bank import TensorBatch
+from ..runtime.device import device_of, continuous_dims
 from ..codecs.spans import MODALITY_INDEX, Sample, Span, collate
 from .tasks import Item, control_span
 from .trainer import load_checkpoint
@@ -78,7 +79,8 @@ def build_pair(item: Item, rng: np.random.Generator, tries: int = 8):
     return None
 
 
-def action_batch(item: Item, actions: Sequence[Action], dims: dict[str, int]) -> TensorBatch:
+def action_batch(item: Item, actions: Sequence[Action], dims: dict[str, int],
+                 device=None) -> TensorBatch:
     spans = [s for s in item.sample.spans if not s.supervised]
     spans = spans + [
         control_span(3),
@@ -86,7 +88,7 @@ def action_batch(item: Item, actions: Sequence[Action], dims: dict[str, int]) ->
              atomic=False),
         control_span(2),
     ]
-    return TensorBatch(collate([Sample(spans)], dims))
+    return TensorBatch(collate([Sample(spans)], dims), device=device)
 
 
 def action_logprob(model, batch: TensorBatch, n_loops: int = 1) -> torch.Tensor:
@@ -116,8 +118,9 @@ def dpo_step(model, reference, item, rng, dims, beta: float = 0.1
     if pair is None:
         return None
     winner, loser = pair
-    bw = action_batch(item, winner, dims)
-    bl = action_batch(item, loser, dims)
+    device = device_of(model)
+    bw = action_batch(item, winner, dims, device=device)
+    bl = action_batch(item, loser, dims, device=device)
     lw = action_logprob(model, bw)
     ll = action_logprob(model, bl)
     with torch.no_grad():

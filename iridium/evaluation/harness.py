@@ -21,6 +21,7 @@ import torch
 
 from ..codecs.bank import TensorBatch, continuous_dims
 from ..codecs.spans import MODALITY_INDEX, Sample, collate
+from ..runtime.device import device_of
 from ..runtime.generate import generate
 from ..training.tasks import Item
 
@@ -111,7 +112,7 @@ def grade_field_family(
     errors, persistence = [], []
     for item in items:
         sample = prompt_only(item)
-        batch = TensorBatch(collate([sample], dims))
+        batch = TensorBatch(collate([sample], dims), device=device_of(model))
         from ..runtime.decode import atomic_chunks, slice_batch
 
         cache: dict = {}
@@ -151,7 +152,7 @@ def _prompt_hidden(model, item, n_loops: int = 1):
     from ..runtime.decode import atomic_chunks, slice_batch
 
     dims = continuous_dims(model.cfg.codecs)
-    batch = TensorBatch(collate([prompt_only(item)], dims))
+    batch = TensorBatch(collate([prompt_only(item)], dims), device=device_of(model))
     cache: dict = {}
     hidden = None
     for lo, hi in atomic_chunks(batch, int(batch.modality.shape[1])):
@@ -233,7 +234,8 @@ def grade_verdict_family(model, items, n_loops: int = 1) -> FamilyResult:
 
 
 @torch.no_grad()
-def grade_text_lm(model, items, n_loops: int = 1) -> FamilyResult:
+def grade_text_lm(model, items, n_loops: int = 1,
+                  family: str = "text_lm") -> FamilyResult:
     """Bits per byte on held-out real text.
 
     There is no exact checker here — the target is a likelihood, not an answer.
@@ -244,12 +246,13 @@ def grade_text_lm(model, items, n_loops: int = 1) -> FamilyResult:
     from ..codecs.spans import MODALITY_INDEX
 
     if not items:
-        return FamilyResult(family="text_lm", n=0, correct=0)
+        return FamilyResult(family=family, n=0, correct=0)
     dims = continuous_dims(model.cfg.codecs)
     total_bits = 0.0
     total_bytes = 0
+    device = device_of(model)
     for item in items:
-        batch = TensorBatch(collate([item.sample], dims))
+        batch = TensorBatch(collate([item.sample], dims), device=device)
         out = model(batch, n_loops=n_loops)
         h = out.hidden[:, :-1]
         target = batch.discrete[:, 1:]
@@ -266,7 +269,7 @@ def grade_text_lm(model, items, n_loops: int = 1) -> FamilyResult:
         total_bits += float((nll * mask).sum()) / np.log(2.0)
         total_bytes += int(mask.sum())
     bpb = total_bits / max(total_bytes, 1)
-    result = FamilyResult(family="text_lm", n=len(items), correct=0)
+    result = FamilyResult(family=family, n=len(items), correct=0)
     # Fraction of a uniform byte model's entropy this model removes. There is no
     # exact checker here, so this stands in the accuracy column, and it is scaled
     # rather than thresholded deliberately: a binary "did it beat 8 bits" reports
@@ -296,8 +299,13 @@ def evaluate(
             results[family] = grade_field_family(model, subset, n_loops).as_dict()
         elif family == "scene_goal":
             results[family] = _grade_scene(model, subset, n_loops).as_dict()
-        elif family == "text_lm":
-            results[family] = grade_text_lm(model, subset, n_loops).as_dict()
+        elif family in ("text_lm", "chat"):
+            # Both are scored by likelihood on their supervised bytes: for chat
+            # that is the assistant's turns only, which is the measurement that
+            # answers "is it learning to reply" rather than "is it learning to
+            # continue text".
+            results[family] = grade_text_lm(model, subset, n_loops,
+                                            family=family).as_dict()
         elif family == "false_premise":
             results[family] = grade_verdict_family(model, subset, n_loops).as_dict()
         elif subset and "value" in subset[0].truth:
@@ -317,9 +325,10 @@ def _grade_scene(model, items, n_loops: int = 1) -> FamilyResult:
 
     result = FamilyResult(family="scene_goal", n=len(items), correct=0)
     dims = continuous_dims(model.cfg.codecs)
+    device = device_of(model)
     op_hits = 0
     for item in items:
-        batch = TensorBatch(collate([prompt_only(item)], dims))
+        batch = TensorBatch(collate([prompt_only(item)], dims), device=device)
         from ..runtime.decode import atomic_chunks, slice_batch
 
         cache: dict = {}

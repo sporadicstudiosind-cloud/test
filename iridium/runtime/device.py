@@ -99,6 +99,25 @@ def generator_for(device: str | torch.device, seed: int) -> torch.Generator:
     return torch.Generator().manual_seed(seed)
 
 
+def device_of(module: torch.nn.Module) -> torch.device:
+    """Where this module's parameters actually live.
+
+    Every path that builds a batch needs this. ``TensorBatch`` defaults to CPU,
+    so an evaluation or generation helper that forgets it works perfectly on a
+    CPU machine and dies on the first GPU with *"Expected all tensors to be on
+    the same device"* — pointing at an embedding lookup, several frames deep,
+    nowhere near the line that actually made the CPU tensor. A CPU-only test
+    suite cannot catch this, which is exactly why it reaches users.
+
+    Falls back to CPU for a module with no parameters at all.
+    """
+    for param in module.parameters():
+        return param.device
+    for buf in module.buffers():
+        return buf.device
+    return torch.device("cpu")
+
+
 def verify(info: Optional[DeviceInfo] = None) -> dict:
     """Run the operations this model needs and report which actually work."""
     info = info or detect()

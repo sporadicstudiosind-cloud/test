@@ -59,17 +59,22 @@ def build_corpus(
     mixture: Optional[dict[str, float]] = None,
     text_mix: Optional[dict[str, float]] = None,
     text_window: int = 256,
+    chat_mix: Optional[dict[str, float]] = None,
 ) -> Corpus:
     """Assemble a corpus. ``text_lm`` in the mixture streams *real* text.
 
     The synthetic families are generated locally and are exactly checkable;
     ``text_lm`` pulls from the licensed corpora in ``iridium.data.text_corpus``
     and is graded in bits per byte rather than by an exact checker, because
-    there is no right answer to score against — only a likelihood.
+    there is no right answer to score against — only a likelihood. ``chat``
+    does the same with real conversations, supervised on the assistant's turns
+    only, and is what makes the model answer a question rather than continue
+    the paragraph the question was written in.
     """
     mixture = dict(mixture) if mixture else dict(DEFAULT_MIXTURE)
     text_weight = float(mixture.get("text_lm", 0.0))
-    mixture = {k: v for k, v in mixture.items() if k != "text_lm"}
+    chat_weight = float(mixture.get("chat", 0.0))
+    mixture = {k: v for k, v in mixture.items() if k not in ("text_lm", "chat")}
     unknown = set(mixture) - set(GENERATORS)
     if unknown:
         raise ValueError(f"unknown families in mixture: {sorted(unknown)}")
@@ -78,12 +83,16 @@ def build_corpus(
     families = list(mixture)
     weights = np.array([mixture[f] for f in families]) / total
     n_text = int(round(n_items * text_weight)) if text_weight > 0 else 0
+    n_chat = int(round(n_items * chat_weight)) if chat_weight > 0 else 0
     items: list[Item] = []
     if n_text:
         from ..data.text_corpus import text_items
         items.extend(text_items(n_text, window=text_window, mix=text_mix,
                                 seed=seed, split=split))
-        n_items = max(n_items - len(items), 0)
+    if n_chat:
+        from ..data.chat_corpus import chat_items
+        items.extend(chat_items(n_chat, mix=chat_mix, seed=seed, split=split))
+    n_items = max(n_items - len(items), 0)
     if families:
         for _ in range(n_items):
             family = families[int(rng.choice(len(families), p=weights))]
