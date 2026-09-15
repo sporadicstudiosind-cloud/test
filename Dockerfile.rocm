@@ -1,0 +1,48 @@
+# Iridium-1 on AMD GPUs (ROCm).
+#
+# No separate code path exists for AMD: PyTorch's ROCm build exposes the GPU
+# through the same torch.cuda API via HIP, so `.to("cuda")` lands on a Radeon
+# or Instinct card. What this image supplies is the right wheel index and the
+# runtime groups the device nodes need.
+#
+#   docker build -f Dockerfile.rocm -t iridium-rocm .
+#   docker run --rm -it \
+#       --device=/dev/kfd --device=/dev/dri \
+#       --group-add video --ipc=host \
+#       --security-opt seccomp=unconfined \
+#       -p 8080:8080 iridium-rocm
+#
+# Then check what the card actually supports before trusting a run:
+#   docker run ... iridium-rocm python -m iridium.runtime.device
+FROM rocm/dev-ubuntu-22.04:6.2-complete
+
+ARG ROCM_WHEEL_INDEX=https://download.pytorch.org/whl/rocm6.2
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app \
+    PORT=8080 \
+    HSA_OVERRIDE_GFX_VERSION="" \
+    IRIDIUM_ENABLE_1B=0
+
+WORKDIR /app
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-pip git \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --index-url ${ROCM_WHEEL_INDEX} torch \
+ && pip3 install numpy pyyaml
+
+COPY iridium/ /app/iridium/
+COPY serve/ /app/serve/
+COPY experiments/ /app/experiments/
+
+# Fail the build rather than the first request.
+RUN python3 -c "import torch; print('torch', torch.__version__, '| hip', torch.version.hip)" \
+ && python3 -c "from iridium.config import get_config; c = get_config('nano100m'); \
+    print('config ok:', f'{c.n_params:,}', 'params')"
+
+EXPOSE 8080
+CMD ["python3", "serve/server.py"]
