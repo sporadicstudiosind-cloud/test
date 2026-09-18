@@ -53,7 +53,9 @@ class TrainConfig:
     accumulate: int = 1
     #: "adamw" | "adamw_8bit" | "paged_adamw" | "adafactor" | "sgd".
     #: ``paged_adamw`` keeps the moments in host RAM.
-    optimizer: str = "adamw"
+    optimizer: str = "eager_adamw"
+    precision: str = "auto"  # auto | fp32 | fp16 | bf16
+    max_length: int | None = None
     #: On CUDA OOM, halve the micro-batch and retry rather than losing the run.
     oom_retry: bool = True
 
@@ -89,13 +91,24 @@ class Trainer:
         out_dir: Optional[Path] = None,
         device: str = "cpu",
     ) -> None:
-        self.model = model
+        if min(cfg.steps, cfg.batch_size, cfg.accumulate, cfg.log_every) < 1:
+            raise ValueError("steps, batch size, accumulation and log interval must be positive")
+        if not train_corpus.items:
+            raise ValueError("training corpus is empty")
+        if not 1 <= cfg.n_loops <= model.cfg.router.max_loops:
+            raise ValueError("n_loops exceeds the configured loop budget")
+        self.model = model.to(device)
         self.cfg = cfg
         self.weights = weights or LossWeights()
         self.device = device
         self.out_dir = Path(out_dir) if out_dir else None
+        if cfg.max_length is not None and not 2 <= cfg.max_length <= model.cfg.max_seq_len:
+            raise ValueError("max_length must lie within model context and be >= 2")
+        if not hasattr(torch.amp, "GradScaler"):
+            raise RuntimeError("This training path requires PyTorch 2.3+ with torch.amp.GradScaler")
         self.loader = BatchLoader(
-            train_corpus, model.cfg.codecs, cfg.batch_size, cfg.seed, device=device
+            train_corpus, model.cfg.codecs, cfg.batch_size, cfg.seed, device=device,
+            max_length=cfg.max_length or model.cfg.max_seq_len
         )
         self.history: list[dict[str, Any]] = []
         self._apply_freeze()
@@ -106,34 +119,18 @@ class Trainer:
         )
         from ..runtime.device import generator_for
         self.generator = generator_for(device, cfg.seed)
-
-    def _forward_with_retry(self, batch):
-        """Forward + loss, halving the micro-batch once on CUDA OOM.
-
-        An OOM mid-run otherwise throws away everything done so far. The
-        allocator's cache has to be emptied before retrying, or the retry hits
-        the same wall against memory that is reserved but not in use.
-        """
-        try:
-            return self.model.losses(
-                batch, n_loops=self.cfg.n_loops, generator=self.generator
-            )
-        except torch.cuda.OutOfMemoryError:
-            if not self.cfg.oom_retry or self.loader.batch_size <= 1:
-                raise
-            self.optimizer.zero_grad(set_to_none=True)
-            from ..runtime.memory import free_memory
-            free_memory(verbose=False)
-            new_size = max(1, self.loader.batch_size // 2)
-            print(f"[trainer] CUDA OOM at micro-batch {self.loader.batch_size}; "
-                  f"retrying at {new_size} and doubling accumulation to keep the "
-                  f"effective batch", flush=True)
-            self.loader.batch_size = new_size
-            self.cfg = replace(self.cfg, accumulate=self.cfg.accumulate * 2)
-            batch, _ = next(self._infinite_batches())
-            return self.model.losses(
-                batch, n_loops=self.cfg.n_loops, generator=self.generator
-            )
+        cuda = str(device).startswith("cuda")
+        precision = cfg.precision
+        if precision == "auto":
+            precision = ("bf16" if torch.cuda.is_bf16_supported() else "fp16") if cuda else "fp32"
+        if precision not in ("fp32", "fp16", "bf16") or (not cuda and precision != "fp32"):
+            raise ValueError("use fp32 on CPU; CUDA supports fp32/fp16/bf16")
+        if precision == "bf16" and not torch.cuda.is_bf16_supported():
+            raise ValueError("this GPU does not support bf16; use fp16")
+        self.precision = precision
+        self.amp_dtype = torch.float16 if precision == "fp16" else torch.bfloat16
+        self.scaler = torch.amp.GradScaler("cuda", enabled=precision == "fp16")
+        self.completed_steps = 0
 
     def _apply_freeze(self) -> None:
         if not self.cfg.freeze:
@@ -150,35 +147,52 @@ class Trainer:
     def train(
         self, on_eval: Optional[Callable[[int], dict[str, Any]]] = None
     ) -> list[dict[str, Any]]:
-        torch.manual_seed(self.cfg.seed)
+        if not self.completed_steps:
+            torch.manual_seed(self.cfg.seed)
         self.model.train()
-        step = 0
+        step = self.completed_steps
         started = time.time()
         stream = self._infinite_batches()
+        overflow_retries = 0
         while step < self.cfg.steps:
-            batch, items = next(stream)
             lr = cosine_lr(step, self.cfg)
             for group in self.optimizer.param_groups:
                 group["lr"] = lr
-
-            # Accumulate: the gradient of a batch is the sum of the gradients
-            # of its parts, so N micro-batches cost N times the compute and one
-            # micro-batch of activation memory.
-            report = {}
-            for micro in range(self.cfg.accumulate):
-                if micro:
-                    batch, items = next(stream)
-                losses, out = self._forward_with_retry(batch)
-                total, report = combine(losses, self.weights)
-                (total / self.cfg.accumulate).backward()
-            norm = grad_global_norm(self.model.parameters())
-            if self.cfg.grad_clip:
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.cfg.grad_clip
-                )
-            self.optimizer.step()
-            self.optimizer.zero_grad(set_to_none=True)
-
+            # An OOM restarts the entire update, never an individual forward.
+            # Catch outside the helper frame so failed graphs can be released.
+            try:
+                report, diagnostics, norm, updated = self._update(stream)
+            except torch.cuda.OutOfMemoryError:
+                self.optimizer.zero_grad(set_to_none=True)
+                if not self.cfg.oom_retry or self.loader.batch_size <= 1:
+                    raise
+                import sys
+                exc = sys.exc_info()[1]
+                exc.__traceback__ = None
+                old = self.loader.batch_size
+                effective = old * self.cfg.accumulate
+                new = max(1, old // 2)
+                self.loader.batch_size = new
+                self.cfg = replace(self.cfg, batch_size=new,
+                                   accumulate=math.ceil(effective / new))
+                scale_state = self.scaler.state_dict()
+                self.scaler = torch.amp.GradScaler("cuda", enabled=self.precision == "fp16")
+                self.scaler.load_state_dict(scale_state)
+                stream = self._infinite_batches()  # discard old prebuilt groups
+                import gc
+                gc.collect()
+                torch.cuda.empty_cache()
+                print(f"[trainer] retry whole update: micro-batch {old}->{new}; "
+                      f"accumulate={self.cfg.accumulate}", flush=True)
+                continue
+            if not updated:
+                overflow_retries += 1
+                if overflow_retries >= 16:
+                    raise FloatingPointError("16 consecutive fp16 overflows; restart in fp32")
+                print("[trainer] fp16 overflow: reduced loss scale; retry update", flush=True)
+                continue
+            overflow_retries = 0
+            self.completed_steps = step + 1
             if step % self.cfg.log_every == 0 or step == self.cfg.steps - 1:
                 record = {
                     "step": step,
@@ -186,7 +200,7 @@ class Trainer:
                     "grad_norm": norm,
                     "elapsed": time.time() - started,
                     **report,
-                    **self._router_diagnostics(out),
+                    **diagnostics,
                 }
                 self.history.append(record)
                 print(self._format(record), flush=True)
@@ -211,6 +225,40 @@ class Trainer:
                 self.save(f"step{step}")
             step += 1
         return self.history
+
+    def _update(self, stream):
+        self.optimizer.zero_grad(set_to_none=True)
+        report = {}
+        diagnostics = {}
+        for _ in range(self.cfg.accumulate):
+            batch, _items = next(stream)
+            with torch.autocast(device_type="cuda" if str(self.device).startswith("cuda") else "cpu",
+                                dtype=self.amp_dtype, enabled=self.precision != "fp32"):
+                losses, out = self.model.losses(batch, n_loops=self.cfg.n_loops,
+                                                generator=self.generator)
+                total, micro_report = combine(losses, self.weights)
+            if not bool(torch.isfinite(total)):
+                raise FloatingPointError("non-finite loss; optimizer update cancelled")
+            self.scaler.scale(total / self.cfg.accumulate).backward()
+            for key, value in micro_report.items():
+                report[key] = report.get(key, 0.0) + value / self.cfg.accumulate
+            diagnostics = self._router_diagnostics(out)
+            del losses, out, total, batch
+        self.scaler.unscale_(self.optimizer)
+        params = [p for p in self.model.parameters() if p.grad is not None]
+        norm = torch.nn.utils.clip_grad_norm_(params, self.cfg.grad_clip or float("inf"),
+                                             error_if_nonfinite=False, foreach=False)
+        if not bool(torch.isfinite(norm)) and self.precision != "fp16":
+            raise FloatingPointError("non-finite gradient; optimizer update cancelled")
+        previous_scale = self.scaler.get_scale()
+        try:
+            self.scaler.step(self.optimizer)
+        except torch.cuda.OutOfMemoryError as exc:
+            raise RuntimeError("OOM during optimizer update; restart from last checkpoint with "
+                               "a smaller model/optimizer. Retrying could double-update weights.") from exc
+        self.scaler.update()
+        self.optimizer.zero_grad(set_to_none=True)
+        return report, diagnostics, float(norm), self.scaler.get_scale() >= previous_scale
 
     def _infinite_batches(self):
         while True:
@@ -250,6 +298,27 @@ class Trainer:
 
     # -- persistence ------------------------------------------------------
 
+    def resume(self, path):
+        # Trusted local training checkpoints only: pickle contains optimizer/RNG state.
+        blob = torch.load(path, map_location="cpu", weights_only=False)
+        if blob["manifest"]["model_config"] != self.model.cfg.to_dict():
+            raise ValueError("resume model config differs")
+        if blob["manifest"]["train_config"]["optimizer"] != self.cfg.optimizer:
+            raise ValueError("resume optimizer differs")
+        if blob["manifest"].get("precision") != self.precision:
+            raise ValueError("resume precision differs")
+        self.model.load_state_dict(blob["state_dict"])
+        self.optimizer.load_state_dict(blob["optimizer"])
+        self.scaler.load_state_dict(blob["scaler"])
+        self.completed_steps = blob["completed_steps"]
+        self.history = blob.get("history", [])
+        torch.set_rng_state(blob["torch_rng"].cpu())
+        self.generator.set_state(blob["generator_rng"].cpu())
+        self.loader.rng.bit_generator.state = blob["loader_rng"]
+        if blob.get("cuda_rng") is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all([v.cpu() for v in blob["cuda_rng"]])
+        # A resumed loader starts a new shuffle; this is not bit-exact replay.
+
     def manifest(self, extra: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         inventory = self.model.parameter_inventory()
         data = {
@@ -263,6 +332,9 @@ class Trainer:
                 p.numel() for p in self.model.parameters() if p.requires_grad
             ),
             "torch_version": torch.__version__,
+            "precision": self.precision,
+            "completed_steps": self.completed_steps,
+            "data": getattr(self, "data_info", {}),
         }
         if extra:
             data.update(extra)
@@ -278,9 +350,17 @@ class Trainer:
                 "state_dict": self.model.state_dict(),
                 "manifest": self.manifest(extra),
                 "history": self.history,
+                "optimizer": self.optimizer.state_dict(),
+                "scaler": self.scaler.state_dict(),
+                "completed_steps": self.completed_steps,
+                "torch_rng": torch.get_rng_state(),
+                "generator_rng": self.generator.get_state(),
+                "loader_rng": self.loader.rng.bit_generator.state,
+                "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             },
-            path,
+            path.with_suffix(".pt.tmp"),
         )
+        path.with_suffix(".pt.tmp").replace(path)
         (self.out_dir / f"{self.cfg.label}-{tag}.json").write_text(
             json.dumps(
                 {"manifest": self.manifest(extra), "history": self.history},
@@ -292,9 +372,9 @@ class Trainer:
 
 
 def load_checkpoint(path: str | Path, device: str = "cpu") -> tuple[Iridium1, dict]:
-    blob = torch.load(path, map_location=device, weights_only=False)
+    blob = torch.load(path, map_location="cpu", weights_only=False)
     cfg = IridiumConfig.from_dict(blob["manifest"]["model_config"])
-    model = Iridium1(cfg)
+    model = Iridium1(cfg).to(device)
     model.load_state_dict(blob["state_dict"])
     model.eval()
     return model, blob["manifest"]

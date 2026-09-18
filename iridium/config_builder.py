@@ -178,6 +178,32 @@ def all_presets() -> dict[str, IridiumConfig]:
     return {k: preset(k) for k in PRESET_SPECS}
 
 
+def intelligence_preset(name='consumer') -> IridiumConfig:
+    """Controller-first geometries; names describe use, not unverified quality.
+
+    All specialist stacks are deeper than the general core. Larger geometries
+    require substantial hardware; defining them does not implement sharding.
+    """
+    from dataclasses import replace
+    choices = {
+        'consumer_tiny': (256, 4, 4, 6, 2, 32),
+        'consumer': (384, 8, 4, 12, 2, 64),
+        'workstation': (768, 16, 6, 28, 4, 128),
+        'research_large': (2048, 32, 12, 64, 8, 256),
+        'frontier_design': (8192, 64, 32, 128, 16, 512),
+    }
+    if name not in choices:
+        raise ValueError(f'unknown intelligence preset; choose {tuple(choices)}')
+    width, core, banks, depth, kv, slots = choices[name]
+    cfg = build(d_model=width, core_layers=core, n_superstacks=banks,
+                superstack_layers=depth, n_kv_heads=kv, max_loops=8,
+                max_seq_len=1024 if name.startswith('consumer') else 4096,
+                name='iridium-controller-' + name)
+    return replace(cfg, controller_mode=True, qk_norm=True, loop_identity=True,
+                   memory_slots=slots, memory_stride=32, memory_rank=min(64, width // 4),
+                   perception_layers=2 if name.startswith('consumer') else 4, perception_rank=64)
+
+
 # --------------------------------------------------------------------------
 # what it takes to train
 # --------------------------------------------------------------------------

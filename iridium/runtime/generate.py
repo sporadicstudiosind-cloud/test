@@ -31,6 +31,7 @@ class Generated:
     focus: list[float] = field(default_factory=list)
     loops: list[float] = field(default_factory=list)
     stopped: str = "length"
+    actions: list[dict] = field(default_factory=list)
 
     @property
     def mean_focus(self) -> float:
@@ -77,13 +78,24 @@ def generate(
     top_k: int = 0,
     repetition_penalty: float = 1.0,
     stop_ids: Sequence[int] = (2,),
-    n_loops: int = 1,
+    n_loops: Optional[int] = None,
     flow_steps: int = 8,
     allow_continuous: bool = False,
     seed: int = 0,
     text_offset: int = 16,
+    text_only: bool = False,
+    force_modality: Optional[str] = None,
 ) -> Generated:
     """Greedy (``temperature=0``) or sampled continuation of ``sample``."""
+    if n_loops is None:
+        n_loops = min(3, model.cfg.router.max_loops) if model.cfg.controller_mode else 1
+    if len(sample) < 1 or max_new_tokens < 1:
+        raise ValueError("nonempty context and positive generation budget required")
+    if len(sample) + max_new_tokens > model.cfg.max_seq_len:
+        raise ValueError("context plus output exceeds max_seq_len; shorten/chunk the media")
+    if force_modality is not None and force_modality not in MODALITY_INDEX:
+        raise ValueError("unknown forced output modality")
+    model.eval()
     dims = continuous_dims(model.cfg.codecs)
     device = device_of(model)
     batch = TensorBatch(collate([sample], dims), device=device)
@@ -109,13 +121,18 @@ def generate(
             name = "text"
             slot = MODALITY_INDEX["text"]
 
+        if text_only:
+            name, slot = "text", MODALITY_INDEX["text"]
+        if force_modality is not None:
+            name, slot = force_modality, MODALITY_INDEX[force_modality]
         continuous_payload = None
+        action_scalars = None
         if name in ("text", "control"):
             logits = codecs.text_head(h)[0, -1]
             token = _pick(logits, temperature, rng, top_p, top_k,
                           repetition_penalty, result.ids)
         elif name == "action":
-            op_logits, _ = codecs.action_head(h)
+            op_logits, action_scalars = codecs.action_head(h)
             token = _pick(op_logits[0, -1], temperature, rng, top_p, top_k)
         else:
             token = 0
@@ -132,6 +149,9 @@ def generate(
             break
 
         step = _single_token_batch(batch, slot, token, position, continuous_payload)
+        if action_scalars is not None:
+            step.scalars = action_scalars.to(step.scalars.dtype)
+            result.actions.append({"op": token, "operands": action_scalars[0, 0].cpu().tolist()})
         out = model(step, n_loops=n_loops, cache=cache)
         hidden = out.hidden
         position += 1

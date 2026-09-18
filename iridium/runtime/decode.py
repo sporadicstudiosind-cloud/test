@@ -52,6 +52,10 @@ def slice_batch(batch: TensorBatch, start: int, end: int) -> TensorBatch:
         for (b, s, shape) in batch.grids
         if s >= start and s + int(np.prod(shape)) <= end
     ]
+    coords = getattr(batch, 'media_coordinates', None)
+    view.media_coordinates = coords[:, start:end] if coords is not None else None
+    cv = getattr(batch, 'coordinate_valid', None)
+    view.coordinate_valid = cv[:, start:end] if cv is not None else None
     view.meta = batch.meta
     return view
 

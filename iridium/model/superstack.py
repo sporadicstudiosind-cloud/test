@@ -366,6 +366,8 @@ class SuperstackBank(nn.Module):
 
         for s, stack in enumerate(self.stacks):
             member = (decision.stack_index == s).any(dim=-1)      # [B, T]
+            if getattr(decision, "valid", None) is not None:
+                member = member & decision.valid
             n_members = int(member.sum().item())
             stats["per_stack_tokens"].append(n_members)
             if n_members == 0:

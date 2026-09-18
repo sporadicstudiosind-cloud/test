@@ -28,7 +28,7 @@ from ..codecs.spans import Sample, Span, text_span
 #: Role markers, in the control-token block reserved below ``TEXT_OFFSET``.
 #: 1–6 are taken (BOS, EOS, SEP, PAD, VERDICT_TRUE, VERDICT_FALSE).
 USER, ASSISTANT, SYSTEM = 7, 8, 9
-ROLE_TOKEN = {"user": USER, "assistant": ASSISTANT, "system": SYSTEM}
+ROLE_TOKEN = {"user": USER, "assistant": ASSISTANT, "system": SYSTEM, "tool": 10}
 TOKEN_ROLE = {v: k for k, v in ROLE_TOKEN.items()}
 
 BOS, EOS = 1, 2
@@ -128,7 +128,7 @@ class ChatSession:
     top_k: int = 0
     repetition_penalty: float = 1.15
     max_new_tokens: int = 160
-    n_loops: int = 1
+    n_loops: Optional[int] = None
     seed: int = 0
     turns: list[Turn] = field(default_factory=list)
 
@@ -170,6 +170,7 @@ class ChatSession:
             n_loops=self.n_loops,
             seed=self.seed,
             text_offset=TEXT_OFFSET,
+            text_only=True,
         )
         params.update(overrides)
         reply = generate(self.model, sample, **params).text.strip()

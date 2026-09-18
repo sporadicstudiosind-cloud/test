@@ -1,42 +1,11 @@
-"""Fitting a training run into the GPU you actually have.
+"""Conservative training memory estimates and explicit optimizer selection.
 
-**The honest framing first.** PyTorch cannot generally spill CUDA tensors into
-system RAM. There is no flag for it. An activation that does not fit does not
-fit, and a "unified memory" mode that silently pages tensors over PCIe would
-turn a 20-minute run into a multi-hour one without saying so. What *does* exist
-is a set of specific trades, and one of them — a paged optimizer — really is
-optimizer state living in host RAM and moving back on demand.
-
-In descending order of what they buy on a 16 GB card:
-
-1. **Fused attention** (``model/layers.py``). The ``[B, H, T, T]`` score matrix
-   is the dominant allocation in this architecture: at batch 32, 8 heads and a
-   2048-token context it is **4.3 GB per layer** in fp32, and autograd holds
-   one per layer until the backward pass. The fused kernels never build it.
-   This is on by default and is why a T4 run that used to die now starts.
-2. **Gradient accumulation.** Four micro-batches of 8 cost the memory of 8 and
-   the gradient of 32. Nothing is approximated: the only difference from a true
-   batch of 32 is that BatchNorm-style cross-sample statistics would differ, and
-   this model has none.
-3. **Optimizer state off the GPU.** AdamW keeps two fp32 moments per parameter —
-   8 bytes/param, more than the weights themselves. ``paged_adamw`` puts them in
-   host RAM via CUDA unified memory and pages on demand (this is the literal
-   "overflow into system RAM"); ``adamw_8bit`` quantises them to 2 bytes/param
-   instead; ``adafactor`` factors the second moment and drops the first.
-
-**Gradient checkpointing is not on this list, and that is a finding.** It is the
-usual third lever, and in this architecture it is incorrect. The superstacks
-refuse it outright — their layers branch on data, so the recomputed pass is a
-different graph and PyTorch says so. The control core *accepts* it and silently
-returns different gradients: with the stochastic path pinned and the unchecked
-run reproducible to 0.0, enabling it moved one embedding's gradient by 2.75
-while leaving the loss bit-identical. Nothing in a training curve would show
-that. ``Iridium1.enable_gradient_checkpointing`` raises rather than offering it.
-
-And the thing nobody tells you: **interrupting a cell does not free anything.**
-The model, the optimizer and the autograd graph are still referenced by the
-notebook kernel, and PyTorch's caching allocator holds freed blocks as reserve.
-:func:`free_memory` is what actually gives it back.
+SDPA can select fused OR math kernels; masks and routing still consume memory.
+AMP reduces activation storage, while master weights/gradients remain fp32.
+Paged optimizers can migrate state, but are conservatively budgeted at full GPU
+residency. These are estimates, never a promise that a chosen model fits.
+Gradient checkpointing remains disabled because of the earlier implementation's
+reported recomputation problems. free_memory cannot clear the caller's references.
 """
 
 from __future__ import annotations
@@ -126,9 +95,10 @@ def recommend_alloc_conf() -> str:
 
 #: Bytes of optimizer state per parameter, excluding the weights and gradients.
 OPTIMIZER_STATE_BYTES = {
+    "eager_adamw": 8.0,
     "adamw": 8.0,          # two fp32 moments
     "adamw_8bit": 2.0,     # two quantised moments
-    "paged_adamw": 0.0,    # two moments, in host RAM
+    "paged_adamw": 8.0,    # conservative: unified memory may remain GPU-resident
     "adafactor": 4.0,      # factored second moment, no first moment
     "sgd": 0.0,
 }
@@ -136,46 +106,35 @@ OPTIMIZER_STATE_BYTES = {
 
 def build_optimizer(params, kind: str = "adamw", lr: float = 3e-4,
                     weight_decay: float = 0.01, betas=(0.9, 0.95)):
-    """Build an optimizer, falling back loudly rather than silently.
+    """Build the requested optimizer; missing optional dependencies fail explicitly.
 
-    ``paged_adamw`` and ``adamw_8bit`` need ``bitsandbytes`` and a CUDA device.
-    When either is missing this says so and uses plain AdamW, because a run that
-    quietly used four times the memory you budgeted for is worse than one that
-    told you it was going to.
+    EagerAdamW bypasses torch.optim's lazy Dynamo import. No fallback changes
+    the memory budget behind the user's back.
     """
     params = list(params)
     kind = kind.lower()
 
+    if kind == "eager_adamw":
+        from ..training.eager_adamw import EagerAdamW
+        return EagerAdamW(params, lr=lr, weight_decay=weight_decay, betas=betas)
     if kind in ("paged_adamw", "adamw_8bit"):
+        if not all(p.is_cuda for p in params):
+            raise ValueError(f"{kind} requires CUDA parameters")
         try:
             import bitsandbytes as bnb
-        except ImportError:
-            print(f"[memory] {kind} needs bitsandbytes (pip install bitsandbytes); "
-                  "using adamw, which holds 8 bytes/param of state on the GPU")
-            kind = "adamw"
-        else:
-            if not torch.cuda.is_available():
-                print(f"[memory] {kind} needs CUDA; using adamw")
-                kind = "adamw"
-            elif kind == "paged_adamw":
-                return bnb.optim.PagedAdamW32bit(
-                    params, lr=lr, weight_decay=weight_decay, betas=betas)
-            else:
-                return bnb.optim.AdamW8bit(
-                    params, lr=lr, weight_decay=weight_decay, betas=betas)
-
+        except ImportError as exc:
+            raise RuntimeError("Install bitsandbytes or explicitly choose eager_adamw; "
+                               "automatic fallback would invalidate the memory budget") from exc
+        cls = bnb.optim.PagedAdamW32bit if kind == "paged_adamw" else bnb.optim.AdamW8bit
+        return cls(params, lr=lr, weight_decay=weight_decay, betas=betas)
     if kind == "adafactor":
-        try:
-            from torch.optim import Adafactor
-            return Adafactor(params, lr=lr, weight_decay=weight_decay)
-        except ImportError:
-            print("[memory] this torch has no Adafactor; using adamw")
-            kind = "adamw"
-
+        return torch.optim.Adafactor(params, lr=lr, weight_decay=weight_decay)
     if kind == "sgd":
         return torch.optim.SGD(params, lr=lr, weight_decay=weight_decay, momentum=0.0)
-
-    return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay, betas=betas)
+    if kind != "adamw":
+        raise ValueError(f"unknown optimizer {kind!r}")
+    return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay, betas=betas,
+                            foreach=False)
 
 
 # --------------------------------------------------------------------------
@@ -228,7 +187,10 @@ def plan_training(
     optimizer_kind: str = "adamw",
     fused_attention: bool = True,
     bytes_per_element: int = 4,
-    headroom: float = 0.15,
+    headroom: float = 0.25,
+    d_model: int = 512,
+    d_ff: int = 1536,
+    n_loops: int = 1,
 ) -> MemoryPlan:
     """Estimate, then pick a micro-batch that fits.
 
@@ -236,6 +198,8 @@ def plan_training(
     implementation in ways no formula captures exactly. It is deliberately
     pessimistic, and the run is what settles it.
     """
+    if min(batch_size, seq_len, n_layers, n_heads, d_model, d_ff, n_loops) < 1:
+        raise ValueError("memory plan dimensions must be positive")
     weights = n_params * bytes_per_element
     grads = n_params * bytes_per_element
     opt = n_params * OPTIMIZER_STATE_BYTES.get(optimizer_kind, 8.0)
@@ -245,16 +209,18 @@ def plan_training(
     def activations(micro: int) -> float:
         if fused_attention:
             # Residual stream and the block's internal tensors, per layer.
-            per_layer = micro * seq_len * 8 * bytes_per_element
+            per_layer = micro * seq_len * (8 * d_model + 3 * d_ff) * bytes_per_element
+            # Explicit masks and SDPA math fallback can still be quadratic.
+            per_layer += micro * n_heads * seq_len * seq_len * bytes_per_element
         else:
             # The score matrix dominates and is quadratic in sequence length.
             per_layer = micro * n_heads * seq_len * seq_len * bytes_per_element
-        return per_layer * n_layers * 4 / 1e9    # 4x for the block's intermediates
+        return per_layer * n_layers * n_loops / 1e9    # 4x for the block's intermediates
 
     micro = batch_size
     while micro > 1 and fixed + activations(micro) > usable:
         micro //= 2
-    accumulate = max(1, batch_size // micro) if micro else 1
+    accumulate = max(1, (batch_size + micro - 1) // micro)
 
     return MemoryPlan(
         parameters=n_params,
@@ -274,7 +240,7 @@ def suggestions(plan: MemoryPlan) -> list[str]:
     """What to change, most effective first, only what still applies."""
     out: list[str] = []
     if plan.fits:
-        return ["it fits; the estimate is pessimistic, so the run is the real test"]
+        return ["fits the estimate; actual runtime memory still needs measurement"]
     if plan.optimizer_kind == "adamw":
         out.append(f"OPTIMIZER = 'paged_adamw'  — moves {plan.optimizer_gb:.1f} GB "
                    "of moments into host RAM (needs bitsandbytes)")

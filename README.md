@@ -1,3 +1,15 @@
+> **Research-loop revision:** [SELF_IMPROVEMENT.md](docs/SELF_IMPROVEMENT.md) describes
+> the new bounded candidate-training/evaluation/promotion loop and optional notebook
+> section. Includes token-specific pondering losses, learned specialist integration
+> and refinement-loop identity. Research is OFF by default; this revision is untested.
+
+> **September 17 implementation update:** Start with [UPDATE_NOTES](docs/UPDATE_NOTES.md)
+> and [MULTIMODAL_DATA](docs/MULTIMODAL_DATA.md). All four notebooks now share the
+> Kaggle optimizer workaround, AMP/accumulation and paired media/tool training path.
+> This revision was **not tested or trained**, at the user's request. Historical
+> measurements/checkpoints below do not validate the new code or its media abilities.
+> No newly trained weights are supplied. Upload this source before cloning from a notebook.
+
 # Iridium-1
 
 **One dense multimodal foundation model** that perceives, reasons, generates, simulates and

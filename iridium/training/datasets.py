@@ -72,6 +72,10 @@ def build_corpus(
     the paragraph the question was written in.
     """
     mixture = dict(mixture) if mixture else dict(DEFAULT_MIXTURE)
+    if n_items < 1 or any(not np.isfinite(v) or v < 0 for v in mixture.values()) or sum(mixture.values()) <= 0:
+        raise ValueError("positive item count and nonnegative finite mixture weights required")
+    norm = sum(mixture.values())
+    mixture = {k: v / norm for k, v in mixture.items() if v > 0}
     text_weight = float(mixture.get("text_lm", 0.0))
     chat_weight = float(mixture.get("chat", 0.0))
     mixture = {k: v for k, v in mixture.items() if k not in ("text_lm", "chat")}
@@ -81,7 +85,7 @@ def build_corpus(
     total = sum(mixture.values())
     rng = np.random.default_rng(seed)
     families = list(mixture)
-    weights = np.array([mixture[f] for f in families]) / total
+    weights = np.array([mixture[f] for f in families]) / total if total else np.array([])
     n_text = int(round(n_items * text_weight)) if text_weight > 0 else 0
     n_chat = int(round(n_items * chat_weight)) if chat_weight > 0 else 0
     items: list[Item] = []
@@ -92,6 +96,8 @@ def build_corpus(
     if n_chat:
         from ..data.chat_corpus import chat_items
         items.extend(chat_items(n_chat, mix=chat_mix, seed=seed, split=split))
+    if (n_text and not any(it.family == "text_lm" for it in items)) or (n_chat and not any(it.family == "chat" for it in items)):
+        raise RuntimeError("requested real text/chat source returned no examples; check network and dataset access")
     n_items = max(n_items - len(items), 0)
     if families:
         for _ in range(n_items):
@@ -159,6 +165,8 @@ class BatchLoader:
             batch = collate(
                 [it.sample for it in items], self.dims, self.n_scalars, self.max_length
             )
+            if not (batch.valid[:, 1:] & batch.supervised[:, 1:]).any(axis=1).all():
+                raise ValueError("example has no targets within context; shorten/rebuild the corpus")
             yield TensorBatch(batch, device=self.device), items
 
 

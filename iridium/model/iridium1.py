@@ -1,38 +1,16 @@
-"""Iridium-1: control core, macro-router, superstack bank, omnimodal codecs.
+"""Iridium: one native multimodal model with routed subject stacks.
 
-    tokens -> codecs -> core stage I -> router -> superstacks -> core stage II
-                             ^                                        |
-                             +------------- ponder loop --------------+
-                                                                      |
-                                                          heads -> emissions
+Legacy mode splits the core around the bank. Controller mode executes the full
+core on every cycle, optionally dispatches specialists, then returns their states
+to the next core cycle for integration. Emission is chosen only from core states.
+The last budgeted cycle cannot dispatch work that has no return/integration pass.
 
-One forward pass of the whole thing, with a cache that supports exact
-incremental decoding.
-
-The loop-granularity constraint
--------------------------------
-The ponder loop raises the same coherence problem one level up from the
-superstacks. If token ``t`` stops after one loop and token ``t+1`` takes two,
-then at loop 2 the core's cache holds keys only for tokens that reached loop 2,
-and ``t+1`` attends to a history with holes in it. Three ways out exist:
-
-1. *copy-through*: a halted token's final state is re-projected at every later
-   loop, so the history is dense. Correct, and costs a projection per halted
-   token per loop.
-2. *sparse loop history*: attention at loop ``L`` covers exactly the tokens that
-   also reached loop ``L``. Cacheable and causal — this is what the superstacks
-   do — but teacher forcing with uniform loops and sampling with variable loops
-   then compute different functions.
-3. *chunk-uniform loops*: every token in a chunk takes the same number of
-   loops, chosen by the chunk's halting statistic.
-
-This implementation uses **(3)**, and the halting distribution is still learned
-per token and trained through the PonderNet objective, so the policy is a
-serving choice rather than a training assumption. (1) is specified and not
-implemented; it is listed as such in docs/capability-register.md rather than
-quietly assumed to work. Choosing (2) silently is the failure this note exists
-to prevent — it is the version that passes every unit test and then samples
-differently from how it was trained.
+Training scores a learned distribution over stopping cycles. Inference selects
+the first confident stop, with a forced final-budget stop. Both still unroll core
+cycles to maintain dense cache histories: this is NOT compute-saving per-token
+halting. Learned input memory is causal and optional. LongContextSession is a
+separate lossy serving path whose long-range recall must be trained and measured.
+This revision has not been executed or tested.
 """
 
 from __future__ import annotations
@@ -75,6 +53,12 @@ class Iridium1(nn.Module):
         self.cfg = cfg
         self.rope = RotaryEmbedding(cfg.core.d_head, cfg.core.rope_theta)
         self.codecs = CodecBank(cfg.codecs, cfg.core.d_model)
+        self.codecs.spatial_coordinates = cfg.controller_mode
+        if cfg.perception_layers:
+            from .perception import PerceptualEncoder
+            for name, encoder in list(self.codecs.encoders.items()):
+                self.codecs.encoders[name] = PerceptualEncoder(encoder, cfg.core.d_model,
+                                                              cfg.perception_rank, cfg.perception_layers)
         self.core = ControlCore(cfg.core, self.rope, cfg.router.max_loops)
         self.router = MacroRouter(
             cfg.core.d_model,
@@ -84,13 +68,43 @@ class Iridium1(nn.Module):
             cfg.stacks.n_layers,
         )
         self.bank = SuperstackBank(cfg, self.rope)
+        if cfg.controller_mode:
+            self.core.dispatch_head = nn.Linear(cfg.core.d_model, 1)
+            nn.init.constant_(self.core.dispatch_head.bias, 1.)
+            nn.init.constant_(self.core.loop_halt_head.bias, -2.)
+        from .context_memory import ContextMemory
+        self.context_memory = ContextMemory(cfg.core.d_model, cfg.memory_slots,
+                                            cfg.memory_stride, cfg.memory_rank) if cfg.memory_slots else None
+        self.bank_gate = nn.Parameter(torch.zeros(cfg.core.d_model)) if cfg.gated_bank else None
+        from .layers import GroupedQueryAttention, BridgeCrossAttention
+        for module in self.modules():
+            if isinstance(module, (GroupedQueryAttention, BridgeCrossAttention)):
+                module.qk_norm = cfg.qk_norm
+        # Scale residual-producing projections as depth grows. Existing checkpoint
+        # weights override this initialization on load.
+        import math
+        with torch.no_grad():
+            for module in self.modules():
+                from .layers import TransformerBlock, BridgeCrossAttention
+                if isinstance(module, TransformerBlock):
+                    depth = cfg.core.n_layers + cfg.stacks.n_layers
+                    std = 1.0 / math.sqrt(2 * depth * cfg.core.d_model)
+                    nn.init.normal_(module.attn.wo.weight, std=std)
+                    nn.init.normal_(module.ffn.down.weight, std=std)
+                elif isinstance(module, BridgeCrossAttention):
+                    nn.init.normal_(module.wo.weight, std=1.0 / math.sqrt(
+                        2 * cfg.stacks.n_layers * cfg.stacks.d_model))
 
     # -- introspection ----------------------------------------------------
 
     def parameter_inventory(self) -> dict[str, int]:
         groups = {"codecs": self.codecs, "core": self.core, "router": self.router,
                   "superstacks": self.bank}
+        if self.context_memory is not None:
+            groups["context_memory"] = self.context_memory
         counts = {k: sum(p.numel() for p in m.parameters()) for k, m in groups.items()}
+        if self.bank_gate is not None:
+            counts["bank_gate"] = self.bank_gate.numel()
         counts["total"] = sum(p.numel() for p in self.parameters())
         return counts
 
@@ -139,13 +153,22 @@ class Iridium1(nn.Module):
         use_depth_cap: bool = False,
         embedded: Optional[torch.Tensor] = None,
     ) -> ModelOutput:
-        n_loops = n_loops or 1
+        if n_loops is None:
+            n_loops = min(3, self.cfg.router.max_loops) if self.cfg.controller_mode else 1
+        if n_loops < 1:
+            raise ValueError("n_loops must be positive")
         if n_loops > self.cfg.router.max_loops:
             raise ValueError(
                 f"n_loops {n_loops} exceeds max_loops {self.cfg.router.max_loops}"
             )
 
         h = self.codecs.embed(batch) if embedded is None else embedded
+        memory_loss = h.sum() * 0
+        if self.context_memory is not None:
+            memory_state = cache.get(("context", "state")) if cache is not None else None
+            h, memory_state, memory_loss = self.context_memory(h, batch.valid, memory_state)
+            if cache is not None:
+                cache[("context", "state")] = memory_state.detach() if not self.training else memory_state
         positions = batch.positions
         b, t, _ = h.shape
 
@@ -162,9 +185,13 @@ class Iridium1(nn.Module):
         stats: dict = {"stack_stats": [], "balance_loss": h.new_zeros(()),
                        "z_loss": h.new_zeros(()), "depth_kl": h.new_zeros(())}
 
+        stats["memory_reconstruction"] = memory_loss
+        stats["core_dispatch"] = []
+        stats["subject_loss"] = h.sum() * 0
         for loop in range(n_loops):
             start = 0 if loop == 0 else self.cfg.router.loop_entry
-            h1 = self.core.stage_one(h, positions, keep, loop, cache, start)
+            h1 = (self.core._run(h, positions, keep, range(self.cfg.core.n_layers), loop, cache)
+                  if self.cfg.controller_mode else self.core.stage_one(h, positions, keep, loop, cache, start))
 
             if loop == 0:
                 # The focus summary, like the bridge states, is a loop-0
@@ -176,7 +203,45 @@ class Iridium1(nn.Module):
                 loop_index=loop,
                 span_id=getattr(batch, "span_id", None),
                 summary=summary,
+                valid=batch.valid,
             )
+            if self.cfg.controller_mode:
+                dispatch = torch.sigmoid(self.core.dispatch_head(self.core.finalize(h1))).squeeze(-1)
+                selected = (dispatch >= .5) & batch.valid
+                # Full unroll preserves dense per-cycle core cache histories.
+                # No dispatch on the final cycle: results must return to the core.
+                if loop == n_loops - 1:
+                    selected = torch.zeros_like(selected)
+                decision.valid = selected
+                straight_through = selected.to(dispatch.dtype) + dispatch - dispatch.detach()
+                decision.stack_weight = decision.stack_weight * straight_through[..., None]
+                stats["core_dispatch"].append(dispatch)
+            # Real subject labels supervise domain selection; they are optional.
+            # During specialist-only training they also force the selected domain.
+            forced = getattr(self, "training_subject", None)
+            if forced is not None:
+                # Router gather backward retains its original index tensor.
+                # Do not mutate that tensor when imposing curriculum routes.
+                decision.stack_index = decision.stack_index.clone()
+                decision.stack_weight = decision.stack_weight.clone()
+                decision.valid = decision.valid.clone() if decision.valid is not None else batch.valid.clone()
+            for row, metadata in enumerate(batch.meta):
+                subject = metadata.get("subject")
+                names = self.cfg.stacks.specializations
+                if subject in names:
+                    index = names.index(subject)
+                    mask = batch.valid[row]
+                    probs = decision.gate_probs[row, :, index].float().clamp_min(1e-8)
+                    stats["subject_loss"] = stats["subject_loss"] - probs[mask].log().mean() / len(batch.meta)
+                    if self.cfg.controller_mode and loop < n_loops - 1:
+                        # Labelled specialist work also teaches the dispatch
+                        # head; otherwise a collapsed hard bypass has no task
+                        # gradient with which to discover an unused specialist.
+                        stats["subject_loss"] = stats["subject_loss"] - dispatch[row][mask].float().clamp_min(1e-8).log().mean() / len(batch.meta)
+                    if forced == subject and (not self.cfg.controller_mode or loop < n_loops - 1):
+                        decision.stack_index[row] = index
+                        decision.stack_weight[row] = 1. / decision.stack_index.shape[-1]
+                        decision.valid[row] = mask
             decisions.append(decision)
 
             # The bridge reads the core's *loop-0* stage-I states for the
@@ -224,16 +289,29 @@ class Iridium1(nn.Module):
             stats["z_loss"] = stats["z_loss"] + decision.z_loss
             stats["depth_kl"] = stats["depth_kl"] + stack_stats["depth_kl"]
 
-            h2 = self.core.stage_two(h1 + stack_out, positions, keep, loop, cache)
+            if self.bank_gate is not None:
+                # A per-channel learned integration strength; gate starts at 0.5.
+                stack_out = stack_out * torch.sigmoid(self.bank_gate)
+            h2 = h1 if self.cfg.controller_mode else self.core.stage_two(h1 + stack_out, positions, keep, loop, cache)
             per_loop.append(self.core.finalize(h2))
             halt_logits.append(self.core.halt_logit(h2))
-            h = self.core.reinject(h2, entry)
+            h = self.core.reinject(h2 + stack_out if self.cfg.controller_mode else h2, entry)
+            if self.cfg.loop_identity:
+                h = h + self.router.loop_embed.weight[loop + 1]
 
         lam = torch.sigmoid(torch.stack(halt_logits, dim=-1))
         lam = torch.cat([lam[..., :-1], torch.ones_like(lam[..., -1:])], dim=-1)
         loop_p = stopping_distribution(lam)
         stacked = torch.stack(per_loop, dim=-1)                  # [B, T, d, L]
         mixed = (stacked * loop_p.unsqueeze(-2)).sum(-1)
+        if self.cfg.controller_mode and not self.training:
+            # Select a completed core state while still maintaining later caches.
+            stops = lam >= exit_threshold
+            stops[..., -1] = True
+            first = stops.to(torch.int64).argmax(-1)
+            mixed = stacked.gather(-1, first[..., None, None].expand(-1, -1, stacked.shape[-2], 1)).squeeze(-1)
+            stats["chosen_cycle"] = first + 1
+        stats["subject_loss"] = stats["subject_loss"] / n_loops
 
         for key in ("balance_loss", "z_loss", "depth_kl"):
             stats[key] = stats[key] / n_loops
@@ -280,14 +358,15 @@ class Iridium1(nn.Module):
         """
         out = self.forward(batch, n_loops=n_loops)
         per_loop_losses: list[dict[str, torch.Tensor]] = []
-        for hidden in out.per_loop_hidden:
-            per_loop_losses.append(self.codecs.losses(hidden, batch, generator))
-
+        for index, hidden in enumerate(out.per_loop_hidden):
+            per_loop_losses.append(self.codecs.losses(
+                hidden, batch, generator, token_weight=out.loop_stopping[..., index]))
+        # Each token's error is weighted by that token's own stopping probability.
+        # Averaging stopping probabilities across the batch first loses this link.
         keys = per_loop_losses[0].keys()
-        weight = out.loop_stopping.mean(dim=(0, 1))              # [L]
-        losses = {
-            k: sum(w * d[k] for w, d in zip(weight, per_loop_losses)) for k in keys
-        }
+        losses = {k: sum(d[k] for d in per_loop_losses) for k in keys}
+        losses["memory_reconstruction"] = .01 * out.stats["memory_reconstruction"]
+        losses["subject_routing"] = .1 * out.stats["subject_loss"]
         losses["router_balance"] = out.stats["balance_loss"]
         losses["router_z"] = out.stats["z_loss"]
         losses["depth_kl"] = self.cfg.router.depth_beta * out.stats["depth_kl"]

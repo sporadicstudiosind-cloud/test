@@ -463,9 +463,24 @@ class IridiumConfig:
     codecs: CodecConfig = field(default_factory=CodecConfig)
     max_seq_len: int = 4096
     dropout: float = 0.0
+    gated_bank: bool = False
+    loop_identity: bool = False
+    qk_norm: bool = False  # opt-in head RMS normalization before rotary attention
+    controller_mode: bool = False
+    memory_slots: int = 0
+    memory_stride: int = 32
+    memory_rank: int = 64
+    perception_layers: int = 0
+    perception_rank: int = 64
     notes: str = ""
 
     def __post_init__(self) -> None:
+        if self.perception_layers < 0 or self.perception_rank < 1:
+            raise ConfigError("invalid perceptual encoder dimensions")
+        if self.memory_slots < 0 or self.memory_stride < 1 or self.memory_rank < 1:
+            raise ConfigError("invalid context memory dimensions")
+        if self.controller_mode and self.gated_bank:
+            raise ConfigError("controller_mode integrates in the core; disable gated_bank")
         if self.stacks.core_d_model == 0:
             object.__setattr__(
                 self, "stacks", replace(self.stacks, core_d_model=self.core.d_model)
@@ -489,6 +504,14 @@ class IridiumConfig:
             "superstacks": self.stacks.params,
             "router": self.router.params(d, self.stacks.n_stacks),
         }
+        if self.controller_mode:
+            parts["controller_dispatch"] = d + 1
+        if self.memory_slots:
+            parts["context_memory"] = 4 * d * self.memory_rank + self.memory_rank + d + 2
+        if self.perception_layers:
+            parts["perceptual_encoders"] = len(self.codecs.continuous_dims()) * self.perception_layers * (2 * d * self.perception_rank + self.perception_rank + 3 * d)
+        if self.gated_bank:
+            parts["bank_gate"] = d
         parts.update(
             {f"codec.{k}": v for k, v in self.codecs.params(d).items()}
         )
@@ -543,6 +566,12 @@ class IridiumConfig:
         )
         lo = core + k * self._stack_cost(self.stacks.min_depth, spectral=False)
         hi = core + sum(costs[:k])
+        if self.controller_mode:
+            extras = self.core.d_model + 1
+            if self.memory_slots:
+                extras += 4 * self.core.d_model * self.memory_rank + self.memory_rank + self.core.d_model + 2
+            lo = core + extras
+            hi = core + extras + sum(costs[:min(len(costs), k * (self.router.max_loops - 1))])
         return lo, hi
 
     def flops_per_token(self) -> tuple[int, int]:
@@ -611,6 +640,15 @@ class IridiumConfig:
             "codecs": asdict(self.codecs),
             "max_seq_len": self.max_seq_len,
             "dropout": self.dropout,
+            "controller_mode": self.controller_mode,
+            "memory_slots": self.memory_slots,
+            "memory_stride": self.memory_stride,
+            "memory_rank": self.memory_rank,
+            "perception_layers": self.perception_layers,
+            "perception_rank": self.perception_rank,
+            "qk_norm": self.qk_norm,
+            "gated_bank": self.gated_bank,
+            "loop_identity": self.loop_identity,
             "notes": self.notes,
         }
 
@@ -628,6 +666,15 @@ class IridiumConfig:
             codecs=CodecConfig(**data.get("codecs", {})),
             max_seq_len=data.get("max_seq_len", 4096),
             dropout=data.get("dropout", 0.0),
+            controller_mode=data.get("controller_mode", False),
+            memory_slots=data.get("memory_slots", 0),
+            memory_stride=data.get("memory_stride", 32),
+            memory_rank=data.get("memory_rank", 64),
+            perception_layers=data.get("perception_layers", 0),
+            perception_rank=data.get("perception_rank", 64),
+            qk_norm=data.get("qk_norm", False),
+            gated_bank=data.get("gated_bank", False),
+            loop_identity=data.get("loop_identity", False),
             notes=data.get("notes", ""),
         )
 

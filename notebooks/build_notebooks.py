@@ -1,607 +1,380 @@
-"""Generate the Colab, Kaggle and generic-Jupyter notebooks from one source.
-
-Three copies of a notebook drift. The shared cells live here once; each target
-differs only in the parts that genuinely differ — how it installs, where it
-detects its accelerator, how it saves, and how it exposes a port.
-
-    python notebooks/build_notebooks.py
-"""
-
-from __future__ import annotations
-
-import json
+"""Generate all four notebooks; this script only writes JSON, never trains/tests."""
 from pathlib import Path
+import json
+import textwrap
 
-BRANCH = "claude/gallant-faraday-lhycva"
-REPO = "https://github.com/sporadicstudiosind-cloud/test.git"
 HERE = Path(__file__).resolve().parent
-
-
-def md(*l):
-    return {"cell_type": "markdown", "metadata": {}, "source": [x + "\n" for x in l]}
-
-
-def code(*l):
-    return {"cell_type": "code", "execution_count": None, "metadata": {},
-            "outputs": [], "source": [x + "\n" for x in l]}
-
-
-# --------------------------------------------------------------------------
-# shared body
-# --------------------------------------------------------------------------
-
-def intro(target: str):
-    free_note = {
-        "colab": "Runtime → Change runtime type → GPU (or TPU), then work down the cells.",
-        "kaggle": ("Settings → Accelerator → GPU T4 x2 (or P100). Kaggle gives 30 GPU-hours "
-                   "a week, the most generous free quota of the three, and the session "
-                   "survives longer than a Colab one."),
-        "jupyter": ("Runs on Lightning AI Studios, SageMaker Studio Lab, Paperspace, a "
-                    "RunPod/Vast pod, or your own machine. Nothing here is host-specific."),
-    }[target]
-    return [
-        md("# Iridium-1 Studio" + ("" if target == "colab" else f" — {target.title()}"),
-           "",
-           "Build, train, grade and talk to a routed control-core model at any size from",
-           "**50 M to 1 T parameters**, on **CUDA, ROCm or TPU**, trained on **licensed,",
-           "attributed** text.",
-           "",
-           "One control core that every token passes through, dispatching to deep domain",
-           "superstacks, choosing its own depth and how many passes to spend. Omnimodal in",
-           "and out: text, image, video, audio, physical fields, geometry, actions and",
-           "typed quantities.",
-           "",
-           free_note,
-           "",
-           "---",
-           "",
-           "### Read this before choosing a size",
-           "",
-           "Every preset is a *real* geometry whose parameter count is computed from tensor",
-           "shapes, not asserted. That is not the same as being trainable on the machine you",
-           "have. The fit cell computes what your device can actually hold and says so",
-           "plainly — including when the answer is no.",
-           "",
-           "Rough guide on a free 16 GB accelerator:",
-           "",
-           "| preset | trains free? | why |",
-           "|---|---|---|",
-           "| 50 M – 500 M | yes, comfortably | AdamW fp32 fits with room for activations |",
-           "| 1 B | with `adamw_8bit` or `adafactor` | full fp32 Adam is 16 GB of state alone |",
-           "| 8 B | LoRA only | 127 GB of optimizer state otherwise |",
-           "| 16 B and up | no | needs sharding across many devices |",
-           "",
-           "You can build and cost every size regardless. A 1 T config is a costed design,",
-           "not a model you are about to train."),
-    ]
-
-
-def setup(target: str):
-    if target == "colab":
-        install = [
-            f"!git clone --depth 1 --branch {BRANCH} {REPO} iridium 2>/dev/null || (cd iridium && git pull -q)",
-            "%cd iridium",
-            "!pip -q install pyyaml datasets psutil",
-        ]
-    elif target == "kaggle":
-        install = [
-            "# Kaggle needs internet enabled: Settings -> Internet -> On",
-            f"!git clone --depth 1 --branch {BRANCH} {REPO} /kaggle/working/iridium 2>/dev/null || true",
-            "%cd /kaggle/working/iridium",
-            "!pip -q install pyyaml datasets psutil",
-        ]
-    else:
-        install = [
-            f"!git clone --depth 1 --branch {BRANCH} {REPO} iridium 2>/dev/null || (cd iridium && git pull -q)",
-            "%cd iridium",
-            "!pip -q install pyyaml datasets psutil",
-            "# If torch is absent, install the build that matches your hardware:",
-            "#   CUDA : pip install torch --index-url https://download.pytorch.org/whl/cu124",
-            "#   ROCm : pip install torch --index-url https://download.pytorch.org/whl/rocm6.2",
-        ]
-    return [
-        md("## 1 · Hardware and code"),
-        code(*install),
-        code(
-            "import sys, os, json; sys.path.insert(0, '.')",
-            "import torch",
-            "from iridium.runtime.device import detect, verify",
-            "info = detect()",
-            "print('torch', torch.__version__)",
-            "print(info.describe())",
-            "print(json.dumps(verify(info), indent=2, default=str))",
-            "",
-            "def host_ram_bytes():",
-            "    \"\"\"Host RAM, without assuming psutil is installed.",
-            "",
-            "    Colab and Kaggle ship psutil; a bare RunPod or Studio Lab image often",
-            "    does not, and a memory *check* that crashes for want of a memory library",
-            "    is a poor joke. os.sysconf works on any Linux, and the cgroup limit,",
-            "    where present, is the number that actually applies to a container --",
-            "    which is the one that decides whether your run gets OOM-killed.\"\"\"",
-            "    try:",
-            "        import psutil",
-            "        total = psutil.virtual_memory().total",
-            "    except ImportError:",
-            "        try:",
-            "            total = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')",
-            "        except (ValueError, OSError):",
-            "            return 8e9   # a deliberately pessimistic floor",
-            "    for path in ('/sys/fs/cgroup/memory.max',",
-            "                 '/sys/fs/cgroup/memory/memory.limit_in_bytes'):",
-            "        try:",
-            "            with open(path) as fh:",
-            "                limit = int(fh.read().strip())",
-            "            if 0 < limit < total:",
-            "                total = limit",
-            "        except (OSError, ValueError):",
-            "            pass",
-            "    return total",
-            "",
-            "print(f'host RAM: {host_ram_bytes()/1e9:.1f} GB')",
-            "",
-            "# DEVICE is defined here, in the cell that always runs. The TPU cell",
-            "# below may override it. An optional cell must never *own* a name the",
-            "# rest of the notebook needs: run the cells out of order, or skip the",
-            "# optional one, and everything downstream dies on NameError.",
-            "DEVICE = info.device",
-            "print('DEVICE =', DEVICE)",
-        ),
-    ]
-
-
-def tpu_cell(target: str):
-    if target != "colab":
-        return [code(
-            "DEVICE = info.device",
-            "print('DEVICE =', DEVICE)",
-        )]
-    return [
-        md("### TPU (optional)",
-           "",
-           "PyTorch reaches TPUs through `torch_xla`, and it is worth knowing what that",
-           "means for *this* architecture before spending time on it: XLA compiles static",
-           "shapes, and the router dispatches a **variable number of tokens** to each",
-           "superstack every step. That forces a recompile per shape, or padding to a fixed",
-           "capacity. So TPU work runs on the **host CPU** of the TPU VM by default — on a",
-           "Colab v5e-1 that is 48 GB of RAM, genuinely useful for the larger presets, just",
-           "slow. Set `FORCE_XLA = True` to drive the accelerator anyway.",
-           "",
-           "This is a real consequence of dynamic routing on XLA, not a missing feature."),
-        code(
-            "FORCE_XLA = False  #@param {type:'boolean'}",
-            "",
-            "if os.environ.get('COLAB_TPU_ADDR') or os.environ.get('TPU_WORKER_ID'):",
-            "    if FORCE_XLA:",
-            "        !pip -q install torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html",
-            "        import torch_xla.core.xla_model as xm",
-            "        DEVICE = xm.xla_device()",
-            "        print('using XLA — expect a recompile on every new routing shape')",
-            "    else:",
-            "        DEVICE = 'cpu'",
-            "        print(f'TPU VM; using host CPU with {host_ram_bytes()/1e9:.0f} GB RAM')",
-            "else:",
-            "    DEVICE = info.device",
-            "print('DEVICE =', DEVICE)",
-        ),
-    ]
-
-
-def param(target: str, line: str, form: str) -> str:
-    """Colab and Kaggle render `#@param` forms; plain Jupyter ignores them."""
-    return f"{line}  #@param {form}" if target in ("colab", "kaggle") else line
-
-
-def design(target: str):
-    p = lambda line, form: param(target, line, form)  # noqa: E731
-    return [
-        md("## 2 · Design the model",
-           "",
-           "Pick a preset, or set `PRESET = 'custom'` and drive every knob yourself. These",
-           "are the actual architectural degrees of freedom:",
-           "",
-           "- **`CORE_LAYERS`** — depth of the control stack every token passes through",
-           "- **`N_SUPERSTACKS`** — how many domain banks the router can choose between",
-           "- **`SUPERSTACK_LAYERS`** — depth of each bank. The design wants this *deeper*",
-           "  than the core; that is what makes it a superstack rather than an expert",
-           "- **`TOP_K`** — how many banks each token visits",
-           "- **`MAX_LOOPS`** — ponder budget: how many times a token may go round again",
-           "- **`MIN_DEPTH`** — floor on the focus ladder, so a token cannot skip everything",
-           "- **`CROSS_STRIDE`** — how often a stack layer cross-attends to the core's history",
-           "- **`SPECTRAL_STACKS`** — which banks carry Fourier operator blocks. These cost",
-           "  `C² × modes²` weights each, so they are opt-in per stack rather than global",
-           "- **`VOCAB_SIZE`** — leave it at 384 unless you know why you are changing it.",
-           "  The text codec is byte-level: it emits raw UTF-8 bytes shifted past the",
-           "  control ids, so 256 values plus control room is the entire reachable",
-           "  vocabulary. A 32,000-row embedding here is not extra capacity, it is rows",
-           "  that never receive a gradient and a softmax over classes the data cannot",
-           "  produce. At the 1 T geometry that mistake costs 1.3 B dead parameters.",
-           "",
-           "`TOP_K` is clamped to `N_SUPERSTACKS - 1`. Routing to every bank is not",
-           "routing: the gate becomes decorative, the balance loss is satisfied by",
-           "construction, and you have a dense ensemble wearing a router."),
-        code(
-            p("PRESET = '100m'", "['50m','100m','500m','1b','8b','16b','24b','100b','200b','1t','custom']"),
-            "",
-            "# --- custom geometry (used when PRESET = 'custom') ---",
-            p("D_MODEL           = 512", "{type:'integer'}"),
-            p("CORE_LAYERS       = 6", "{type:'slider', min:2, max:128, step:1}"),
-            p("N_SUPERSTACKS     = 4", "{type:'slider', min:1, max:64, step:1}"),
-            p("SUPERSTACK_LAYERS = 8", "{type:'slider', min:1, max:256, step:1}"),
-            p("D_HEAD            = 64", "[32, 64, 128] {type:'raw'}"),
-            p("N_KV_HEADS        = 2", "{type:'slider', min:1, max:32, step:1}"),
-            p("TOP_K             = 2", "{type:'slider', min:1, max:8, step:1}"),   # clamped to N_SUPERSTACKS - 1
-            p("MAX_LOOPS         = 3", "{type:'slider', min:1, max:8, step:1}"),
-            p("MIN_DEPTH         = 2", "{type:'slider', min:1, max:64, step:1}"),
-            p("CROSS_STRIDE      = 4", "{type:'slider', min:1, max:32, step:1}"),
-            p("VOCAB_SIZE        = 384", "[288, 320, 384, 512, 1024] {type:'raw'}"),
-            p("MAX_SEQ_LEN       = 2048", "[512, 1024, 2048, 4096, 8192, 16384] {type:'raw'}"),
-            p("SPECTRAL_STACKS   = '0'", "{type:'string'}"),
-            "",
-            "from iridium.config_builder import build, preset, ladder_table, fits",
-            "print(ladder_table()); print()",
-            "",
-            "if PRESET == 'custom':",
-            "    cfg = build(d_model=D_MODEL, core_layers=CORE_LAYERS,",
-            "                n_superstacks=N_SUPERSTACKS, superstack_layers=SUPERSTACK_LAYERS,",
-            "                d_head=D_HEAD, n_kv_heads=N_KV_HEADS, top_k=TOP_K,",
-            "                max_loops=MAX_LOOPS, min_depth=MIN_DEPTH,",
-            "                cross_stride=CROSS_STRIDE, vocab_size=VOCAB_SIZE,",
-            "                max_seq_len=MAX_SEQ_LEN,",
-            "                spectral_stacks=tuple(int(x) for x in SPECTRAL_STACKS.split(',') if x.strip()),",
-            "                name='iridium-1-custom')",
-            "else:",
-            "    cfg = preset(PRESET)",
-            "",
-            "print(cfg.report().render())",
-            "lo, hi = cfg.flops_per_token()",
-            "print(f'\\n  forward FLOPs/token  {lo/1e9:,.2f} - {hi/1e9:,.2f} GFLOP')",
-            "print(f'  core                 {cfg.core.n_layers} layers, d={cfg.core.d_model}')",
-            "print(f'  superstacks          {cfg.stacks.n_stacks} x {cfg.stacks.n_layers} layers')",
-            "print(f'  routing              top-{cfg.router.top_k}, up to {cfg.router.max_loops} loops')",
-        ),
-        md("## 3 · Will it actually train here?",
-           "",
-           "The cell that stops you wasting an afternoon. It compares the optimizer state",
-           "your geometry needs against the memory the device reports, and names a cheaper",
-           "strategy when the answer is no.",
-           "",
-           "| strategy | bytes/param | what it gives up |",
-           "|---|---|---|",
-           "| `adamw_fp32` | 16 | nothing — the reference |",
-           "| `adamw_8bit` | 6 | quantised moments |",
-           "| `adafactor` | 6 | the first moment entirely |",
-           "| `sgd` | 4 | all momentum |",
-           "| `lora` | 2.2 | the base weights stay frozen |",
-           "",
-           "Those are the *weights* side. What actually runs a card out of memory is the",
-           "activations, so the plan below estimates those too and picks a micro-batch that",
-           "fits — accumulating to keep your effective batch. `OPTIMIZER='paged_adamw'`",
-           "is the one option that genuinely spills into system RAM: it keeps AdamW's",
-           "moments in host memory through CUDA unified memory and pages them on demand.",
-           "",
-           "**PyTorch cannot spill activations to host RAM**, and no flag makes it. The",
-           "fix for those is to make them smaller, which the fused attention kernels",
-           "already did: this model's `[batch, heads, T, T]` score matrix was 4.3 GB per",
-           "layer at batch 32 and a 2048-token context, and it is no longer built at all."),
-        code(
-            p("STRATEGY = 'adamw_fp32'", "['adamw_fp32','adamw_bf16','adamw_8bit','adafactor','sgd','lora']"),
-            p("OPTIMIZER = 'adamw'", "['adamw','paged_adamw','adamw_8bit','adafactor','sgd']"),
-            p("BATCH_SIZE_PLANNED = 32", "{type:'integer'}"),
-            "",
-            "if str(DEVICE).startswith('cuda'):",
-            "    avail = torch.cuda.get_device_properties(0).total_memory",
-            "    where = torch.cuda.get_device_name(0)",
-            "else:",
-            "    avail = host_ram_bytes(); where = 'host RAM'",
-            "print(f'device: {where}  ({avail/1e9:.1f} GB)')",
-            "print(fits(cfg, avail, STRATEGY).render()); print()",
-            "for s in ['adamw_fp32','adamw_8bit','adafactor','sgd','lora']:",
-            "    r = fits(cfg, avail, s)",
-            "    print(f\"   {s:<12}{r.bytes_needed/1e9:9.1f} GB  {'fits' if r.fits else 'no'}\")",
-            "",
-            "# What actually runs out: the activations, which the weights-only",
-            "# figures above do not include.",
-            "from iridium.runtime.memory import plan_training, suggestions, memory_report",
-            "plan = plan_training(cfg.n_params, BATCH_SIZE_PLANNED, cfg.max_seq_len,",
-            "                     cfg.core.n_layers + cfg.stacks.n_layers,",
-            "                     cfg.core.n_query_heads, avail, optimizer_kind=OPTIMIZER)",
-            "print(); print(plan.render())",
-            "if not plan.fits:",
-            "    print(); [print('   *', line) for line in suggestions(plan)]",
-            "ACCUMULATE = plan.accumulate",
-            "BATCH_SIZE = plan.micro_batch",
-            "print(f'\\nusing micro-batch {BATCH_SIZE} x {ACCUMULATE} accumulation')",
-        ),
-    ]
-
-
-def data(target: str):
-    p = lambda line, form: param(target, line, form)  # noqa: E731
-    return [
-        md("## 4 · Data — licensed, attributed, streamed",
-           "",
-           "Every source names its licence and what that licence obliges you to do, and the",
-           "obligation travels into the run manifest. A CC BY-SA corpus requires attribution",
-           "and share-alike on derivatives; a model that cannot say what it was trained on",
-           "cannot honour that.",
-           "",
-           "Text streams rather than downloads — the notebook reads the few hundred megabytes",
-           "it will consume rather than the terabytes it will not.",
-           "",
-           "**`CHAT_WEIGHT` is what makes it answer you.** Byte prediction over books and",
-           "encyclopedia articles produces a model that *continues prose*: prompted with",
-           "\"what is a weir?\" it writes the next paragraph of an article about weirs rather",
-           "than replying to you. Turn-taking has to be in the training data, so real",
-           "conversations are — Dolly 15k (CC BY-SA 3.0) and OASST1 (Apache 2.0), both",
-           "human-written, supervised on the assistant's turns only.",
-           "",
-           "The synthetic families alongside it are **exactly checkable**, and that is what",
-           "makes the grading later mean something. Real text can only be scored by",
-           "likelihood; `channel_depth` can be scored against Manning's law."),
-        code(
-            p("USE_REAL_TEXT = True", "{type:'boolean'}"),
-            p("CHAT_WEIGHT   = 0.45", "{type:'slider', min:0, max:0.9, step:0.05}"),
-            p("TEXT_WEIGHT   = 0.25", "{type:'slider', min:0, max:0.9, step:0.05}"),
-            p("N_TRAIN_ITEMS = 40000", "{type:'integer'}"),
-            "",
-            "from iridium.data.text_corpus import DEFAULT_MIX, licence_notice, probe_availability",
-            "from iridium.data.chat_corpus import DEFAULT_CHAT_MIX, chat_licence_notice",
-            "from iridium.training.datasets import build_corpus, describe",
-            "",
-            "mixture = {'channel_depth': 0.30, 'channel_intervention': 0.20,",
-            "           'false_premise': 0.10, 'field_rollout': 0.10, 'scene_goal': 0.10}",
-            "if USE_REAL_TEXT:",
-            "    real = CHAT_WEIGHT + TEXT_WEIGHT",
-            "    scale = max(0.0, 1.0 - real) / sum(mixture.values())",
-            "    mixture = {k: v * scale for k, v in mixture.items()}",
-            "    mixture['text_lm'] = TEXT_WEIGHT",
-            "    mixture['chat'] = CHAT_WEIGHT",
-            "    print(licence_notice(DEFAULT_MIX)); print()",
-            "    print(chat_licence_notice()); print()",
-            "    print('reachability:', probe_availability(DEFAULT_MIX)); print()",
-            "",
-            "train = build_corpus(N_TRAIN_ITEMS, seed=0, split='train', mixture=mixture)",
-            "test  = build_corpus(800, seed=1000, split='test', mixture=mixture)",
-            "extra = build_corpus(400, seed=2000, split='extrapolation', mixture=mixture)",
-            "print(describe(train))",
-        ),
-        md("## 5 · Verify the architecture before spending time on it",
-           "",
-           "Two properties, twenty seconds. The parameter formulae that cost a 1 T",
-           "configuration are the same ones describing this model — at the rungs that",
-           "instantiate, the difference is exactly zero. And the parity gate proves cached",
-           "decoding computes what teacher forcing trained; three mechanisms in this design",
-           "could break that silently, and two of them did during development.",
-           "",
-           "If either fails, nothing downstream means anything."),
-        code("!python -m pytest tests/unit/test_config_inventory.py tests/integration/test_kv_parity.py -q"),
-    ]
-
-
-def train_and_grade(target: str):
-    p = lambda line, form: param(target, line, form)  # noqa: E731
-    return [
-        md("## 6 · Train"),
-        code(
-            p("STEPS      = 3000", "{type:'integer'}"),
-            p("LR         = 5e-4", "{type:'number'}"),
-            p("N_LOOPS    = 1", "{type:'slider', min:1, max:3, step:1}"),
-            "",
-            "import time",
-            "from pathlib import Path",
-            "from iridium.model.iridium1 import Iridium1",
-            "from iridium.training.trainer import TrainConfig, Trainer",
-            "from iridium.training.losses import LossWeights",
-            "from iridium.evaluation.harness import evaluate",
-            "",
-            "model = Iridium1(cfg).to(DEVICE)",
-            "print(f'{sum(q.numel() for q in model.parameters()):,} parameters on {DEVICE}')",
-            "before = evaluate(model, test, max_per_family=12)",
-            "print('untrained:', json.dumps(before)[:500])",
-            "",
-            "tcfg = TrainConfig(steps=STEPS, batch_size=BATCH_SIZE, lr=LR, n_loops=N_LOOPS,",
-            "                   accumulate=ACCUMULATE, optimizer=OPTIMIZER,",
-            "                   seed=0, label=f'studio-{PRESET}',",
-            "                   log_every=max(STEPS//60, 1), checkpoint_every=max(STEPS//6, 1))",
-            "trainer = Trainer(model, train, tcfg, LossWeights(),",
-            "                  out_dir=Path('runs/studio'), device=str(DEVICE))",
-            "t0 = time.time(); trainer.train()",
-            "print(f'trained in {(time.time()-t0)/60:.1f} min')",
-        ),
-        md("## 7 · Grade — against independent computation, not against itself",
-           "",
-           "Free-running generation, checked against the analytic Manning law, the spectral",
-           "solver, or the environment's own goal predicate. Every score sits beside the",
-           "baseline a model earns by **ignoring its input entirely**, because a number with",
-           "no baseline cannot be read.",
-           "",
-           "`extrapolation` draws from a parameter band the training split never contains, so",
-           "a score there cannot come from having seen a neighbour."),
-        code(
-            "model.eval()",
-            "results = {'interpolation': evaluate(model, test, max_per_family=40),",
-            "           'extrapolation': evaluate(model, extra, max_per_family=40),",
-            "           'untrained': before}",
-            "print(f\"{'family':<26}{'trained':>9}{'baseline':>10}   verdict\")",
-            "for fam, r in results['interpolation'].items():",
-            "    acc, base = r.get('accuracy', 0), r.get('baseline', 0)",
-            "    v = 'LEARNED' if acc > base + 0.1 else ('at baseline' if acc >= base else 'BELOW baseline')",
-            "    note = ''",
-            "    if 'median_relative_error' in r:",
-            "        note = f\"   median err {r['median_relative_error']*100:.2f}%\"",
-            "    if 'bits_per_byte' in r:",
-            "        # Not an accuracy: the column holds the fraction of a uniform byte",
-            "        # model's entropy removed, and bits/byte is the number to read.",
-            "        note = f\"   {r['bits_per_byte']:.3f} bits/byte (uniform = 8.0)\"",
-            "    print(f'{fam:<26}{acc:>9.3f}{base:>10.3f}   {v}{note}')",
-        ),
-        md("## 8 · Did the bank specialise, or just balance?",
-           "",
-           "These pull in opposite directions and a router can look healthy on one while",
-           "failing the other. Maximal entropy with zero mutual information means every stack",
-           "gets an equal share of every task — balanced, and a very expensive way to be one",
-           "stack. `I(family; stack)` is what separates them."),
-        code(
-            "from iridium.evaluation.routing import analyse",
-            "from iridium.training.datasets import BatchLoader",
-            "print(analyse(model, BatchLoader(test, cfg.codecs, 16, 0, device=str(DEVICE))).render())",
-        ),
-    ]
-
-
-def save_and_chat(target: str):
-    save_extra = {
-        "colab": ["# from google.colab import drive; drive.mount('/content/drive')",
-                  "# !cp iridium-fp16.pt /content/drive/MyDrive/"],
-        "kaggle": ["# /kaggle/working persists as a notebook output — the file is downloadable",
-                   "!ls -la /kaggle/working/iridium/iridium-fp16.pt"],
-        "jupyter": ["# The checkpoint is on local disk; copy it wherever this host persists."],
-    }[target]
-    port_cell = {
-        "colab": ["from google.colab.output import eval_js",
-                  "print('Chat UI:', eval_js('google.colab.kernel.proxyPort(8080)'))"],
-        "kaggle": ["# Kaggle does not forward ports. Use ask() above, or expose it with a",
-                   "# tunnel you trust if you want the browser UI.",
-                   "print('use ask(...) above; Kaggle has no public port forwarding')"],
-        "jupyter": ["# Lightning AI and Studio Lab forward ports from the sidebar;",
-                    "# elsewhere use ssh -L 8080:localhost:8080.",
-                    "print('serving on :8080 — forward it from your host UI')"],
-    }[target]
-    return [
-        md("## 9 · Save",
-           "",
-           "fp16, with the licence notice in the manifest so the corpus obligations travel",
-           "with the weights."),
-        code(
-            "from iridium.data.text_corpus import licence_notice, DEFAULT_MIX",
-            "path = trainer.save('final', extra={",
-            "    'evaluation': results,",
-            "    'data_licences': licence_notice(DEFAULT_MIX) if USE_REAL_TEXT else 'synthetic only'})",
-            "print('saved', path)",
-            "blob = torch.load(path, map_location='cpu', weights_only=False)",
-            "half = {k: (v.half() if v.is_floating_point() else v) for k, v in blob['state_dict'].items()}",
-            "torch.save({'state_dict': half, 'manifest': blob['manifest']}, 'iridium-fp16.pt')",
-            "print('fp16:', os.path.getsize('iridium-fp16.pt')/1e6, 'MB')",
-            *save_extra,
-        ),
-        md("## 10 · Talk to it",
-           "",
-           "A real conversation: type anything, get a reply, history carried across turns.",
-           "`chat.send(...)` conditions on the whole exchange, stops when the model ends its",
-           "turn, and samples with a nucleus filter and a repetition penalty — greedy",
-           "decoding at this size loops inside two sentences.",
-           "",
-           "**What to expect.** A 50 M–1 B model trained for an hour or two on a free GPU",
-           "will take turns, stay on topic for a sentence or so, and be wrong about facts.",
-           "It is not going to be ChatGPT, which was trained on a budget several orders of",
-           "magnitude larger. Longer training and a bigger preset both help, and neither",
-           "closes that gap. The physics questions below are the part with a checkable",
-           "answer, and they are where this model is actually worth anything."),
-        code(
-            "from iridium.runtime.chat import ChatSession",
-            "",
-            "chat = ChatSession(model, temperature=0.8, top_p=0.92,",
-            "                   repetition_penalty=1.15, max_new_tokens=160)",
-            "",
-            "for message in ['Hello! Who are you?',",
-            "                'What is a weir?',",
-            "                'Can you explain it more simply?']:",
-            "    print(f'you     : {message}')",
-            "    print(f'iridium : {chat.send(message)}\\n')",
-        ),
-        md("### Your turn",
-           "",
-           "Run this cell and type. Blank line or `quit` ends it; `reset` clears the history."),
-        code(
-            "while True:",
-            "    try:",
-            "        message = input('you     : ').strip()",
-            "    except (EOFError, KeyboardInterrupt):",
-            "        break",
-            "    if not message or message.lower() in ('quit', 'exit'):",
-            "        break",
-            "    if message.lower() == 'reset':",
-            "        chat.reset(); print('(history cleared)'); continue",
-            "    print(f'iridium : {chat.send(message)}\\n')",
-        ),
-        md("### The part with a checkable answer",
-           "",
-           "Ask for a number and it answers with one — beside the analytic value, so you can",
-           "check it rather than believe it. Numbers travel as **typed quantities**, never as",
-           "decimal prose: the same mapping learned from digit-bytes puts 18.6% of answers",
-           "inside a 2% tolerance, and learned from typed values, 100%."),
-        code(
-            "import threading, subprocess, urllib.request, time",
-            "os.environ.update({'IRIDIUM_CHECKPOINT': str(path), 'PYTHONPATH': '.',",
-            "                   'PORT': '8080', 'IRIDIUM_ENABLE_1B': '0'})",
-            "threading.Thread(target=lambda: subprocess.run(['python','serve/server.py']),",
-            "                 daemon=True).start()",
-            "time.sleep(30)",
-            "",
-            "def ask(q, loops=1):",
-            "    body = json.dumps({'prompt': q, 'loops': loops}).encode()",
-            "    req = urllib.request.Request('http://127.0.0.1:8080/api/ask', body,",
-            "                                 {'Content-Type': 'application/json'})",
-            "    return json.load(urllib.request.urlopen(req, timeout=180))",
-            "",
-            "for q in ['normal depth | S=0.0020 n=0.030 q=3.0',",
-            "          'depth ratio | S=0.0020 n=0.030 q=3.0 x2.0',",
-            "          'doubling the discharge doubles the flow depth']:",
-            "    r = ask(q); a = r['answer']; t = r['telemetry']",
-            "    if 'predicted' in a:",
-            "        print(f\"{q}\\n   model {a['predicted']:.4f}   analytic {a['analytic']:.4f}\"",
-            "              f\"   err {a['relative_error']*100:.2f}%   within 2%: {a['within_2pct']}\")",
-            "    else:",
-            "        print(f\"{q}\\n   verdict {a['verdict']}\")",
-            "    print(f\"   {t['stacks_used']}/{len(t['routing'])} stacks,\"",
-            "          f\" focus {t['mean_focus']:.3f}, {t['expected_loops']:.2f} ponder loops\")",
-        ),
-        code(*port_cell),
-        md("---",
-           "",
-           "### Reading the results honestly",
-           "",
-           "- `channel_depth` and `channel_intervention` are **affine in log space** once",
-           "  inputs arrive as typed quantities. Above 0.85 on interpolation is the expected",
-           "  outcome; well below means something is wrong, not that the task is hard. A",
-           "  reference 104 M run reached **0.850 at 1.16% median error**.",
-           "- `extrapolation` will be lower. The gap between the columns is the honest",
-           "  measure of what was learned versus fitted.",
-           "- `false_premise` draws from only ten distinct claims, so a high score is",
-           "  **memorisation, not judgement**. Do not read it as calibration.",
-           "- `field_rollout` must beat the persistence baseline (emit the input frame",
-           "  unchanged) to mean anything at all.",
-           "- `text_lm` is bits per byte against a uniform baseline of 8.0. It is a",
-           "  likelihood, not an accuracy, and a good number says nothing about whether the",
-           "  model is *right* about anything.",
-           "- Stack entropy near `log(n_stacks)` means no collapse. `I(family; stack)` near",
-           "  zero means no specialisation — balanced but undifferentiated, which is an",
-           "  expensive way to be one stack."),
-    ]
-
-
 TARGETS = {
-    "colab": ("iridium_studio.ipynb", {"accelerator": "GPU", "colab": {"provenance": [], "toc_visible": True}}),
-    "kaggle": ("iridium_studio_kaggle.ipynb", {"accelerator": "GPU"}),
-    "jupyter": ("iridium_studio_jupyter.ipynb", {}),
+    'kaggle': 'iridium_studio_kaggle.ipynb',
+    'colab': 'iridium_studio.ipynb',
+    'jupyter': 'iridium_studio_jupyter.ipynb',
+    'colab_legacy': 'train_iridium_colab.ipynb',
 }
 
+def cell(kind, text):
+    out = {'cell_type': kind, 'metadata': {}, 'source': textwrap.dedent(text).strip().splitlines(True)}
+    if kind == 'code':
+        out.update(execution_count=None, outputs=[])
+    return out
 
-def main() -> int:
-    for target, (filename, meta) in TARGETS.items():
-        cells = (intro(target) + setup(target) + tpu_cell(target) + design(target)
-                 + data(target) + train_and_grade(target) + save_and_chat(target))
-        nb = {"cells": cells,
-              "metadata": {**meta,
-                           "kernelspec": {"display_name": "Python 3", "name": "python3"},
-                           "language_info": {"name": "python"}},
-              "nbformat": 4, "nbformat_minor": 0}
-        path = HERE / filename
-        path.write_text(json.dumps(nb, indent=1))
-        print(f"wrote {path.name}: {len(cells)} cells")
-    return 0
+def notebooks(target):
+    cells = []
+    def md(s): cells.append(cell('markdown', s))
+    def code(s): cells.append(cell('code', s))
+    md(f'''# Iridium Studio — {target.replace('_legacy', '')}
+    Shared core → sparse routed superstacks → refinement → native modality heads.
 
+    **Start a fresh kernel/session after the old `torch._dynamo` failure.**
+    This revision defaults to eager AdamW without torch.optim/Dynamo imports,
+    fp32 master weights plus automatic GPU mixed precision, conservative batches,
+    and resumable optimizer checkpoints. It does not upgrade your installed torch.
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+    Upload this revision to GitHub before using the clone cell, or attach its ZIP
+    and set `PROJECT_ZIP`. Kaggle: enable Internet for GitHub/pip/text datasets and
+    select a GPU. Two T4s have separate VRAM; this notebook uses ONE GPU.
+
+    No tests or training were run to validate this revision. The notebook is
+    prepared for your run; hardware/runtime/data availability still determine success.
+    There are no automatic tests, evaluations, servers or interactive loops in Run All.
+    Training only runs when you execute its cell.
+    ''')
+    md('## 1. Load the updated source')
+    code(f'''
+    import os, sys, subprocess, zipfile
+    from pathlib import Path
+    PROJECT_ZIP = ''  # e.g. /kaggle/input/iridium-update/iridium-update.zip
+    REPO_URL = 'https://github.com/sporadicstudiosind-cloud/test.git'
+    BRANCH = 'claude/gallant-faraday-lhycva'
+    BASE = Path('/kaggle/working') if '{target}' == 'kaggle' else Path.cwd()
+    ROOT = BASE / 'iridium-updated'
+    if 'iridium' in sys.modules:
+        raise RuntimeError('Restart the kernel before changing source revisions')
+    if not ROOT.exists():
+        if PROJECT_ZIP:
+            staging = BASE / 'iridium-upload'
+            staging.mkdir(exist_ok=True)
+            with zipfile.ZipFile(PROJECT_ZIP) as archive:
+                for member in archive.infolist():
+                    if not (staging / member.filename).resolve().is_relative_to(staging.resolve()):
+                        raise ValueError('unsafe archive path')
+                archive.extractall(staging)
+            candidates = list(staging.rglob('iridium/training/eager_adamw.py'))
+            if len(candidates) != 1:
+                raise RuntimeError('ZIP must contain exactly one updated repository')
+            ROOT = candidates[0].parents[2]
+        else:
+            subprocess.run(['git', 'clone', '--depth', '1', '--branch', BRANCH, REPO_URL, str(ROOT)], check=True)
+    if not (ROOT / 'iridium/training/eager_adamw.py').is_file():
+        raise RuntimeError('Old checkout. Upload the update, then use a fresh ROOT directory')
+    os.chdir(ROOT)
+    sys.path.insert(0, str(ROOT))
+    # Preserve the host CUDA/PyTorch installation. Optional BNB is NOT installed by default.
+    subprocess.run([sys.executable, '-m', 'pip', 'install', '-q',
+                    'numpy>=1.24,<3', 'pyyaml>=6,<7', 'psutil>=5,<8',
+                    'Pillow>=10,<13', 'datasets>=3,<5'], check=True)
+    print('source:', ROOT)
+    import hashlib
+    SOURCE_DIGEST = hashlib.sha256(b''.join(p.relative_to(ROOT).as_posix().encode() + p.read_bytes()
+                                          for p in sorted((ROOT / 'iridium').rglob('*.py')))).hexdigest()
+    print('source SHA256:', SOURCE_DIGEST)
+    ''')
+    md('''## Controller and memory revision
+    Each cycle runs the full general core. It chooses core recurrence or subject
+    dispatch; returned specialist states are integrated by the next full core cycle.
+    Emission selects a completed core state. Fixed unrolling maintains causal caches.
+    Consumer presets have shallower cores and deeper specialist stacks.
+
+    A small neural compressor and learned read gate are trained inside the model.
+    Normal decoding uses exact local KV. `LongContextSession` bounds KV, retaining
+    lossy learned memory across windows, with a 1,048,576-token ingestion budget.
+    This is NOT a demonstrated million-token recall capability. Native image tiling
+    preserves source pixels; training those capabilities requires matching examples.
+    See `docs/ARCHITECTURE_V2.md` for mechanisms, tradeoffs and unvalidated boundaries.
+    ''')
+    md('## 2. Hardware and training settings')
+    code(f'''
+    import json, math, torch, psutil
+    from dataclasses import replace
+    from iridium.config_builder import intelligence_preset
+    from iridium.runtime.memory import plan_training
+    print('Python:', sys.version.split()[0], 'torch:', torch.__version__, 'torch path:', torch.__file__)
+    DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    if '{target}' == 'kaggle' and DEVICE == 'cpu':
+        raise RuntimeError('Enable a Kaggle GPU accelerator and restart the session')
+    if torch.cuda.is_available():
+        print('GPU:', torch.cuda.get_device_name(0), 'available GPUs:', torch.cuda.device_count())
+    PRESET = 'consumer_tiny'  # consumer, workstation, research_large, frontier_design
+    MAX_SEQ_LEN = 1024
+    MICRO_BATCH = 1
+    EFFECTIVE_BATCH = 16
+    STEPS = 3000
+    LR = 3e-4
+    N_LOOPS = 3           # full core -> optional stacks -> core integration; bounded at 8
+    OPTIMIZER = 'eager_adamw'  # native adamw/adafactor/sgd and explicit BNB options remain available
+    PRECISION = 'auto'    # T4/P100: fp16+scaler; capable GPUs: bf16; CPU: fp32
+    SEED = 0
+    RESUME = ''          # trusted full training checkpoint .pt; increase STEPS to continue
+    cfg = replace(intelligence_preset(PRESET), max_seq_len=MAX_SEQ_LEN)
+    if not 1 <= N_LOOPS <= cfg.router.max_loops:
+        raise ValueError('N_LOOPS exceeds configured budget')
+    avail = torch.cuda.mem_get_info()[0] if DEVICE.startswith('cuda') else psutil.virtual_memory().available
+    plan = plan_training(cfg.n_params, MICRO_BATCH, MAX_SEQ_LEN,
+                         cfg.core.n_layers + cfg.stacks.n_layers * cfg.stacks.n_stacks,
+                         cfg.core.n_query_heads, avail, optimizer_kind=OPTIMIZER,
+                         d_model=max(cfg.core.d_model, cfg.stacks.d_model),
+                         d_ff=max(cfg.core.d_ff, cfg.stacks.d_ff), n_loops=N_LOOPS)
+    print(cfg.report().render())
+    print(plan.render())
+    if not plan.fits:
+        raise RuntimeError('Conservative budget exceeded. Reduce PRESET or MAX_SEQ_LEN')
+    MICRO_BATCH = min(MICRO_BATCH, plan.micro_batch)
+    ACCUMULATE = math.ceil(EFFECTIVE_BATCH / MICRO_BATCH)
+    print('micro batch:', MICRO_BATCH, 'accumulation:', ACCUMULATE,
+          'effective batch:', MICRO_BATCH * ACCUMULATE)
+    ''')
+    md('''## 3. Training data
+    Real text/chat, subject examples and paired speech need Internet. Custom media uses JSONL (see
+    `docs/MULTIMODAL_DATA.md`). Text-only data does not train speech, image, video,
+    geometry or tool-use competence. `MEDIA_MANIFEST` supports interleaved media,
+    assistant outputs, and tool observations; no external AI model is used.
+    Start with short speech segments/64px media. Split by source recording, not
+    neighboring clips. Dataset attribution is recorded in the checkpoint.
+    ''')
+    code('''
+    from iridium.training.datasets import build_corpus, Corpus, describe
+    from iridium.data.multimodal import load_manifest
+    from iridium.data.text_corpus import DEFAULT_MIX, licence_notice
+    from iridium.data.chat_corpus import chat_licence_notice
+    from iridium.codecs.media import FORMAT
+    from iridium.data.subject_corpus import real_subject_corpus
+    from iridium.data.speech_corpus import prepare_librispeech
+    DOWNLOAD_SPEECH = True  # real paired native ASR + speech examples; requires ffmpeg/Internet
+    SUBJECT_STEPS = 100
+    USE_REAL_TEXT = True
+    N_TRAIN_ITEMS = 8000
+    MEDIA_MANIFEST = ''  # /kaggle/input/my-media/train.jsonl
+    MEDIA_ITEMS = 2000
+    TRAIN_MODE = 'mixed'  # mixed | media_only
+    if TRAIN_MODE not in ('mixed', 'media_only'):
+        raise ValueError('unknown TRAIN_MODE')
+    if TRAIN_MODE == 'media_only' and not MEDIA_MANIFEST:
+        raise ValueError('media_only requires MEDIA_MANIFEST')
+    if TRAIN_MODE == 'media_only':
+        train = Corpus([], 'train')
+    else:
+        mixture = {'channel_depth': .08, 'channel_intervention': .06,
+                   'field_rollout': .04, 'scene_goal': .06, 'false_premise': .06}
+        if USE_REAL_TEXT:
+            mixture.update(chat=.45, text_lm=.25)
+        train = build_corpus(N_TRAIN_ITEMS, seed=SEED, split='train', mixture=mixture,
+                             text_window=min(256, MAX_SEQ_LEN-8))
+        # Reject overlong conversations rather than truncate away the assistant target.
+        before = len(train.items)
+        train.items = [it for it in train.items if 1 < len(it.sample) <= MAX_SEQ_LEN]
+        print('removed overlong examples:', before - len(train.items))
+    if MEDIA_MANIFEST:
+        media = load_manifest(MEDIA_MANIFEST, cfg.codecs, split='train',
+                              max_items=MEDIA_ITEMS, max_tokens=MAX_SEQ_LEN)
+        train.items.extend(media.items)
+    else:
+        print('No custom image/video/tool manifest attached. DOWNLOAD_SPEECH separately controls real speech pairs.')
+    SUBJECT_PROVENANCE = []
+    if TRAIN_MODE == 'mixed':
+        subjects, SUBJECT_PROVENANCE = real_subject_corpus(cfg.stacks.specializations,
+                                                          per_subject=256, max_tokens=MAX_SEQ_LEN)
+        train.items.extend(subjects.items)
+    SPEECH_MANIFEST = ''
+    if DOWNLOAD_SPEECH:
+        speech_subject = ('audio_speech_music' if 'audio_speech_music' in cfg.stacks.specializations
+                          else 'language_reasoning_intent')
+        SPEECH_MANIFEST = str(prepare_librispeech(ROOT / 'data/native-speech', cfg.codecs,
+                              count=128, max_tokens=MAX_SEQ_LEN, subject=speech_subject))
+        speech = load_manifest(SPEECH_MANIFEST, cfg.codecs, max_items=256, max_tokens=MAX_SEQ_LEN)
+        train.items.extend(speech.items)
+    if not train.items:
+        raise ValueError('No usable training examples')
+    print(describe(train))
+    DATA_INFO = {'media_format': FORMAT, 'source_sha256': SOURCE_DIGEST,
+                 'subject_datasets': SUBJECT_PROVENANCE, 'speech_manifest': SPEECH_MANIFEST,
+                 'speech_manifest_sha256': hashlib.sha256(Path(SPEECH_MANIFEST).read_bytes()).hexdigest() if SPEECH_MANIFEST else '',
+                 'media_manifest_sha256': hashlib.sha256(Path(MEDIA_MANIFEST).read_bytes()).hexdigest() if MEDIA_MANIFEST else '', 'families': train.counts(),
+                 'media_manifest': MEDIA_MANIFEST,
+                 'text_licences': licence_notice(DEFAULT_MIX) if USE_REAL_TEXT and TRAIN_MODE == 'mixed' else '',
+                 'chat_licences': chat_licence_notice() if USE_REAL_TEXT and TRAIN_MODE == 'mixed' else '',
+                 'media_examples': sum(it.sample.meta.get('format') == FORMAT for it in train.items),
+                 'media_sources': sorted({(it.sample.meta.get('source',''), it.sample.meta.get('license',''))
+                                          for it in train.items if it.sample.meta.get('format') == FORMAT})}
+    ''')
+    md('''## 4. Train and save
+    Execute this cell when ready. Keep model weights in fp32; autocast selects
+    operation precision. Forward/backward OOM retries discard the whole partial
+    update and lower the micro-batch. An optimizer-update OOM stops because an
+    interrupted update may have changed some weights. Resume from a checkpoint.
+    Checkpoints include optimizer, scaler, step and RNG state; resume starts a
+    new data shuffle and is not bit-for-bit replay. Gradient checkpointing stays
+    disabled because this architecture's earlier implementation had parity problems.
+    ''')
+    code('''
+    from iridium.model.iridium1 import Iridium1
+    from iridium.training.trainer import Trainer, TrainConfig
+    from iridium.training.losses import LossWeights
+    from iridium.runtime.memory import free_memory
+    # Release previous notebook references before allocating a replacement model.
+    model = trainer = chat = media_tools = agent = None
+    free_memory(verbose=False)
+    torch.manual_seed(SEED)
+    model = Iridium1(cfg).to(DEVICE)
+    settings = TrainConfig(steps=STEPS, batch_size=MICRO_BATCH, accumulate=ACCUMULATE,
+                           lr=LR, n_loops=N_LOOPS, optimizer=OPTIMIZER, precision=PRECISION,
+                           max_length=MAX_SEQ_LEN, seed=SEED, log_every=25,
+                           checkpoint_every=250, label=f'studio-{PRESET}')
+    if not RESUME and SUBJECT_STEPS > 0:
+        from iridium.training.subject_curriculum import specialize
+        warmup = Trainer(model, train, replace(settings, steps=max(1, STEPS//3), label='general-warmup'),
+                         LossWeights(), out_dir=ROOT / 'runs/general-warmup', device=DEVICE)
+        warmup.data_info = DATA_INFO
+        warmup.train()
+        warmup.save('final')
+        del warmup
+        free_memory(verbose=False)
+        DATA_INFO['specialization'] = specialize(model, train, settings, SUBJECT_STEPS,
+                                                 ROOT / 'runs/subjects', device=DEVICE)
+        free_memory(verbose=False)
+    # Joint phase unfreezes the shared model. Each phase has a fresh optimizer.
+    trainer = Trainer(model, train, settings, LossWeights(),
+                      out_dir=ROOT / 'runs/studio', device=DEVICE)
+    trainer.data_info = DATA_INFO
+    if RESUME:
+        trainer.resume(RESUME)
+    trainer.train()
+    path = trainer.save('final')
+    print('Full training checkpoint:', path)
+    ''')
+    md('''Training includes a general warmup, labelled specialization and joint refinement.
+    Real train-split GSM8K/MBPP/ARC data supplies subject routing targets; real LibriSpeech
+    pairs supply native speech targets. Downloads pin and record dataset revisions.
+    These starter subsets are not sufficient for broad expert or fluent multimodal skills.
+    `SUBJECT_STEPS=0` skips warmup/specialization. Resuming skips those phases too.
+    ''')
+    md('''## 5. Export and optional use
+    These cells define helpers only. Call them yourself after training. The
+    inference export omits optimizer state and retains fp32 weights to avoid
+    mismatched input/parameter dtypes. A trained checkpoint is required for
+    meaningful text, native speech recognition, native media generation and
+    agent planning; success is not inferred from a falling training loss.
+    ''')
+    code('''
+    model.eval()
+    export = ROOT / 'iridium-inference.pt'
+    torch.save({'state_dict': {k: v.detach().cpu() for k, v in model.state_dict().items()},
+                'manifest': trainer.manifest()}, export)
+    from iridium.runtime.chat import ChatSession
+    chat = ChatSession(model)
+    def ask(message):
+        return chat.send(message)
+    print('Inference checkpoint:', export)
+    # ask('Hello!')
+    ''')
+    code('''
+    from iridium.agency.media_agent import MediaTools, MediaAgent
+    from iridium.runtime.media_generation import generate_media
+    media_tools = MediaTools(model, ROOT / 'media_outputs')
+    agent = MediaAgent(model, ROOT / 'agent_outputs')
+    # Native transcription + real editing: source seconds 10..20 become clip-relative 0..10.
+    # result = media_tools.clip_with_subtitles('/kaggle/input/my-video/source.mp4', 10, 20)
+    # Or ask the trained model to choose the sequence of tools:
+    # result = agent.run('Extract seconds 10 to 20, transcribe, and subtitle the clip.',
+    #                    ['/kaggle/input/my-video/source.mp4'])
+    # Native output from Iridium's own trained flow heads:
+    # generate_media(model, 'A red cube', 'image', ROOT / 'cube.png', size=64)
+    # FFmpeg and ffprobe must be installed for audio/video I/O.
+    ''')
+    md('''## Reading the result
+    The agent returns a real artifact path or an error; it does not claim success
+    for a plan alone. Transcription captions use chunk timestamps, not word-level
+    alignment. MP4 subtitles are selectable embedded tracks plus a separate SRT.
+    See `docs/UPDATE_NOTES.md` for the Kaggle diagnosis, changes, limits and manual
+    acceptance checklist. Larger sizes, reliable general intelligence, photorealistic
+    synthesis and arbitrary application control are not established by this notebook.
+    ''')
+    md('''## 6. Optional bounded self-improvement campaign
+    This is OFF by default. When you explicitly enable it, the trained current
+    version proposes JSON experiments; fresh subprocesses train candidates one
+    at a time. A fixed evaluator compares them on selection data and a separate
+    promotion audit. A failing candidate never replaces the current version.
+
+    Prepare three disjoint source splits: `train`, `selection`, `audit`, in
+    JSONL manifests using the media schema. Add `family` (speech, captions, tools,
+    etc.) and at least 16 held-out items per family/modality. No model-written
+    Python is executed: code patches are saved for review. This Kaggle backend
+    is configuration search, not a security sandbox for arbitrary code.
+    ''')
+    code('''
+    RUN_RESEARCH = False
+    RESEARCH_TRAIN = ''
+    RESEARCH_SELECTION = ''
+    RESEARCH_AUDIT = ''
+    # None asks the current model. Weak initial models may fail to emit valid JSON.
+    # Or explicitly supply candidates-1 human recipes, e.g.:
+    # Controller models must keep gated_bank=False (the core performs integration).
+    # PROPOSALS = [{'lr': 1e-4}, {'lr': 2e-4, 'n_loops': 2}]
+    PROPOSALS = None
+    if RUN_RESEARCH:
+        if not all((RESEARCH_TRAIN, RESEARCH_SELECTION, RESEARCH_AUDIT)):
+            raise ValueError('Attach all three manifests before enabling research')
+        from iridium.research.controller import ResearchLoop
+        from iridium.research.policy import ResearchPolicy
+        import datetime
+        initial_checkpoint = str(path)  # full trained checkpoint saved in section 4
+        # Release notebook GPU ownership so each worker has the device to itself.
+        model = trainer = chat = media_tools = agent = None
+        free_memory(verbose=False)
+        policy = ResearchPolicy(rounds=2, candidates=3, train_steps=100,
+                                max_parameters=max(150_000_000, int(cfg.n_params * 1.01)))
+        campaign = ROOT / 'research_runs' / datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+        research = ResearchLoop(campaign, RESEARCH_TRAIN, RESEARCH_SELECTION,
+                                RESEARCH_AUDIT, policy=policy, device=DEVICE)
+        research.initialize(initial_checkpoint)
+        result = research.run(proposals=PROPOSALS)
+        print(result)
+        # Version directories contain safe tensor weights.pt + model.json.
+        # Reload the accepted model explicitly; the live model is never rewritten.
+        from iridium.research.worker import load_version
+        model, research_descriptor = load_version(result['current'], DEVICE)
+        chat = ChatSession(model, n_loops=research_descriptor['n_loops'])
+    else:
+        print('Research disabled. No candidate training or evaluation was started.')
+    ''')
+    md('''## Bounded long context and high-resolution inputs
+    Definitions only. Call after training. Use one session per document/user; original
+    files or SourceArchive remain necessary for exact recovery after compression.
+    ''')
+    code('''
+    from iridium.runtime.long_context import LongContextSession
+    from iridium.runtime.source_archive import SourceArchive
+    from iridium.codecs.high_resolution import stream_image, stream_video
+    from iridium.runtime.chat import Turn, conversation_sample
+    def new_long_session():
+        model.eval()
+        return LongContextSession(model, n_loops=N_LOOPS, window=MAX_SEQ_LEN)
+    def ask_long(session, prompt, max_new_tokens=128):
+        sample = conversation_sample([Turn('user', prompt)], False, True)
+        return session.continue_text(sample, max_new_tokens)
+    # session = new_long_session()
+    # stream_image(session, '/path/to/large-image.png')
+    # print(ask_long(session, 'Read the small labels and explain this diagram.'))
+    # print(session.storage_report())
+    ''')
+    return cells
+
+def main():
+    for target, name in TARGETS.items():
+        nb = {'cells': notebooks(target), 'metadata': {
+            'kernelspec': {'display_name': 'Python 3', 'name': 'python3'},
+            'language_info': {'name': 'python'}, 'accelerator': 'GPU'},
+            'nbformat': 4, 'nbformat_minor': 0}
+        (HERE / name).write_text(json.dumps(nb, ensure_ascii=False, indent=1), encoding='utf-8')
+        print('Wrote', name)
+
+if __name__ == '__main__':
+    main()

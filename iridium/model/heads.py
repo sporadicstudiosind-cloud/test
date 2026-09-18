@@ -55,8 +55,8 @@ class FlowMatchingHead(nn.Module):
         nn.init.zeros_(self.out.bias)
 
     def _tau_features(self, tau: torch.Tensor) -> torch.Tensor:
-        freqs = torch.arange(self.n_tau, device=tau.device, dtype=tau.dtype)
-        ang = tau.unsqueeze(-1) * (2.0 ** freqs) * torch.pi
+        freqs = torch.linspace(0, 8, self.n_tau, device=tau.device, dtype=torch.float32)
+        ang = tau.float().unsqueeze(-1) * (2.0 ** freqs) * torch.pi
         return torch.cat([ang.sin(), ang.cos()], dim=-1)
 
     def velocity(
@@ -75,6 +75,7 @@ class FlowMatchingHead(nn.Module):
         target: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         generator: Optional[torch.Generator] = None,
+        reduction: str = "mean",
     ) -> torch.Tensor:
         x0 = torch.randn(target.shape, device=target.device, dtype=target.dtype,
                          generator=generator)
@@ -83,7 +84,9 @@ class FlowMatchingHead(nn.Module):
         x_tau = (1.0 - tau.unsqueeze(-1)) * x0 + tau.unsqueeze(-1) * target
         v_target = target - x0
         v_pred = self.velocity(h, x_tau, tau)
-        err = (v_pred - v_target).pow(2).mean(-1)
+        err = (v_pred.float() - v_target.float()).pow(2).mean(-1)
+        if reduction == "none":
+            return err
         if mask is not None:
             denom = mask.sum().clamp_min(1)
             return (err * mask).sum() / denom
@@ -124,9 +127,12 @@ class RegressionHead(nn.Module):
         return self.proj(self.norm(h))
 
     def loss(
-        self, h: torch.Tensor, target: torch.Tensor, mask: Optional[torch.Tensor] = None
+        self, h: torch.Tensor, target: torch.Tensor, mask: Optional[torch.Tensor] = None,
+        reduction: str = "mean",
     ) -> torch.Tensor:
-        err = (self.forward(h) - target).pow(2).mean(-1)
+        err = (self.forward(h).float() - target.float()).pow(2).mean(-1)
+        if reduction == "none":
+            return err
         if mask is not None:
             return (err * mask).sum() / mask.sum().clamp_min(1)
         return err.mean()

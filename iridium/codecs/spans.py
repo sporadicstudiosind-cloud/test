@@ -160,6 +160,8 @@ class Batch:
     span_id: np.ndarray                     # [B, T] int64, -1 = route per token
     grids: list[tuple[int, int, tuple[int, ...]]]
     meta: list[dict[str, Any]]
+    media_coordinates: np.ndarray | None = None
+    coordinate_valid: np.ndarray | None = None
 
     @property
     def batch_size(self) -> int:
@@ -187,9 +189,12 @@ def collate(
     valid = np.zeros((b, t), dtype=bool)
     supervised = np.zeros((b, t), dtype=bool)
     span_id = np.full((b, t), -1, dtype=np.int64)
+    media_coordinates = np.zeros((b, t, 3), dtype=np.float32)
+    coordinate_valid = np.zeros((b, t), dtype=bool)
     continuous = {
         name: np.zeros((b, t, dim), dtype=np.float32)
         for name, dim in continuous_dims.items()
+        if any(span.modality == name for sample in samples for span in sample.spans)
     }
     grids: list[tuple[int, int, tuple[int, ...]]] = []
 
@@ -202,6 +207,12 @@ def collate(
                 break
             n = min(n, t - cursor)
             sl = slice(cursor, cursor + n)
+            if 'coordinates' in span.meta:
+                coordinates = np.asarray(span.meta['coordinates'], dtype=np.float32)
+                if coordinates.shape != (len(span), 3) or not np.isfinite(coordinates).all():
+                    raise ValueError('media coordinates must be finite [tokens,3]')
+                media_coordinates[i, sl] = coordinates[:n]
+                coordinate_valid[i, sl] = True
             modality[i, sl] = modality_id(span.modality)
             valid[i, sl] = True
             supervised[i, sl] = span.supervised
@@ -218,7 +229,7 @@ def collate(
                         f"codec expects {dim}"
                     )
                 continuous[span.modality][i, sl] = payload
-                if span.grid is not None and n == len(span):
+                if span.modality == "field" and span.grid is not None and n == len(span):
                     grids.append((i, cursor, tuple(span.grid)))
             elif span.modality == "action":
                 discrete[i, sl] = span.payload[:n, 0].astype(np.int64)
@@ -239,6 +250,7 @@ def collate(
         span_id=span_id,
         grids=grids,
         meta=[s.meta for s in samples],
+        media_coordinates=media_coordinates, coordinate_valid=coordinate_valid,
     )
 
 

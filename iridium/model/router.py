@@ -64,6 +64,8 @@ class RoutingDecision:
     z_loss: torch.Tensor           # scalar
     gate_probs: torch.Tensor       # [B, T, N] full softmax, for diagnostics
 
+    valid: torch.Tensor | None = None
+
     def entropy(self) -> torch.Tensor:
         p = self.gate_probs.clamp_min(1e-9)
         return -(p * p.log()).sum(-1).mean()
@@ -137,6 +139,7 @@ class MacroRouter(nn.Module):
         gumbel_noise: bool = True,
         span_id: torch.Tensor | None = None,
         summary: torch.Tensor | None = None,
+        valid: torch.Tensor | None = None,
     ) -> RoutingDecision:
         if training is None:
             training = self.training
@@ -150,10 +153,10 @@ class MacroRouter(nn.Module):
         b, t, _ = h.shape
         hn = self.normalize(h, loop_index)
 
-        logits = self.gate(hn) / self.cfg.router_temperature
+        logits = self.gate(hn).float() / self.cfg.router_temperature
         if span_id is not None:
             logits = pool_over_spans(logits, span_id)
-        probs = torch.softmax(logits.float(), dim=-1).to(h.dtype)
+        probs = torch.softmax(logits, dim=-1)
 
         if training and gumbel_noise:
             u = torch.rand_like(logits).clamp_(1e-9, 1 - 1e-9)
@@ -185,8 +188,9 @@ class MacroRouter(nn.Module):
 
         halt_logit = self.halt_head(hn).squeeze(-1)
 
-        balance = self._balance_loss(probs, index)
-        z = self.cfg.z_alpha * torch.logsumexp(logits.float(), dim=-1).pow(2).mean()
+        balance = self._balance_loss(probs, index, valid)
+        z_tokens = torch.logsumexp(logits.float(), dim=-1).pow(2)
+        z = self.cfg.z_alpha * (z_tokens[valid].mean() if valid is not None else z_tokens.mean())
         return RoutingDecision(
             stack_index=index,
             stack_weight=weight,
@@ -196,10 +200,11 @@ class MacroRouter(nn.Module):
             balance_loss=balance,
             z_loss=z,
             gate_probs=probs,
+            valid=valid,
         )
 
     def _balance_loss(
-        self, probs: torch.Tensor, index: torch.Tensor
+        self, probs: torch.Tensor, index: torch.Tensor, valid=None
     ) -> torch.Tensor:
         """``alpha * N * sum_i f_i * P_i`` (Fedus et al. 2021, eq. 4).
 
@@ -217,9 +222,12 @@ class MacroRouter(nn.Module):
         """
         n = self.n_stacks
         dispatched = F.one_hot(index, n).sum(2).float()          # [B, T, N]
-        f = dispatched.mean(dim=(0, 1))
+        if valid is not None:
+            dispatched, probs = dispatched[valid], probs[valid]
+            f, p = dispatched.mean(dim=0), probs.float().mean(dim=0)
+        else:
+            f, p = dispatched.mean(dim=(0, 1)), probs.float().mean(dim=(0, 1))
         f = f / f.sum().clamp_min(1e-9)
-        p = probs.float().mean(dim=(0, 1))
         return self.cfg.balance_alpha * n * torch.sum(f * p)
 
 

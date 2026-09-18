@@ -61,6 +61,10 @@ class TensorBatch:
         self.continuous = {k: t(v, dtype) for k, v in batch.continuous.items()}
         self.grids = list(batch.grids)
         self.meta = list(batch.meta)
+        coords = getattr(batch, 'media_coordinates', None)
+        self.media_coordinates = t(coords, torch.float32) if coords is not None else None
+        cv = getattr(batch, 'coordinate_valid', None)
+        self.coordinate_valid = t(cv, torch.bool) if cv is not None else None
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -136,6 +140,18 @@ class CodecBank(nn.Module):
                 continue
             h = h + self.encoders[name](values) * mask.unsqueeze(-1)
 
+        coordinates = getattr(batch, 'media_coordinates', None)
+        if getattr(self, 'spatial_coordinates', False) and coordinates is not None:
+            import math
+            count = (h.shape[-1] + 5) // 6
+            frequencies = torch.exp(-math.log(10000.) * torch.arange(count, device=h.device).float() / max(count-1, 1))
+            angles = coordinates.float()[..., None] * frequencies
+            encoding = torch.cat((angles.sin(), angles.cos()), -1).flatten(-2)[..., :h.shape[-1]]
+            # Observations carry declared coordinates. Autoregressive output
+            # payloads use the stream position until a layout-aware decoder
+            # supplies the same coordinate conditioning at training and serving.
+            coordinate_mask = batch.coordinate_valid & ~batch.supervised
+            h = h + encoding.to(h.dtype) * coordinate_mask[..., None]
         return h * batch.valid.unsqueeze(-1)
 
     # -- output -----------------------------------------------------------
@@ -159,11 +175,15 @@ class CodecBank(nn.Module):
         hidden: torch.Tensor,
         batch: TensorBatch,
         generator: Optional[torch.Generator] = None,
+        token_weight: Optional[torch.Tensor] = None,
     ) -> dict[str, torch.Tensor]:
         """Per-modality next-slot losses, each normalized by its own token count."""
         h = hidden[:, :-1]
         tgt = self.next_slot_targets(batch)
         valid = tgt["valid"]
+        weight = torch.ones_like(valid, dtype=torch.float32) if token_weight is None else token_weight[:, :-1].float()
+        if weight.shape != valid.shape:
+            raise ValueError("token_weight must match hidden token positions")
         losses: dict[str, torch.Tensor] = {}
         zero = hidden.new_zeros(())
 
@@ -172,13 +192,8 @@ class CodecBank(nn.Module):
             | (tgt["modality"] == MODALITY_INDEX["control"])
         )
         if bool(text_mask.any()):
-            logits = self.text_head(h)
-            ce = F.cross_entropy(
-                logits.reshape(-1, logits.shape[-1]),
-                tgt["discrete"].reshape(-1).clamp(0, self.cfg.vocab_size - 1),
-                reduction="none",
-            ).view_as(text_mask)
-            losses["text"] = (ce * text_mask).sum() / text_mask.sum().clamp_min(1)
+            logits = self.text_head(h[text_mask])
+            losses["text"] = (F.cross_entropy(logits.float(), tgt["discrete"][text_mask], reduction="none") * weight[text_mask]).sum() / text_mask.sum()
         else:
             losses["text"] = zero
 
@@ -190,9 +205,15 @@ class CodecBank(nn.Module):
                 tgt["discrete"].reshape(-1).clamp(0, self.cfg.action_ops - 1),
                 reduction="none",
             ).view_as(act_mask)
-            losses["action_op"] = (ce * act_mask).sum() / act_mask.sum().clamp_min(1)
-            se = (scalar_pred - tgt["scalars"]).pow(2).mean(-1)
-            losses["action_scalar"] = (se * act_mask).sum() / act_mask.sum().clamp_min(1)
+            losses["action_op"] = (ce * act_mask * weight).sum() / act_mask.sum().clamp_min(1)
+            from ..agency.actions import OPERAND_ARITY, Op
+            arities = torch.tensor([{int(k): v for k, v in OPERAND_ARITY.items()}.get(i, self.cfg.action_scalars) for i in range(self.cfg.action_ops)],
+                                   device=h.device)
+            op = tgt["discrete"].clamp(0, self.cfg.action_ops - 1)
+            operand_mask = torch.arange(self.cfg.action_scalars, device=h.device) < arities[op].unsqueeze(-1)
+            operand_mask = operand_mask & act_mask.unsqueeze(-1)
+            se = (scalar_pred.float() - tgt["scalars"].float()).square()
+            losses["action_scalar"] = (se * operand_mask * weight.unsqueeze(-1)).sum() / operand_mask.sum().clamp_min(1)
         else:
             losses["action_op"] = zero
             losses["action_scalar"] = zero
@@ -203,17 +224,12 @@ class CodecBank(nn.Module):
             if not bool(mask.any()) or key not in tgt:
                 losses[name] = zero
                 continue
+            target = tgt[key][mask]
             if name == "quantity":
-                # Supervise the log magnitude only; sign and role are inputs,
-                # not things to predict.
-                losses[name] = self.decoders[name].loss(
-                    h, tgt[key][..., :1], mask.to(h.dtype)
-                )
-                continue
-            losses[name] = self.decoders[name].loss(
-                h, tgt[key], mask.to(h.dtype),
-                **({"generator": generator} if self.head_kind == "flow" else {}),
-            )
+                target = target[..., :1]
+            kwargs = {"generator": generator} if self.head_kind == "flow" and name != "quantity" else {}
+            errors = self.decoders[name].loss(h[mask], target, reduction="none", **kwargs)
+            losses[name] = (errors * weight[mask]).sum() / mask.sum()
 
         slot_logits = self.slot_type_head(h)
         ce = F.cross_entropy(
@@ -221,7 +237,7 @@ class CodecBank(nn.Module):
             tgt["modality"].reshape(-1),
             reduction="none",
         ).view_as(valid)
-        losses["slot_type"] = (ce * valid).sum() / valid.sum().clamp_min(1)
+        losses["slot_type"] = (ce * valid * weight).sum() / valid.sum().clamp_min(1)
         return losses
 
     @torch.no_grad()

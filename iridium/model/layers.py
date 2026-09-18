@@ -1,18 +1,8 @@
-"""Transformer primitives shared by the control core and the superstacks.
+"""Transformer primitives with SDPA by default and a manual reference backend.
 
-Attention is written out rather than delegated to
-``F.scaled_dot_product_attention`` for three reasons that matter here:
-
-1. the cache-parity gate (docs/architecture.md) compares incremental decoding
-   against an uncached reference in float64, and the fused kernels do not offer
-   a stable float64 path on every backend;
-2. superstack attention needs an additive mask built from *original stream
-   positions*, not from packed indices;
-3. a fully-masked query row must be defined, not NaN. Padded slots in a packed
-   superstack batch are exactly that case, and a NaN there would propagate into
-   the core residual and poison every other token in the batch.
-
-Point 3 is the one that bites. ``_masked_softmax`` handles it explicitly.
+Masks stay broadcast over heads. Fully masked rows are zeroed explicitly.
+Optional parameter-free Q/K normalization precedes RoPE; positions remain the
+original stream positions in both core and packed superstack attention.
 """
 
 from __future__ import annotations
@@ -26,6 +16,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .rope import RotaryEmbedding
+
+
+def head_rms(x):
+    work = x.float()
+    return (work * (work.square().mean(-1, keepdim=True) + 1e-6).rsqrt()).to(x.dtype)
 
 
 def neg_inf(dtype: torch.dtype) -> float:
@@ -42,7 +37,7 @@ class RMSNorm(nn.Module):
         dtype = x.dtype
         x32 = x.float()
         norm = x32.pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
-        return (x32 * norm).to(dtype) * self.weight
+        return (x32 * norm).to(dtype) * self.weight.to(dtype)
 
 
 class SwiGLU(nn.Module):
@@ -112,7 +107,7 @@ def _attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     turns the whole batch into NaN several layers later.
     """
     if _ATTENTION_BACKEND == "sdpa":
-        mask = keep.expand(q.shape[0], q.shape[1], q.shape[2], k.shape[2])
+        mask = keep
         dead = ~mask.any(dim=-1, keepdim=True)
         # Give a dead row one admissible key so the kernel produces a finite
         # number, then zero the row afterwards. Masking it back out is what
@@ -175,6 +170,7 @@ class GroupedQueryAttention(nn.Module):
         self.wv = nn.Linear(d_model, d_kv, bias=False)
         self.wo = nn.Linear(n_query_heads * d_head, d_model, bias=False)
         self.rope = rope
+        self.qk_norm = False
 
     def project_kv(
         self, x: torch.Tensor, positions: torch.Tensor
@@ -182,6 +178,8 @@ class GroupedQueryAttention(nn.Module):
         b, t, _ = x.shape
         k = self.wk(x).view(b, t, self.n_kv, self.d_head).transpose(1, 2)
         v = self.wv(x).view(b, t, self.n_kv, self.d_head).transpose(1, 2)
+        if self.qk_norm:
+            k = head_rms(k)
         if self.rope is not None:
             k = self.rope(k, positions)
         return k, v
@@ -196,6 +194,8 @@ class GroupedQueryAttention(nn.Module):
     ) -> torch.Tensor:
         b, t, _ = x.shape
         q = self.wq(x).view(b, t, self.n_q, self.d_head).transpose(1, 2)
+        if self.qk_norm:
+            q = head_rms(q)
         if self.rope is not None:
             q = self.rope(q, positions)
         k, v = self.project_kv(x, positions)
@@ -248,6 +248,7 @@ class BridgeCrossAttention(nn.Module):
         self.wv = nn.Linear(d_core, d_kv, bias=False)
         self.wo = nn.Linear(n_query_heads * d_head, d_model, bias=False)
         self.rope = rope
+        self.qk_norm = False
 
     def forward(
         self,
@@ -262,6 +263,8 @@ class BridgeCrossAttention(nn.Module):
         q = self.wq(x).view(b, t, self.n_q, self.d_head).transpose(1, 2)
         k = self.wk(core_states).view(b, s, self.n_kv, self.d_head).transpose(1, 2)
         v = self.wv(core_states).view(b, s, self.n_kv, self.d_head).transpose(1, 2)
+        if self.qk_norm:
+            q, k = head_rms(q), head_rms(k)
         if self.rope is not None:
             q = self.rope(q, q_positions)
             k = self.rope(k, core_positions)
