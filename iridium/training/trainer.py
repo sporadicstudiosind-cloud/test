@@ -54,6 +54,7 @@ class TrainConfig:
     #: "adamw" | "adamw_8bit" | "paged_adamw" | "adafactor" | "sgd".
     #: ``paged_adamw`` keeps the moments in host RAM.
     optimizer: str = "eager_adamw"
+    devices: tuple[str, ...] = ()  # empty: use the supplied primary device
     precision: str = "auto"  # auto | fp32 | fp16 | bf16
     max_length: int | None = None
     #: On CUDA OOM, halve the micro-batch and retry rather than losing the run.
@@ -97,7 +98,14 @@ class Trainer:
             raise ValueError("training corpus is empty")
         if not 1 <= cfg.n_loops <= model.cfg.router.max_loops:
             raise ValueError("n_loops exceeds the configured loop budget")
-        self.model = model.to(device)
+        from ..runtime.placement import place_model, native_bf16
+        self.devices = tuple(cfg.devices) or (device,)
+        if str(self.devices[0]) != str(device):
+            raise ValueError('primary device must equal devices[0]')
+        if len(self.devices) > 1 and cfg.optimizer != 'eager_adamw':
+            raise ValueError('multi-device training currently requires eager_adamw')
+        place_model(model, self.devices)
+        self.model = model
         self.cfg = cfg
         self.weights = weights or LossWeights()
         self.device = device
@@ -122,10 +130,10 @@ class Trainer:
         cuda = str(device).startswith("cuda")
         precision = cfg.precision
         if precision == "auto":
-            precision = ("bf16" if torch.cuda.is_bf16_supported() else "fp16") if cuda else "fp32"
+            precision = ("bf16" if native_bf16(self.devices) else "fp16") if cuda else "fp32"
         if precision not in ("fp32", "fp16", "bf16") or (not cuda and precision != "fp32"):
             raise ValueError("use fp32 on CPU; CUDA supports fp32/fp16/bf16")
-        if precision == "bf16" and not torch.cuda.is_bf16_supported():
+        if precision == "bf16" and not native_bf16(self.devices):
             raise ValueError("this GPU does not support bf16; use fp16")
         self.precision = precision
         self.amp_dtype = torch.float16 if precision == "fp16" else torch.bfloat16
@@ -181,7 +189,10 @@ class Trainer:
                 stream = self._infinite_batches()  # discard old prebuilt groups
                 import gc
                 gc.collect()
-                torch.cuda.empty_cache()
+                for device in self.devices:
+                    if str(device).startswith('cuda'):
+                        with torch.cuda.device(device):
+                            torch.cuda.empty_cache()
                 print(f"[trainer] retry whole update: micro-batch {old}->{new}; "
                       f"accumulate={self.cfg.accumulate}", flush=True)
                 continue
@@ -194,7 +205,9 @@ class Trainer:
             overflow_retries = 0
             self.completed_steps = step + 1
             if step % self.cfg.log_every == 0 or step == self.cfg.steps - 1:
+                from ..runtime.placement import memory_snapshot
                 record = {
+                    "gpu_memory": memory_snapshot(self.devices),
                     "step": step,
                     "lr": lr,
                     "grad_norm": norm,
@@ -275,12 +288,12 @@ class Trainer:
         entropy = float(-(nonzero * np.log(nonzero)).sum()) if nonzero.size else 0.0
         depths = [d for d in stats["per_stack_expected_depth"] if d > 0]
         return {
-            "router_entropy": float(decision.entropy()),
+            "router_entropy": float(decision.entropy().detach()),
             "stack_usage_entropy": entropy,
             "stack_usage_max": float(share.max()) if share.size else 0.0,
-            "mean_focus": float(decision.focus.mean()),
+            "mean_focus": float(decision.focus.detach().mean()),
             "mean_depth": float(np.mean(depths)) if depths else 0.0,
-            "expected_loops": float(out.expected_loops.mean()),
+            "expected_loops": float(out.expected_loops.detach().mean()),
             "grid_intact": float(stats.get("grid_intact_fraction", 1.0)),
         }
 
@@ -294,6 +307,8 @@ class Trainer:
         parts.append(f"depth={record.get('mean_depth', 0):.2f}")
         parts.append(f"|g|={record.get('grad_norm', 0):.2f}")
         parts.append(f"{record.get('elapsed', 0):.0f}s")
+        for device, memory in record.get('gpu_memory', {}).items():
+            parts.append(f"{device}={memory['allocated_gb']:.2f}GB")
         return "  ".join(parts)
 
     # -- persistence ------------------------------------------------------
@@ -333,6 +348,7 @@ class Trainer:
             ),
             "torch_version": torch.__version__,
             "precision": self.precision,
+            "device_plan": self.model.device_plan,
             "completed_steps": self.completed_steps,
             "data": getattr(self, "data_info", {}),
         }

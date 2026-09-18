@@ -47,7 +47,7 @@ differentiable path rather than through an index that has no gradient.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional, Sequence
 
 import torch
@@ -284,7 +284,7 @@ class Superstack(nn.Module):
                 cache,
                 key,
             )
-            logit = layer.halt_head(x).squeeze(-1) + focus_bias
+            logit = layer.halt_head(x).squeeze(-1).to(torch.float64 if x.dtype == torch.float64 else torch.float32) + focus_bias
             lam = torch.sigmoid(logit)
             if depth == len(self.layers) - 1:
                 lam = torch.ones_like(lam)
@@ -363,6 +363,7 @@ class SuperstackBank(nn.Module):
             torch.float32,
         )
         n_active_stacks = 0
+        bridge_by_device = {}
 
         for s, stack in enumerate(self.stacks):
             member = (decision.stack_index == s).any(dim=-1)      # [B, T]
@@ -401,23 +402,34 @@ class SuperstackBank(nn.Module):
             local_grids, kept, total = translate_grids(grids, packed)
             grid_intact += kept
             grid_total += total
+            stack_device = next(stack.parameters()).device
+            if stack_device not in bridge_by_device:
+                bridge_by_device[stack_device] = (
+                    core_states.to(stack_device) if core_states is not None else None,
+                    core_positions.to(stack_device) if core_positions is not None else None)
+            local_core, local_positions = bridge_by_device[stack_device]
+            local = replace(packed, **{name: value.to(stack_device)
+                            for name, value in vars(packed).items() if torch.is_tensor(value)})
             result = stack(
-                packed,
-                focus_packed,
-                core_states,
-                core_positions,
+                local,
+                focus_packed.to(stack_device),
+                local_core,
+                local_positions,
                 local_grids,
                 cache,
                 cache_prefix + (s,),
                 hard_exit,
                 exit_threshold,
-                depth_cap,
+                depth_cap.to(stack_device) if depth_cap is not None else None,
             )
+            result.hidden = result.hidden.to(hidden.device)
+            result.stopping = result.stopping.to(hidden.device)
+            result.expected_depth = result.expected_depth.to(hidden.device)
             y = result.hidden if self.exit is None else self.exit(result.hidden)
             contribution = y[packed.batch_index, packed.slot_index]
             out.index_put_(
                 (packed.batch_index, packed.token_index),
-                contribution * packed.weight.unsqueeze(-1),
+                (contribution * packed.weight.unsqueeze(-1)).to(out.dtype),
                 accumulate=True,
             )
 
@@ -432,7 +444,7 @@ class SuperstackBank(nn.Module):
                 stats["depth_kl"] = stats["depth_kl"] + ponder_kl(padded, prior)
                 n_active_stacks += 1
             stats["per_stack_expected_depth"].append(
-                float(result.expected_depth[valid].mean())
+                float(result.expected_depth[valid].detach().mean())
             )
             stats["per_stack_executed_layers"].append(result.executed_layers)
 

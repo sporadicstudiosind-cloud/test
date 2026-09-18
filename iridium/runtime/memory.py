@@ -47,8 +47,10 @@ def free_memory(*objects: Any, verbose: bool = True) -> dict[str, float]:
     del objects
     gc.collect()
     if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
+        for device in range(torch.cuda.device_count()):
+            with torch.cuda.device(device):
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats(device)
     after = _snapshot()
     if verbose and after:
         print(f"allocated {before.get('allocated_gb', 0):.2f} -> "

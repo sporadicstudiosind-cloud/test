@@ -206,7 +206,7 @@ class Iridium1(nn.Module):
                 valid=batch.valid,
             )
             if self.cfg.controller_mode:
-                dispatch = torch.sigmoid(self.core.dispatch_head(self.core.finalize(h1))).squeeze(-1)
+                dispatch = torch.sigmoid(self.core.dispatch_head(self.core.finalize(h1)).float()).squeeze(-1)
                 selected = (dispatch >= .5) & batch.valid
                 # Full unroll preserves dense per-cycle core cache histories.
                 # No dispatch on the final cycle: results must return to the core.
@@ -299,7 +299,7 @@ class Iridium1(nn.Module):
             if self.cfg.loop_identity:
                 h = h + self.router.loop_embed.weight[loop + 1]
 
-        lam = torch.sigmoid(torch.stack(halt_logits, dim=-1))
+        lam = torch.sigmoid(torch.stack(halt_logits, dim=-1).to(torch.float64 if h.dtype == torch.float64 else torch.float32))
         lam = torch.cat([lam[..., :-1], torch.ones_like(lam[..., -1:])], dim=-1)
         loop_p = stopping_distribution(lam)
         stacked = torch.stack(per_loop, dim=-1)                  # [B, T, d, L]

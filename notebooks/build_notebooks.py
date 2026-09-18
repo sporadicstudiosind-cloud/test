@@ -31,7 +31,8 @@ def notebooks(target):
 
     Upload this revision to GitHub before using the clone cell, or attach its ZIP
     and set `PROJECT_ZIP`. Kaggle: enable Internet for GitHub/pip/text datasets and
-    select a GPU. Two T4s have separate VRAM; this notebook uses ONE GPU.
+    select GPU T4 x2 to enable specialist model parallelism across both memory banks.
+    Transfers cost time; GPU memories remain separate and are budgeted separately.
 
     No tests or training were run to validate this revision. The notebook is
     prepared for your run; hardware/runtime/data availability still determine success.
@@ -46,7 +47,7 @@ def notebooks(target):
     REPO_URL = 'https://github.com/sporadicstudiosind-cloud/test.git'
     BRANCH = 'claude/gallant-faraday-lhycva'
     BASE = Path('/kaggle/working') if '{target}' == 'kaggle' else Path.cwd()
-    ROOT = BASE / 'iridium-updated'
+    ROOT = BASE / 'iridium-updated-v3'  # fresh checkout avoids silently reusing stale source
     if 'iridium' in sys.modules:
         raise RuntimeError('Restart the kernel before changing source revisions')
     if not ROOT.exists():
@@ -66,6 +67,8 @@ def notebooks(target):
             subprocess.run(['git', 'clone', '--depth', '1', '--branch', BRANCH, REPO_URL, str(ROOT)], check=True)
     if not (ROOT / 'iridium/training/eager_adamw.py').is_file():
         raise RuntimeError('Old checkout. Upload the update, then use a fresh ROOT directory')
+    if not (ROOT / 'iridium/runtime/placement.py').is_file():
+        raise RuntimeError('Stale checkout: use a fresh ROOT and the latest branch or ZIP')
     os.chdir(ROOT)
     sys.path.insert(0, str(ROOT))
     # Preserve the host CUDA/PyTorch installation. Optional BNB is NOT installed by default.
@@ -91,19 +94,51 @@ def notebooks(target):
     preserves source pixels; training those capabilities requires matching examples.
     See `docs/ARCHITECTURE_V2.md` for mechanisms, tradeoffs and unvalidated boundaries.
     ''')
+    md('''## Kaggle precision and two-GPU revision
+    T4/P100 select FP16 with a gradient scaler; BF16 requires native hardware support.
+    Halting cumulative products and KL calculations use FP32, avoiding a mixed-dtype
+    backward path. Logging detaches tensors before scalar conversion.
+
+    `GPU_MODE='auto'` partitions specialist stacks across up to two visible GPUs.
+    The core, codecs and router stay on GPU 0. Weights, gradients and eager AdamW
+    moments for each stack live on its assigned GPU. This is model parallelism,
+    not replicated data parallelism; it increases capacity but can be slower.
+    Per-device plans and actual live-memory logs show both cards separately.
+    The largest individual component still has to fit on one card.
+
+    Restart the Kaggle session before running this revision. Do not reuse imported
+    modules or a partially failed training model. This revision remains unexecuted
+    by its author, per your instruction not to run tests or training.
+    ''')
     md('## 2. Hardware and training settings')
     code(f'''
     import json, math, torch, psutil
     from dataclasses import replace
     from iridium.config_builder import intelligence_preset
     from iridium.runtime.memory import plan_training
+    from iridium.runtime.placement import layout, native_bf16
     print('Python:', sys.version.split()[0], 'torch:', torch.__version__, 'torch path:', torch.__file__)
     DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     if '{target}' == 'kaggle' and DEVICE == 'cpu':
         raise RuntimeError('Enable a Kaggle GPU accelerator and restart the session')
     if torch.cuda.is_available():
         print('GPU:', torch.cuda.get_device_name(0), 'available GPUs:', torch.cuda.device_count())
-    PRESET = 'consumer_tiny'  # consumer, workstation, research_large, frontier_design
+    GPU_MODE = 'auto'  # auto: use both visible GPUs; single: GPU 0 only
+    if GPU_MODE not in ('auto', 'single'):
+        raise ValueError('GPU_MODE must be auto or single')
+    DEVICES = tuple(f'cuda:{{i}}' for i in range(min(2, torch.cuda.device_count()))) if DEVICE.startswith('cuda') and GPU_MODE == 'auto' else (DEVICE,)
+    for dev in DEVICES:
+        if dev.startswith('cuda'):
+            print(dev, torch.cuda.get_device_name(dev), 'free/total GB:',
+                  tuple(round(v/1e9, 2) for v in torch.cuda.mem_get_info(dev)))
+    PRESET = 'consumer_tiny'
+    SIZES = ('micro', 'mini', 'consumer_tiny', 'small', 'consumer', 'small_plus',
+             'medium', 'medium_plus', 'workstation')
+    print('preset / parameters (M) / core layers / stacks x depth')
+    for size in SIZES:
+        geometry = intelligence_preset(size)
+        print(size, round(geometry.n_params/1e6, 2), geometry.core.n_layers,
+              str(geometry.stacks.n_stacks) + ' x ' + str(geometry.stacks.n_layers))
     MAX_SEQ_LEN = 1024
     MICRO_BATCH = 1
     EFFECTIVE_BATCH = 16
@@ -112,22 +147,33 @@ def notebooks(target):
     N_LOOPS = 3           # full core -> optional stacks -> core integration; bounded at 8
     OPTIMIZER = 'eager_adamw'  # native adamw/adafactor/sgd and explicit BNB options remain available
     PRECISION = 'auto'    # T4/P100: fp16+scaler; capable GPUs: bf16; CPU: fp32
+    CHECKPOINT_EVERY = 50
     SEED = 0
     RESUME = ''          # trusted full training checkpoint .pt; increase STEPS to continue
     cfg = replace(intelligence_preset(PRESET), max_seq_len=MAX_SEQ_LEN)
     if not 1 <= N_LOOPS <= cfg.router.max_loops:
         raise ValueError('N_LOOPS exceeds configured budget')
-    avail = torch.cuda.mem_get_info()[0] if DEVICE.startswith('cuda') else psutil.virtual_memory().available
-    plan = plan_training(cfg.n_params, MICRO_BATCH, MAX_SEQ_LEN,
-                         cfg.core.n_layers + cfg.stacks.n_layers * cfg.stacks.n_stacks,
-                         cfg.core.n_query_heads, avail, optimizer_kind=OPTIMIZER,
-                         d_model=max(cfg.core.d_model, cfg.stacks.d_model),
-                         d_ff=max(cfg.core.d_ff, cfg.stacks.d_ff), n_loops=N_LOOPS)
+    placement = layout(cfg, DEVICES)
+    print('stack placement:', placement['stack_devices'])
+    plans = []
+    for dev in DEVICES:
+        available = torch.cuda.mem_get_info(dev)[0] if dev.startswith('cuda') else psutil.virtual_memory().available
+        local_stacks = placement['stack_devices'].count(dev)
+        local_layers = cfg.stacks.n_layers * local_stacks + (cfg.core.n_layers if dev == DEVICE else 2)
+        local_plan = plan_training(placement['parameters_per_device'][dev], MICRO_BATCH,
+                        MAX_SEQ_LEN, max(1, local_layers), cfg.core.n_query_heads,
+                        available, optimizer_kind=OPTIMIZER, headroom=.35,
+                        d_model=cfg.core.d_model, d_ff=max(cfg.core.d_ff, cfg.stacks.d_ff),
+                        n_loops=N_LOOPS)
+        print(dev, local_plan.render())
+        plans.append(local_plan)
     print(cfg.report().render())
-    print(plan.render())
-    if not plan.fits:
-        raise RuntimeError('Conservative budget exceeded. Reduce PRESET or MAX_SEQ_LEN')
-    MICRO_BATCH = min(MICRO_BATCH, plan.micro_batch)
+    if not all(p.fits for p in plans):
+        raise RuntimeError('A device exceeds the conservative budget. Reduce PRESET/MAX_SEQ_LEN; VRAM cannot be pooled.')
+    MICRO_BATCH = min(p.micro_batch for p in plans)
+    if PRECISION == 'auto':
+        PRECISION = ('bf16' if native_bf16(DEVICES) else 'fp16') if DEVICE.startswith('cuda') else 'fp32'
+    print('Selected precision:', PRECISION, 'devices:', DEVICES)
     ACCUMULATE = math.ceil(EFFECTIVE_BATCH / MICRO_BATCH)
     print('micro batch:', MICRO_BATCH, 'accumulation:', ACCUMULATE,
           'effective batch:', MICRO_BATCH * ACCUMULATE)
@@ -223,11 +269,11 @@ def notebooks(target):
     model = trainer = chat = media_tools = agent = None
     free_memory(verbose=False)
     torch.manual_seed(SEED)
-    model = Iridium1(cfg).to(DEVICE)
+    model = Iridium1(cfg)  # Trainer places components directly; no whole-model GPU-0 allocation
     settings = TrainConfig(steps=STEPS, batch_size=MICRO_BATCH, accumulate=ACCUMULATE,
-                           lr=LR, n_loops=N_LOOPS, optimizer=OPTIMIZER, precision=PRECISION,
+                           lr=LR, n_loops=N_LOOPS, optimizer=OPTIMIZER, precision=PRECISION, devices=DEVICES,
                            max_length=MAX_SEQ_LEN, seed=SEED, log_every=25,
-                           checkpoint_every=250, label=f'studio-{PRESET}')
+                           checkpoint_every=CHECKPOINT_EVERY, label=f'studio-{PRESET}')
     if not RESUME and SUBJECT_STEPS > 0:
         from iridium.training.subject_curriculum import specialize
         warmup = Trainer(model, train, replace(settings, steps=max(1, STEPS//3), label='general-warmup'),

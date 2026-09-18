@@ -1,3 +1,12 @@
+# Kaggle AMP and dual-GPU follow-up
+
+See `KAGGLE_TRAINING.md`. Halting products now use explicit FP32 inputs and dtype;
+scalar diagnostics detach; native hardware checks select FP16 on T4/P100.
+GPU_MODE=auto now partitions specialist stacks over up to two CUDA devices and
+prints per-device memory. Six new small/medium presets are available. Notebooks
+use a fresh v3 checkout and checkpoint every 50 steps. These changes were not
+executed or tested by the author. They supersede earlier single-GPU instructions.
+
 # Latest: controller and learned memory revision
 
 Read `ARCHITECTURE_V2.md` first. It supersedes earlier architecture/default-setting

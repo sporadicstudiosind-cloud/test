@@ -186,6 +186,12 @@ def intelligence_preset(name='consumer') -> IridiumConfig:
     """
     from dataclasses import replace
     choices = {
+        'micro': (128, 2, 4, 3, 1, 16),
+        'mini': (192, 3, 4, 5, 1, 24),
+        'small': (320, 6, 4, 9, 1, 48),
+        'small_plus': (512, 8, 4, 14, 2, 64),
+        'medium': (640, 10, 4, 18, 2, 96),
+        'medium_plus': (768, 12, 6, 22, 4, 128),
         'consumer_tiny': (256, 4, 4, 6, 2, 32),
         'consumer': (384, 8, 4, 12, 2, 64),
         'workstation': (768, 16, 6, 28, 4, 128),
@@ -197,11 +203,11 @@ def intelligence_preset(name='consumer') -> IridiumConfig:
     width, core, banks, depth, kv, slots = choices[name]
     cfg = build(d_model=width, core_layers=core, n_superstacks=banks,
                 superstack_layers=depth, n_kv_heads=kv, max_loops=8,
-                max_seq_len=1024 if name.startswith('consumer') else 4096,
+                max_seq_len=1024 if width <= 512 else 4096,
                 name='iridium-controller-' + name)
     return replace(cfg, controller_mode=True, qk_norm=True, loop_identity=True,
                    memory_slots=slots, memory_stride=32, memory_rank=min(64, width // 4),
-                   perception_layers=2 if name.startswith('consumer') else 4, perception_rank=64)
+                   perception_layers=2 if width <= 512 else 4, perception_rank=64)
 
 
 # --------------------------------------------------------------------------

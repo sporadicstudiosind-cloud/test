@@ -30,7 +30,7 @@ class RotaryEmbedding(torch.nn.Module):
 
     def angles(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """``positions`` is ``[B, T]`` (integer or float). Returns cos, sin."""
-        freqs = positions.to(torch.float32).unsqueeze(-1) * self.inv_freq
+        freqs = positions.to(torch.float32).unsqueeze(-1) * self.inv_freq.to(positions.device)
         return torch.cos(freqs), torch.sin(freqs)
 
     def forward(

@@ -180,7 +180,7 @@ class MacroRouter(nn.Module):
         if summary is None:
             summary = self.prefix_summary(h, loop_index, None)
         focus_in = hn + summary
-        focus = torch.sigmoid(self.focus_head(focus_in)).squeeze(-1)
+        focus = torch.sigmoid(self.focus_head(focus_in).float()).squeeze(-1)
         span = self.max_depth - self.min_depth
         target_depth = (
             self.min_depth + torch.round(focus.detach() * span)
@@ -266,10 +266,13 @@ def stopping_distribution(halt_prob: torch.Tensor, dim: int = -1) -> torch.Tenso
     float64 precision so the numpy contract and the torch implementation cannot
     drift apart.
     """
-    lam = halt_prob.movedim(dim, -1).clamp(0.0, 1.0)
+    # cumprod is promoted by AMP; its zero-handling backward must see a
+    # matching input/output dtype. Retain float64 reference calculations.
+    work = halt_prob if halt_prob.dtype == torch.float64 else halt_prob.float()
+    lam = work.movedim(dim, -1).clamp(0.0, 1.0)
     keep = (1.0 - lam).clamp_min(0.0)
     cum = torch.cumprod(
-        torch.cat([torch.ones_like(keep[..., :1]), keep[..., :-1]], dim=-1), dim=-1
+        torch.cat([torch.ones_like(keep[..., :1]), keep[..., :-1]], dim=-1), dim=-1, dtype=lam.dtype
     )
     p = lam * cum
     last = cum[..., -1:] * keep[..., -1:]
@@ -287,7 +290,7 @@ def geometric_prior(
 
 def ponder_kl(p: torch.Tensor, prior: torch.Tensor, dim: int = -1) -> torch.Tensor:
     """``KL(p || prior)`` averaged over everything but ``dim``."""
-    p = p.clamp_min(1e-9)
+    p = (p if p.dtype == torch.float64 else p.float()).clamp_min(1e-9)
     shape = [1] * p.dim()
     shape[dim] = -1
     q = prior.view(shape).clamp_min(1e-9)

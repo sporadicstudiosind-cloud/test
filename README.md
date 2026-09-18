@@ -1,3 +1,8 @@
+> Kaggle AMP and dual-T4 update: see [Kaggle training guide](docs/KAGGLE_TRAINING.md).
+> All notebooks include additional small/medium presets, explicit native precision
+> selection, and optional specialist model parallelism. Runtime validation remains
+> outstanding; no tests or training were run by the author.
+
 > **Research-loop revision:** [SELF_IMPROVEMENT.md](docs/SELF_IMPROVEMENT.md) describes
 > the new bounded candidate-training/evaluation/promotion loop and optional notebook
 > section. Includes token-specific pondering losses, learned specialist integration
