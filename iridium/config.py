@@ -44,6 +44,14 @@ __all__ = [
     "ParameterReport",
 ]
 
+#: Discrete ids below this are control slots (BOS, EOS, SEP, PAD_CTRL and
+#: headroom); a text token id is its vocabulary index plus this. Mirrors
+#: ``training.tasks.TEXT_OFFSET``, which is the definition — duplicated here
+#: only because nothing in this module may import torch, and ``tasks`` does.
+#: ``tests/unit/test_config_inventory.py`` asserts the two agree, so the copy
+#: cannot drift.
+TEXT_ID_OFFSET = 16
+
 KIB = 1024
 MIB = 1024 ** 2
 GIB = 1024 ** 3
@@ -354,6 +362,40 @@ class CodecConfig:
     tie_text_embedding: bool = True
     continuous_head: str = "flow"      # "flow" (CFM) or "regression" (MSE)
     flow_tau_features: int = 64
+    #: How the flow head reads the model's hidden state: ``"add"`` projects it
+    #: and adds it into the mixer, ``"adaln"`` uses it to modulate a LayerNorm.
+    #: Adaptive normalisation is what DiT and SD3 use and is the stronger of the
+    #: two at matched width; ``"add"`` remains the default because changing it
+    #: changes the parameter set, and a checkpoint is not portable across that.
+    continuous_conditioning: str = "add"
+    #: Timestep distribution for the flow objective. ``"logit_normal"`` (SD3)
+    #: concentrates training signal on the hard middle of the trajectory rather
+    #: than spreading it uniformly over the easy ends. Costs no parameters, so
+    #: unlike ``continuous_conditioning`` it can be changed between runs freely
+    #: -- though not mid-run, since it changes what the loss is an average over.
+    flow_timestep_sampling: str = "uniform"
+
+    def __post_init__(self) -> None:
+        # Validated here rather than in the module, because an unknown value
+        # would otherwise be caught only when torch builds the head -- by which
+        # point the parameter report has already been printed, and it would be
+        # wrong. The accounting and the modules have to agree about what these
+        # strings mean or the ladder stops being costable.
+        if self.continuous_head not in ("flow", "regression"):
+            raise ConfigError(
+                f"continuous_head must be 'flow' or 'regression', "
+                f"got {self.continuous_head!r}"
+            )
+        if self.continuous_conditioning not in ("add", "adaln"):
+            raise ConfigError(
+                f"continuous_conditioning must be 'add' or 'adaln', "
+                f"got {self.continuous_conditioning!r}"
+            )
+        if self.flow_timestep_sampling not in ("uniform", "logit_normal"):
+            raise ConfigError(
+                f"flow_timestep_sampling must be 'uniform' or 'logit_normal', "
+                f"got {self.flow_timestep_sampling!r}"
+            )
 
     def continuous_dims(self) -> dict[str, int]:
         return {
@@ -366,9 +408,28 @@ class CodecConfig:
         }
 
     def _flow_head_params(self, d: int, d_out: int) -> int:
-        """FlowMatchingHead: norm, tau/x/condition projections, mixer, output."""
+        """FlowMatchingHead: norm, tau/x/condition projections, mixer, output.
+
+        ``null_cond`` is the learned "no conditioning" vector classifier-free
+        guidance substitutes for the real conditioning during its unconditional
+        pass. It is allocated unconditionally rather than only when
+        ``cfg_dropout > 0``, and that is the right call even though it costs a
+        vector per head on a run that never uses guidance: making it
+        conditional would mean a checkpoint trained without dropout has a
+        different parameter *set* from one trained with it, so enabling
+        guidance later could not load the earlier weights. A vector of length
+        ``d`` per continuous modality is a rounding error against the head it
+        sits in; a checkpoint that will not load is not.
+
+        ``adaln`` conditioning replaces the additive conditioning path with
+        LayerNorm modulation (scale and shift predicted from the conditioning),
+        which is what DiT and SD3 use and is the stronger of the two at matched
+        width. The normalisation itself is affine-free, so the cost is exactly
+        the modulation projection.
+        """
         d_h = max(d_out * 2, d)
         n_tau = self.flow_tau_features
+        adaln = (d_h * 2 * d_h + 2 * d_h) if self.continuous_conditioning == "adaln" else 0
         return (
             d                                   # RMSNorm
             + 2 * n_tau * d_h + d_h             # tau features
@@ -376,6 +437,8 @@ class CodecConfig:
             + d * d_h + d_h                     # conditioning
             + d_h * d_h + d_h                   # mixer
             + d_h * d_out + d_out               # velocity output
+            + d                                 # null_cond (see above)
+            + adaln                             # ada_mod: Linear(d_h, 2*d_h)
         )
 
     def params(self, d: int) -> dict[str, int]:
@@ -472,6 +535,29 @@ class IridiumConfig:
     memory_rank: int = 64
     perception_layers: int = 0
     perception_rank: int = 64
+    #: Subword vocabulary the text pipeline trains and uses. 0 keeps the
+    #: byte-level path, where a text id is a byte plus a fixed offset.
+    #:
+    #: This is the single most consequential setting on this list for how the
+    #: model reads, and the reason is arithmetic rather than taste. Byte-level
+    #: text costs about one token per character; a subword vocabulary of this
+    #: size costs roughly one per four. At a fixed ``max_seq_len`` and a fixed
+    #: step budget that is a ~4x difference in how much *text* the model sees,
+    #: and a ~4x difference in how far back its context actually reaches — and
+    #: it spends the difference learning orthography, which is not the thing
+    #: anyone wants a small model's capacity spent on. Byte-level's real
+    #: advantages (nothing to go stale, no vocabulary/corpus mismatch, lossless
+    #: on arbitrary input) are genuine and are nowhere near worth that at a
+    #: scale where capacity is the binding constraint.
+    #:
+    #: Must leave room for the control offset: ``codecs.vocab_size`` has to be
+    #: at least ``text_vocab_size + 16``. Checked in ``__post_init__``.
+    text_vocab_size: int = 0
+    #: Where the trained tokenizer artifact is cached. Recorded in the run
+    #: manifest so a checkpoint can say which vocabulary produced it — a model
+    #: served with a different tokenizer than it was trained with does not fail,
+    #: it just produces confident nonsense, which is the worst way to fail.
+    text_tokenizer_cache: str = "artifacts/tokenizers"
     notes: str = ""
 
     def __post_init__(self) -> None:
@@ -479,6 +565,21 @@ class IridiumConfig:
             raise ConfigError("invalid perceptual encoder dimensions")
         if self.memory_slots < 0 or self.memory_stride < 1 or self.memory_rank < 1:
             raise ConfigError("invalid context memory dimensions")
+        if self.text_vocab_size < 0:
+            raise ConfigError("text_vocab_size must be nonnegative (0 = byte level)")
+        if self.text_vocab_size:
+            # Text ids are shifted past the control tokens (see TEXT_OFFSET in
+            # training.tasks). Getting this wrong does not raise anywhere: the
+            # high-id tokens simply index past the embedding table, or worse,
+            # wrap into a control id and the model emits an EOS in the middle of
+            # a word. Caught here, where the number is still a config value.
+            if self.codecs.vocab_size < self.text_vocab_size + TEXT_ID_OFFSET:
+                raise ConfigError(
+                    f"codecs.vocab_size {self.codecs.vocab_size} cannot hold a "
+                    f"{self.text_vocab_size}-token vocabulary plus the "
+                    f"{TEXT_ID_OFFSET} reserved control ids; it needs at least "
+                    f"{self.text_vocab_size + TEXT_ID_OFFSET}"
+                )
         if self.controller_mode and self.gated_bank:
             raise ConfigError("controller_mode integrates in the core; disable gated_bank")
         if self.stacks.core_d_model == 0:

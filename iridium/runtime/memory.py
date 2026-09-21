@@ -106,21 +106,73 @@ OPTIMIZER_STATE_BYTES = {
 }
 
 
+def decay_groups(named_parameters, weight_decay: float = 0.01):
+    """Split parameters into the ones weight decay is correct for, and the rest.
+
+    Decay is a prior that a *matrix* should be small, and it is only that. Every
+    other kind of tensor in this model is harmed by it, each in its own way:
+
+    * **RMSNorm gains** multiply the residual stream. Shrinking a gain is a
+      global scale on everything downstream, so decay here is not regularisation
+      but a slow, invisible attenuation of the network.
+    * **Embedding rows** are updated only when their token appears. Decay
+      applies every step regardless, so a rare token's vector is pulled toward
+      zero far more often than it is pulled anywhere useful — precisely the
+      tokens that can least afford it. (With a tied text head the same tensor is
+      also the output projection, which makes this worse, not better.)
+    * **Biases and scalar gates** — the halting heads, the ponder and depth
+      priors, the bank gate, the focus gain. These encode a *calibrated* value.
+      Decaying a halting bias of -2.0 toward zero is decaying the model's
+      stopping prior toward "always stop", which shows up as a collapsed ponder
+      loop and looks like an architecture problem rather than an optimizer one.
+    * **RoPE tables and other buffers** are not parameters at all and must never
+      appear here; they are excluded by ``requires_grad``.
+
+    The rule used, which is the one GPT-3, Chinchilla and Llama all converged
+    on: decay tensors of rank >= 2, exempt everything of rank < 2. Rank is used
+    rather than a name match because a name match silently stops working the
+    moment a module is renamed, and the failure is undetectable in a loss curve.
+
+    Returns two torch.optim-style group dicts, always both, even when one is
+    empty — an optimizer built from a stable group layout can load a checkpoint
+    written by another run of the same model.
+    """
+    decay, no_decay = [], []
+    for name, param in named_parameters:
+        if not param.requires_grad:
+            continue
+        (decay if param.ndim >= 2 else no_decay).append(param)
+    return [
+        {"params": decay, "weight_decay": float(weight_decay), "group": "decay"},
+        {"params": no_decay, "weight_decay": 0.0, "group": "no_decay"},
+    ]
+
+
 def build_optimizer(params, kind: str = "adamw", lr: float = 3e-4,
-                    weight_decay: float = 0.01, betas=(0.9, 0.95)):
+                    weight_decay: float = 0.01, betas=(0.9, 0.95),
+                    foreach: bool | None = None):
     """Build the requested optimizer; missing optional dependencies fail explicitly.
 
     EagerAdamW bypasses torch.optim's lazy Dynamo import. No fallback changes
     the memory budget behind the user's back.
+
+    ``params`` may be a flat parameter iterable or a list of group dicts, so a
+    caller that has split decay from no-decay (see :func:`decay_groups`) passes
+    the groups straight through. ``foreach`` fuses the per-tensor update into
+    list operations; ``None`` lets each optimizer choose by device, which is the
+    right default because the launch overhead it removes exists only on a GPU.
     """
     params = list(params)
     kind = kind.lower()
+    grouped = bool(params) and isinstance(params[0], dict)
 
     if kind == "eager_adamw":
         from ..training.eager_adamw import EagerAdamW
-        return EagerAdamW(params, lr=lr, weight_decay=weight_decay, betas=betas)
+        return EagerAdamW(params, lr=lr, weight_decay=weight_decay, betas=betas,
+                          foreach=foreach)
+    flat = [p for g in params for p in g["params"]] if grouped else params
     if kind in ("paged_adamw", "adamw_8bit"):
-        if not all(p.is_cuda for p in params):
+        if not all(p.is_cuda for p in flat):
             raise ValueError(f"{kind} requires CUDA parameters")
         try:
             import bitsandbytes as bnb
@@ -135,8 +187,13 @@ def build_optimizer(params, kind: str = "adamw", lr: float = 3e-4,
         return torch.optim.SGD(params, lr=lr, weight_decay=weight_decay, momentum=0.0)
     if kind != "adamw":
         raise ValueError(f"unknown optimizer {kind!r}")
+    # foreach=None lets torch pick per device. The previous hard False was a
+    # workaround for a Dynamo import in some releases; ``eager_adamw`` is the
+    # supported route for those images, and forcing every run onto the
+    # per-tensor path to protect that one case is a large, permanent, and
+    # entirely avoidable cost on a model with thousands of small tensors.
     return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay, betas=betas,
-                            foreach=False)
+                            foreach=foreach)
 
 
 # --------------------------------------------------------------------------

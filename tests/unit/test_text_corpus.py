@@ -363,6 +363,186 @@ def test_items_carry_their_source_for_the_manifest():
 
 
 # ---------------------------------------------------------------------------
+# packing: offline, against a fake stream_documents so no network is needed.
+#
+# The claim being tested is specifically the one motivating this rewrite:
+# the old random-window version wrapped *every* window in BOS/EOS as though
+# it were a whole document, which is false for the overwhelming majority of
+# windows cut from the middle of a book. Packing's BOS/EOS must instead be a
+# property of the *position in the packed stream*, not of "a window was cut
+# here" — these tests pin that directly rather than trusting the docstring.
+# ---------------------------------------------------------------------------
+
+import random as _random
+
+
+def _fake_stream_documents(docs):
+    """A drop-in for ``tc.stream_documents`` that just replays a fixed list,
+    ignoring the network-shaped kwargs (``limit``, ``seed``, ``split``,
+    ``max_scanned``) the real one takes. Finite by design: a test corpus
+    that never runs out would hide a bug where text_items loops forever
+    waiting for more tokens than the mixture can ever supply."""
+    def _stream(key, limit=None, seed=0, buffer=None, shuffle=True,
+                split=None, max_scanned=None):
+        yield from docs
+    return _stream
+
+
+def test_packing_bos_only_on_real_document_starts(monkeypatch):
+    """window=1 makes the random starting phase deterministic (there is only
+    one possible phase, 0), so every stream position is a window and the
+    test can check BOS/EOS placement exactly rather than statistically.
+    Every character is distinct so a shuffled item can be mapped back to its
+    stream position unambiguously."""
+    docs = ["AB", "CDEF", "GHIJK"]              # 2 + 4 + 5 = 11 bytes, no repeats
+    monkeypatch.setattr(tc, "stream_documents", _fake_stream_documents(docs))
+
+    items = tc.text_items(11, window=1, mix={"gutenberg": 1.0}, seed=0,
+                           pack=True, dedupe=False)
+    assert len(items) == 11
+
+    stream = b"AB" + b"CDEF" + b"GHIJK"
+    doc_start_positions = {0, 2, 6}          # "AB" | "CDEF" | "GHIJK"
+    doc_end_positions = {2, 6, 11}           # end of each doc; 11 == stream end
+
+    seen_positions = set()
+    for it in items:
+        spans = it.sample.spans
+        has_bos = spans[0].modality == "control"
+        has_eos = spans[-1].modality == "control"
+        text_span_obj = spans[1] if has_bos else spans[0]
+        byte_val = int(text_span_obj.payload[0]) - 16  # offset=16 default
+        pos = stream.index(bytes([byte_val]))
+        assert pos not in seen_positions, "a stream position was reused"
+        seen_positions.add(pos)
+        assert has_bos == (pos in doc_start_positions), (pos, has_bos)
+        assert has_eos == (pos + 1 in doc_end_positions), (pos, has_eos)
+
+    assert seen_positions == set(range(11)), "packing left a gap or a duplicate"
+
+
+def test_packing_produces_contiguous_coverage_not_random_windows():
+    """Every byte fetched is used exactly once (up to the single partial
+    window dropped at the phase offset), unlike the old random-window
+    version which discarded most of a long document."""
+    docs = ["X" * 50 + "Y" * 50]  # one 100-byte document, no repeats to collapse
+    stream_fn = _fake_stream_documents(docs)
+
+    orig = tc.stream_documents
+    tc.stream_documents = stream_fn
+    try:
+        # 5 windows of 16 bytes = 80 bytes, achievable out of the 100
+        # available regardless of the random starting phase (0-15 slop).
+        items = tc.text_items(5, window=16, mix={"gutenberg": 1.0}, seed=0,
+                               pack=True, collapse_repeats=False, dedupe=False,
+                               filter_printable=False)
+    finally:
+        tc.stream_documents = orig
+    assert len(items) == 5
+    total_bytes = sum(
+        len(s.payload) for it in items for s in it.sample.spans if s.modality == "text"
+    )
+    assert total_bytes == 80, "windows should tile the stream contiguously, not sample it"
+
+
+def test_pack_false_reproduces_the_old_random_window_behaviour(monkeypatch):
+    """Every window, wherever it was cut from, gets wrapped in BOS/EOS —
+    exactly the behaviour ``pack=True`` was written to stop doing. Kept
+    reachable via ``pack=False`` for direct comparison, not for training."""
+    _random.seed(0)
+    docs = [("paragraph text here, more words follow. " * 5) for _ in range(20)]
+    monkeypatch.setattr(tc, "stream_documents", _fake_stream_documents(docs))
+
+    items = tc.text_items(30, window=32, mix={"gutenberg": 1.0}, seed=0, pack=False,
+                           dedupe=False)
+    assert len(items) == 30
+    for it in items:
+        spans = it.sample.spans
+        assert len(spans) == 3
+        assert spans[0].modality == "control" and not spans[0].supervised
+        assert spans[1].modality == "text"
+        assert spans[-1].modality == "control"
+
+
+def test_quality_filters_are_individually_switchable(monkeypatch):
+    """Each filter catches a specific, independent failure mode; disabling
+    one must not disable the others."""
+    noisy = "\x00\x01\x02" * 100 + "some real words follow after the noise"
+    repeaty = "hello " + "-" * 40 + " world, this document has plenty of words"
+    dup_a = "This is a duplicated opening paragraph that repeats verbatim. " * 3
+    dup_b = dup_a  # identical prefix -> should be caught by the dedupe hash
+    clean = "A perfectly ordinary sentence with nothing wrong about it at all today."
+
+    docs = [noisy, repeaty, dup_a, dup_b, clean]
+    monkeypatch.setattr(tc, "stream_documents", _fake_stream_documents(docs))
+
+    # printable-ratio filter alone drops the noisy document
+    items = tc.text_items(1, window=8, mix={"gutenberg": 1.0}, seed=0, pack=False,
+                           filter_printable=True, collapse_repeats=False, dedupe=False,
+                           max_windows_per_doc=1)
+    sources_seen = {tuple(i.truth["source"] for i in items)}
+    assert items  # something survived
+    for it in items:
+        # the item's prompt is a decoded prefix of its window; the noisy
+        # document's control bytes should never appear in kept output
+        assert "\x00" not in it.prompt
+
+    # repeat-collapsing: verify the standalone function directly
+    assert tc.collapse_repeated_runs("a" * 20, max_repeat=8) == "a" * 8
+    assert tc.collapse_repeated_runs("ab" * 10, max_repeat=8) == "ab" * 10  # not a single-char run
+    assert tc.collapse_repeated_runs("short", max_repeat=8) == "short"
+
+    # printable ratio: standalone function
+    assert tc._printable_ratio("clean ascii text") == 1.0
+    assert tc._printable_ratio("\x00\x01\x02\x03") == 0.0
+    assert 0.0 < tc._printable_ratio("abc\x00\x01") < 1.0
+
+    # dedupe: standalone via _clean_doc
+    seen = set()
+    kept_a = tc._clean_doc(dup_a, filter_printable=False, min_printable_ratio=0.0,
+                            collapse_repeats=False, max_repeat_run=8, dedupe=True,
+                            seen_hashes=seen)
+    kept_b = tc._clean_doc(dup_b, filter_printable=False, min_printable_ratio=0.0,
+                            collapse_repeats=False, max_repeat_run=8, dedupe=True,
+                            seen_hashes=seen)
+    assert kept_a is not None
+    assert kept_b is None, "an exact duplicate prefix must be dropped"
+
+    # with dedupe off, both keep
+    seen2 = set()
+    kept_a2 = tc._clean_doc(dup_a, filter_printable=False, min_printable_ratio=0.0,
+                             collapse_repeats=False, max_repeat_run=8, dedupe=False,
+                             seen_hashes=seen2)
+    kept_b2 = tc._clean_doc(dup_b, filter_printable=False, min_printable_ratio=0.0,
+                             collapse_repeats=False, max_repeat_run=8, dedupe=False,
+                             seen_hashes=seen2)
+    assert kept_a2 is not None and kept_b2 is not None
+
+
+def test_tokenizer_argument_switches_window_units_to_tokens(monkeypatch):
+    """``tokenizer=None`` keeps byte windows; a supplied tokenizer makes the
+    window a token count instead, and the resulting text span's ids must
+    come from the tokenizer's vocabulary, not raw bytes."""
+    from iridium.data.tokenizer import BytePairTokenizer
+
+    docs = [("the quick brown fox jumps over the lazy dog. " * 30) for _ in range(5)]
+    monkeypatch.setattr(tc, "stream_documents", _fake_stream_documents(docs))
+
+    tok = BytePairTokenizer()
+    tok.train(docs, vocab_size=300)
+
+    items = tc.text_items(4, window=8, mix={"gutenberg": 1.0}, seed=0, pack=True,
+                           tokenizer=tok, dedupe=False)
+    assert len(items) == 4
+    for it in items:
+        for s in it.sample.spans:
+            if s.modality == "text":
+                assert len(s.payload) == 8
+                for v in s.payload:
+                    assert 0 <= int(v) - 16 < tok.vocab_size
+
+
+# ---------------------------------------------------------------------------
 # how text_lm is scored
 # ---------------------------------------------------------------------------
 

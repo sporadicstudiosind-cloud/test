@@ -60,6 +60,7 @@ def build_corpus(
     text_mix: Optional[dict[str, float]] = None,
     text_window: int = 256,
     chat_mix: Optional[dict[str, float]] = None,
+    tokenizer=None,
 ) -> Corpus:
     """Assemble a corpus. ``text_lm`` in the mixture streams *real* text.
 
@@ -70,6 +71,20 @@ def build_corpus(
     does the same with real conversations, supervised on the assistant's turns
     only, and is what makes the model answer a question rather than continue
     the paragraph the question was written in.
+
+    ``tokenizer`` is the subword vocabulary text is encoded with; ``None`` keeps
+    the byte-level path. Build it from a config with
+    :func:`iridium.training.tokenizer_bridge.tokenizer_for_config`, and pass the
+    *same* one to training and to serving — a model read through a different
+    vocabulary than it was written with does not error, it produces fluent
+    nonsense.
+
+    Note that :data:`DEFAULT_MIXTURE` contains **no** ``text_lm`` or ``chat``
+    weight, so the default corpus is entirely synthetic structured families and
+    contains no natural language at all. That is a reasonable default for
+    exercising the physics and action machinery and a disastrous one for
+    training something that talks; :mod:`iridium.training.budget` reports it
+    rather than leaving it to be discovered from the model's output.
     """
     mixture = dict(mixture) if mixture else dict(DEFAULT_MIXTURE)
     if n_items < 1 or any(not np.isfinite(v) or v < 0 for v in mixture.values()) or sum(mixture.values()) <= 0:
@@ -92,7 +107,7 @@ def build_corpus(
     if n_text:
         from ..data.text_corpus import text_items
         items.extend(text_items(n_text, window=text_window, mix=text_mix,
-                                seed=seed, split=split))
+                                seed=seed, split=split, tokenizer=tokenizer))
     if n_chat:
         from ..data.chat_corpus import chat_items
         items.extend(chat_items(n_chat, mix=chat_mix, seed=seed, split=split))

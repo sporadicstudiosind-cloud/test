@@ -3,6 +3,15 @@
 Masks stay broadcast over heads. Fully masked rows are zeroed explicitly.
 Optional parameter-free Q/K normalization precedes RoPE; positions remain the
 original stream positions in both core and packed superstack attention.
+
+Three further knobs, all keyword-only, all defaulting to today's behaviour:
+``GroupedQueryAttention``/``TransformerBlock`` take ``window`` (a per-layer
+sliding-window size, for interleaving local and global layers a la Gemma 3 /
+Mistral) and ``softcap`` (Gemma 2 attention-logit softcapping), and grouped
+query attention now expands kv heads via SDPA's ``enable_gqa`` on backends
+that support it instead of always calling ``repeat_interleave`` first. See
+``_attend`` for what forces the manual backend and why, and ``sliding_window_keep``
+for how a window composes with an existing causal/keep mask.
 """
 
 from __future__ import annotations
@@ -68,6 +77,26 @@ class SwiGLU(nn.Module):
 #: what the bit-exact parity gate runs under, and is why it is still here.
 _ATTENTION_BACKEND = os.environ.get("IRIDIUM_ATTENTION", "sdpa").lower()
 
+#: Cached result of probing whether this torch build's SDPA accepts
+#: ``enable_gqa`` (added in torch 2.5). Probed once with a throwaway tensor
+#: rather than parsed from ``torch.__version__``, because printed versions
+#: differ across ROCm/nightly/vendor builds in ways a string match eventually
+#: gets wrong, and a 1-element attention call costs nothing next to a real one.
+_ENABLE_GQA_SUPPORTED: Optional[bool] = None
+
+
+def _enable_gqa_supported() -> bool:
+    global _ENABLE_GQA_SUPPORTED
+    if _ENABLE_GQA_SUPPORTED is None:
+        try:
+            q = torch.zeros(1, 2, 1, 4)
+            kv = torch.zeros(1, 1, 1, 4)
+            F.scaled_dot_product_attention(q, kv, kv, enable_gqa=True)
+            _ENABLE_GQA_SUPPORTED = True
+        except TypeError:
+            _ENABLE_GQA_SUPPORTED = False
+    return _ENABLE_GQA_SUPPORTED
+
 
 def set_attention_backend(backend: str) -> str:
     """Set ``"sdpa"`` or ``"manual"``; returns the previous value."""
@@ -98,14 +127,39 @@ class use_attention_backend:
 
 
 def _attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-            keep: torch.Tensor, d_head: int) -> torch.Tensor:
+            keep: torch.Tensor, d_head: int, n_rep: int = 1,
+            softcap: Optional[float] = None) -> torch.Tensor:
     """Attention with an explicit boolean mask, both ways.
+
+    ``k``/``v`` carry ``n_rep`` fewer heads than ``q`` when this is grouped
+    query attention (``n_rep = n_query_heads // n_kv_heads``); the two
+    backends expand that grouping differently, both described below.
 
     Both paths agree on the awkward case: a query row with *no* admissible key
     returns zeros rather than NaN. Softmax over an all-``-inf`` row is NaN, and
     a fused kernel propagates that into the residual stream, where it silently
     turns the whole batch into NaN several layers later.
+
+    ``softcap`` (Gemma 2's ``tanh(logits / c) * c`` before the softmax) always
+    takes the manual path, on either backend setting. SDPA's fused kernels
+    only ever combine an *additive* bias or a boolean ``-inf`` into the score
+    matrix — that is the entire vocabulary of ``attn_mask`` and ``is_causal``
+    — and there is no bias that turns ``x`` into ``c * tanh(x / c)``, because
+    that reshapes the whole score distribution rather than shifting it. So
+    softcapping is exactly the case the module docstring means by "some masks
+    ... may not map onto SDPA": it is not the mask that fails to map, it is
+    the score transform, and enabling it deliberately trades the fused
+    kernel's memory/speed win for Gemma 2's cure for logit blowup.
     """
+    if softcap is not None:
+        if n_rep > 1:
+            k = k.repeat_interleave(n_rep, dim=1)
+            v = v.repeat_interleave(n_rep, dim=1)
+        scores = (q @ k.transpose(-2, -1)) / math.sqrt(d_head)
+        scores = softcap * torch.tanh(scores / softcap)
+        probs = _masked_softmax(scores, keep)
+        return probs @ v
+
     if _ATTENTION_BACKEND == "sdpa":
         mask = keep
         dead = ~mask.any(dim=-1, keepdim=True)
@@ -113,9 +167,24 @@ def _attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
         # number, then zero the row afterwards. Masking it back out is what
         # keeps this identical to the manual path rather than merely close.
         safe = mask.masked_fill(dead.expand_as(mask) & _first_column(mask), True)
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=safe)
+        if n_rep > 1 and _enable_gqa_supported():
+            # Let the kernel broadcast kv heads internally instead of us
+            # materializing ``n_rep`` copies of k/v first. repeat_interleave
+            # is the correct fallback (below) but it is real memory: at 8 kv
+            # heads repeated 4x over a long cache, that is 4x the KV cache's
+            # footprint held twice during the copy, for a broadcast the
+            # kernel is willing to do for free.
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=safe, enable_gqa=True)
+        else:
+            if n_rep > 1:
+                k = k.repeat_interleave(n_rep, dim=1)
+                v = v.repeat_interleave(n_rep, dim=1)
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=safe)
         return out.masked_fill(dead, 0.0)
 
+    if n_rep > 1:
+        k = k.repeat_interleave(n_rep, dim=1)
+        v = v.repeat_interleave(n_rep, dim=1)
     scores = (q @ k.transpose(-2, -1)) / math.sqrt(d_head)
     probs = _masked_softmax(scores, keep)
     return probs @ v
@@ -156,6 +225,9 @@ class GroupedQueryAttention(nn.Module):
         n_kv_heads: int,
         d_head: int,
         rope: Optional[RotaryEmbedding] = None,
+        *,
+        window: Optional[int] = None,
+        softcap: Optional[float] = None,
     ) -> None:
         super().__init__()
         if n_query_heads % n_kv_heads:
@@ -171,6 +243,15 @@ class GroupedQueryAttention(nn.Module):
         self.wo = nn.Linear(n_query_heads * d_head, d_model, bias=False)
         self.rope = rope
         self.qk_norm = False
+        # Per-layer local attention window (Mistral: uniform; Gemma 3: 5
+        # local layers per global one). None keeps today's full-causal
+        # behaviour; a caller wanting the interleave sets it per-instance
+        # after construction, the same way ``qk_norm`` is toggled today,
+        # since window is a keyword-only default-preserving knob and this
+        # module is not the place that decides the per-layer schedule.
+        self.window = window
+        # Gemma 2 attention-logit softcapping; None keeps SDPA in play.
+        self.softcap = softcap
 
     def project_kv(
         self, x: torch.Tensor, positions: torch.Tensor
@@ -207,9 +288,11 @@ class GroupedQueryAttention(nn.Module):
                 v = torch.cat([prev[1], v], dim=2)
             cache[cache_key] = (k, v)
 
-        kr = k.repeat_interleave(self.repeat, dim=1)
-        vr = v.repeat_interleave(self.repeat, dim=1)
-        out = _attend(q, kr, vr, keep, self.d_head)
+        if self.window is not None:
+            window_mask = sliding_window_keep(q.shape[2], k.shape[2], self.window, q.device)
+            keep = keep & window_mask
+
+        out = _attend(q, k, v, keep, self.d_head, n_rep=self.repeat, softcap=self.softcap)
         return self.wo(out.transpose(1, 2).reshape(b, t, -1))
 
 
@@ -236,6 +319,8 @@ class BridgeCrossAttention(nn.Module):
         n_kv_heads: int,
         d_head: int,
         rope: Optional[RotaryEmbedding] = None,
+        *,
+        softcap: Optional[float] = None,
     ) -> None:
         super().__init__()
         self.n_q = n_query_heads
@@ -249,6 +334,12 @@ class BridgeCrossAttention(nn.Module):
         self.wo = nn.Linear(n_query_heads * d_head, d_model, bias=False)
         self.rope = rope
         self.qk_norm = False
+        # No ``window`` here: a stack-local window narrows self-attention over
+        # the stack's own packed sequence, but this attends onto the core's
+        # global KV, whose positions are the *original stream* positions
+        # (see the module docstring), not the packed axis a window index would
+        # need to mean anything against. Softcapping still applies unchanged.
+        self.softcap = softcap
 
     def forward(
         self,
@@ -268,9 +359,7 @@ class BridgeCrossAttention(nn.Module):
         if self.rope is not None:
             q = self.rope(q, q_positions)
             k = self.rope(k, core_positions)
-        kr = k.repeat_interleave(self.repeat, dim=1)
-        vr = v.repeat_interleave(self.repeat, dim=1)
-        out = _attend(q, kr, vr, keep, self.d_head)
+        out = _attend(q, k, v, keep, self.d_head, n_rep=self.repeat, softcap=self.softcap)
         return self.wo(out.transpose(1, 2).reshape(b, t, -1))
 
 
@@ -280,6 +369,27 @@ def causal_keep(t_q: int, t_k: int, device=None) -> torch.Tensor:
     qi = torch.arange(t_q, device=device).view(-1, 1) + offset
     kj = torch.arange(t_k, device=device).view(1, -1)
     return (kj <= qi).view(1, 1, t_q, t_k)
+
+
+def sliding_window_keep(t_q: int, t_k: int, window: int, device=None) -> torch.Tensor:
+    """``[1, 1, t_q, t_k]`` boolean: query ``i`` sees key ``j`` iff ``i - j < window``.
+
+    Same index convention as :func:`causal_keep` — ``t_k - t_q`` offsets the
+    query row so this is correct against a KV cache, not just a fresh
+    sequence — because it is meant to be AND-ed with a causal mask the caller
+    already built the same way, never used standalone. A window is a *cost*
+    property (Mistral's uniform local attention, Gemma 3's 5-local:1-global
+    interleave), not a correctness one, so this never decides on its own
+    whether key ``j`` is in the past; it only ever narrows a mask that already
+    decided that. That is also why this composes safely with the KV-parity
+    invariant: it is a deterministic function of the same absolute-position
+    offsets ``causal_keep`` uses, so a cached decode step and a full forward
+    pass narrow their causal mask identically, token by token.
+    """
+    offset = t_k - t_q
+    qi = torch.arange(t_q, device=device).view(-1, 1) + offset
+    kj = torch.arange(t_k, device=device).view(1, -1)
+    return ((qi - kj) < window).view(1, 1, t_q, t_k)
 
 
 def position_keep(
@@ -310,11 +420,15 @@ class TransformerBlock(nn.Module):
         d_ff: int,
         rope: Optional[RotaryEmbedding] = None,
         eps: float = 1e-5,
+        *,
+        window: Optional[int] = None,
+        softcap: Optional[float] = None,
     ) -> None:
         super().__init__()
         self.norm_attn = RMSNorm(d_model, eps)
         self.attn = GroupedQueryAttention(
-            d_model, n_query_heads, n_kv_heads, d_head, rope
+            d_model, n_query_heads, n_kv_heads, d_head, rope,
+            window=window, softcap=softcap,
         )
         self.norm_ffn = RMSNorm(d_model, eps)
         self.ffn = SwiGLU(d_model, d_ff)

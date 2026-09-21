@@ -46,9 +46,44 @@ def place_model(model, devices):
 
 
 def native_bf16(devices):
-    # Avoid treating BF16 emulation as native support on Turing/Pascal cards.
-    return bool(devices) and all(str(d).startswith('cuda') and
-                                 torch.cuda.get_device_capability(d)[0] >= 8 for d in devices)
+    """Native bf16 on every device, decided per vendor rather than per number.
+
+    The obvious version -- ``get_device_capability(d)[0] >= 8`` -- is an NVIDIA
+    SM major-version test, and it is the *right* test on NVIDIA: bf16 arrives
+    with Ampere (sm_80), and Turing and Pascal only emulate it, so training in
+    bf16 there is quietly slower than fp32 rather than faster.
+
+    On a ROCm build it is not a test at all. ``get_device_capability`` still
+    returns a two-tuple, but it is derived from the HIP arch, not from an
+    NVIDIA compute capability, and comparing its first element against 8 asks a
+    question about AMD hardware that has no meaning. It can fail in both
+    directions -- refusing bf16 on an MI300 that has it in silicon, or granting
+    it on an older RDNA part that does not -- and both failures are silent: the
+    first is merely slow, the second produces a run whose numerics are emulated
+    and whose loss curve looks unremarkable.
+
+    ``runtime.device.detect`` already decides this correctly by matching the
+    gfx arch string, so the fix is to ask it rather than to re-derive it here.
+    Two implementations of one predicate is how they came apart in the first
+    place.
+    """
+    if not devices:
+        return False
+    if not all(str(d).startswith('cuda') for d in devices):
+        return False
+    from .device import detect
+    if torch.version.hip is not None:
+        # Per-device on ROCm: a host can mix archs, and detect() reports index 0.
+        props = [torch.cuda.get_device_properties(d) for d in devices]
+        archs = {getattr(p, 'gcnArchName', '') or '' for p in props}
+        if len(archs) == 1:
+            return detect().bf16
+        return all(
+            any(t in (getattr(p, 'gcnArchName', '') or '')
+                for t in ('gfx90a', 'gfx94', 'gfx110', 'gfx112', 'gfx115'))
+            for p in props
+        )
+    return all(torch.cuda.get_device_capability(d)[0] >= 8 for d in devices)
 
 
 def memory_snapshot(devices):

@@ -95,7 +95,11 @@ class CodecBank(nn.Module):
             if name == "quantity":
                 decoders[name] = RegressionHead(d_model, 1)
             elif cfg.continuous_head == "flow":
-                decoders[name] = FlowMatchingHead(d_model, dim, n_tau=cfg.flow_tau_features)
+                decoders[name] = FlowMatchingHead(
+                    d_model, dim, n_tau=cfg.flow_tau_features,
+                    conditioning=cfg.continuous_conditioning,
+                    timestep_sampling=cfg.flow_timestep_sampling,
+                )
             else:
                 decoders[name] = RegressionHead(d_model, dim)
         self.decoders = nn.ModuleDict(decoders)
@@ -192,10 +196,33 @@ class CodecBank(nn.Module):
             | (tgt["modality"] == MODALITY_INDEX["control"])
         )
         if bool(text_mask.any()):
-            logits = self.text_head(h[text_mask])
-            losses["text"] = (F.cross_entropy(logits.float(), tgt["discrete"][text_mask], reduction="none") * weight[text_mask]).sum() / text_mask.sum()
+            logits = self.text_head(h[text_mask]).float()
+            losses["text"] = (F.cross_entropy(logits, tgt["discrete"][text_mask], reduction="none") * weight[text_mask]).sum() / text_mask.sum()
+            # Output z-loss (PaLM §"training instability"). Cross-entropy is
+            # invariant to a constant added to every logit, so nothing in the
+            # objective stops the whole logit vector from drifting away from
+            # zero — it is a free direction. Two things then go wrong, neither
+            # of which shows up as a bad loss:
+            #
+            #   * in bf16, whose mantissa is 8 bits, a logit vector centred on
+            #     +30 has ~0.25 of absolute resolution, so the *differences*
+            #     between logits — the only part that carries information — are
+            #     quantised into noise;
+            #   * the softmax saturates, gradients through the head shrink, and
+            #     the run stops improving in a way that looks like a data
+            #     problem.
+            #
+            # Penalising log-sum-exp squared pins the drift without touching the
+            # differences. It is nearly free at vocab 384 and close to mandatory
+            # once a subword vocabulary makes the logit vector 32k wide, which is
+            # exactly when nobody thinks to add it. Reported separately so it can
+            # be watched: a z-loss that climbs is the earliest visible sign of
+            # the instability it exists to prevent.
+            logz = torch.logsumexp(logits, dim=-1)
+            losses["text_z"] = (logz.square() * weight[text_mask]).sum() / text_mask.sum()
         else:
             losses["text"] = zero
+            losses["text_z"] = zero
 
         act_mask = valid & (tgt["modality"] == MODALITY_INDEX["action"])
         if bool(act_mask.any()):

@@ -14,19 +14,43 @@ It names the backend (`rocm`, `cuda`, `cpu`, `mps`), reports whether bf16 is
 really available, and then *exercises* matmul, the FFT the spectral blocks
 need, and a device-side generator — rather than assuming any of them.
 
-## AMD (ROCm)
+For everything *around* the model's own numerics — is this a HIP or CUDA
+build, what SDPA kernels are enabled, does `torch.compile` actually work here,
+which environment variables are set — there is a second, wider report:
+
+```bash
+python -m iridium.runtime.backend
+```
+
+It also comes back from the running server at `GET /api/health` under the
+`"backend"` key, so a deployed instance can be checked without shelling in.
+
+## AMD (ROCm) — what is verified here and what is not
+
+**Be precise about what "supported" means in this document.** Everything below
+was checked by reading the code and by running it *without a GPU present* —
+this development environment has no AMD hardware, full stop. "Should work" and
+"tested" are marked separately below; treat every "should work" as a real but
+unverified claim, not a guarantee, and report back what actually happens on
+real silicon.
 
 PyTorch's ROCm build exposes AMD hardware through the same `torch.cuda` API via
 HIP, so `.to("cuda")` lands on a Radeon or Instinct card. Nothing in this
-repository needs changing.
+repository's model or training code is CUDA-specific — attention goes through
+`torch.nn.functional.scaled_dot_product_attention`, never a CUDA-only
+`flash_attn` import; there is no `bitsandbytes` dependency on the inference
+path (training's 8-bit/paged optimizers do reach for it, and that package has
+no official ROCm build — see the table below).
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/rocm6.2
 python -m iridium.runtime.device        # expect backend: rocm
+python -m iridium.runtime.backend       # full capability report
 PYTHONPATH=. python -m iridium.training.phase1_pretrain --rung nano100m --steps 3000
 ```
 
-Or containerised, which is usually less painful:
+Or containerised, which is usually less painful and is what `Dockerfile.rocm`
+pins a coherent ROCm-base/torch-wheel pair for:
 
 ```bash
 docker build -f Dockerfile.rocm -t iridium-rocm .
@@ -35,14 +59,25 @@ docker run --rm -it --device=/dev/kfd --device=/dev/dri \
   -p 8080:8080 iridium-rocm
 ```
 
-Things that actually bite on ROCm:
+Consumer Radeon cards outside AMD's official support list (RDNA2 `gfx1030`
+family, RDNA1 `gfx1010` family) often need `HSA_OVERRIDE_GFX_VERSION` to claim
+a supported arch string — see the comment block at the bottom of
+`Dockerfile.rocm` for the exact values and why this is a community workaround,
+not something AMD supports: it can produce silently wrong kernels on a card
+whose ISA doesn't actually match the one it's told to impersonate.
 
-| | |
-|---|---|
-| **bf16** | present on CDNA (MI100+, `gfx90a`/`gfx942`) and RDNA3 (`gfx1100`+), absent on older RDNA. `device.detect()` reports it per architecture. |
-| **`HSA_OVERRIDE_GFX_VERSION`** | consumer cards sometimes need this to claim a supported arch — e.g. `11.0.0` on RDNA3, `10.3.0` on RDNA2. Unset by default here because setting it wrongly produces silently wrong kernels rather than an error. |
-| **FFT** | the spectral blocks go through rocFFT. Supported, and `verify()` tests it rather than assuming. |
-| **Device nodes** | the container needs `/dev/kfd` and `/dev/dri` plus the `video` group, or `torch.cuda.is_available()` is simply `False` with no explanation. |
+| | status | detail |
+|---|---|---|
+| **bf16 gating** | should work | present on CDNA (MI100+, `gfx90a`/`gfx942`) and RDNA3 (`gfx1100`+), absent on older RDNA/CDNA1 (`gfx906` and earlier). `device.detect()` matches the arch string per `tests/unit/test_rocm.py`, which exercises `gfx90a`, `gfx942`, `gfx1100`, `gfx1030`, `gfx906` against mocked device properties — verified as *logic*, not against real hardware. |
+| **FFT** | should work | the spectral blocks go through rocFFT via `torch.fft`. `verify()` in `device.py` exercises it rather than assuming, but only ever against whatever backend is actually present when you run it — on this box, that's CPU. |
+| **`torch.compile` / inductor** | unverified | inductor's codegen path works on ROCm in principle, but goes through Triton, and ROCm's Triton support lags CUDA's and is version-pair-sensitive. `iridium/runtime/backend.py`'s `compile_available()` compiles and runs a trivial function and reports the real result rather than asserting it works — run it on your card before relying on `torch.compile` in a training or serving path. |
+| **`bitsandbytes` (8-bit/paged optimizers)** | **known gap, training only** | `iridium/runtime/memory.py`'s `paged_adamw`/`adamw_8bit` optimizer kinds `import bitsandbytes`, which has no official ROCm build. On a ROCm box, requesting either raises `ImportError` inside the existing "install bitsandbytes or choose eager_adamw" `RuntimeError` — that's the correct failure (explicit, not silently falling back to a different memory budget), but the *fix* is to pick `eager_adamw`/`adamw`/`adafactor` on ROCm, since none of the alternatives get you 8-bit/paged state today. This module is outside this document's edit scope; flagged here so it doesn't come as a surprise mid-training. |
+| **`iridium/runtime/placement.py:native_bf16`** | **known bug on AMD, not fixed here** | gates bf16 on `torch.cuda.get_device_capability(d)[0] >= 8`, which is an NVIDIA SM-major-version threshold. On a ROCm build that same call returns HIP's own capability tuple, which is not an SM number and is not guaranteed to compare the way `>= 8` assumes — this function is very likely wrong on every AMD card, in either direction, until someone checks what HIP actually returns per arch on real hardware. `iridium/runtime/device.py:detect()` does the correct architecture-string match (see the table row above) and is the one used for serving; multi-GPU training placement in `placement.py` is a separate, unverified code path. Out of scope for this document's file ownership — tracked for the module's owner, not fixed here. |
+| **`HSA_OVERRIDE_GFX_VERSION`** | unverified, unofficial for consumer cards | see above; unset by default in `Dockerfile.rocm` because a wrong value produces silently wrong kernels rather than an error. |
+| **`ffmpeg`** | fixed here | `iridium/codecs/media.py` shells out to `ffmpeg`/`ffprobe` for every audio/video span; `Dockerfile.rocm` previously did not install it, so any media-bearing sample would raise `RuntimeError: ffmpeg is required...` on first use. Now installed via `apt-get`. |
+| **Device nodes** | operational fact, not code | the container needs `/dev/kfd` and `/dev/dri` plus the `video` group, or `torch.cuda.is_available()` is simply `False` with no explanation. |
+| **Multi-GPU (RCCL)** | unverified, likely fine | ROCm's collective library (RCCL) is a drop-in for NCCL at the API level and PyTorch's distributed backend dispatches to it under the same `"nccl"` backend name — there is no separate `dist.init_process_group("rccl")` to ask for. Nothing in this codebase currently sets up multi-node `torch.distributed`; `placement.py`'s multi-GPU path is single-process, multi-device, not multi-node, so RCCL/NCCL differences may not even be reachable yet. Not exercised here either way. |
+| **Pinned memory** | not used | nothing in this codebase calls `pin_memory=True` on a `DataLoader` or `.pin_memory()` on a tensor, so there's no CUDA-only pinned-allocator behavior to differ on ROCm. Checked by grep, not by assumption. |
 
 ## Why fp16 is not offered as a fallback
 

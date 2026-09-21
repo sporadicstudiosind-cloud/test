@@ -59,6 +59,28 @@ class TrainConfig:
     max_length: int | None = None
     #: On CUDA OOM, halve the micro-batch and retry rather than losing the run.
     oom_retry: bool = True
+    #: Split parameters so that weight decay reaches only rank->=2 weights. See
+    #: :func:`iridium.runtime.memory.decay_groups` for what each excluded kind of
+    #: tensor loses when it is decayed; the short version is that decaying an
+    #: RMSNorm gain attenuates the whole residual stream and decaying a halting
+    #: bias collapses the ponder loop. Set False only to reproduce a run made
+    #: before this existed.
+    decay_groups: bool = True
+    #: Fuse per-tensor optimizer and gradient-clipping work into list operations.
+    #: ``None`` decides by device: on a GPU this model's thousands of small
+    #: tensors make the update launch-bound, and on a CPU there is no launch
+    #: overhead to remove. Set explicitly only to pin behaviour for a comparison.
+    foreach: bool | None = None
+    #: Warmup as a fraction of ``steps``, used when it exceeds ``warmup``. A
+    #: fixed 50-step warmup is far too short for a routed model: the macro
+    #: router's gate is what decides which superstack sees which token, and at a
+    #: high learning rate in the first hundred steps it will commit to a
+    #: partition before any stack has learned anything to justify it. That
+    #: commitment does not come back — the unvisited stacks receive no gradient
+    #: and stay untrained, and the loss curve looks merely mediocre rather than
+    #: broken. The larger of the two is used so an explicit ``warmup`` still
+    #: wins on a short debug run.
+    warmup_ratio: float = 0.02
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -74,10 +96,22 @@ def git_revision() -> str:
         return "unknown"
 
 
+def warmup_steps(cfg: TrainConfig) -> int:
+    """The effective warmup: the larger of the explicit count and the ratio.
+
+    Capped below the total step count, because a warmup longer than the run is
+    a linear ramp that never reaches the configured learning rate, and the run
+    then reports a schedule it did not follow.
+    """
+    ratio = int(cfg.steps * max(cfg.warmup_ratio, 0.0))
+    return min(max(cfg.warmup, ratio), max(cfg.steps - 1, 0))
+
+
 def cosine_lr(step: int, cfg: TrainConfig) -> float:
-    if step < cfg.warmup:
-        return cfg.lr * (step + 1) / max(cfg.warmup, 1)
-    t = (step - cfg.warmup) / max(cfg.steps - cfg.warmup, 1)
+    warm = warmup_steps(cfg)
+    if step < warm:
+        return cfg.lr * (step + 1) / max(warm, 1)
+    t = (step - warm) / max(cfg.steps - warm, 1)
     floor = cfg.lr * cfg.min_lr_ratio
     return floor + 0.5 * (cfg.lr - floor) * (1.0 + math.cos(math.pi * min(t, 1.0)))
 
@@ -120,10 +154,19 @@ class Trainer:
         )
         self.history: list[dict[str, Any]] = []
         self._apply_freeze()
-        params = [p for p in model.parameters() if p.requires_grad]
-        from ..runtime.memory import build_optimizer
+        from ..runtime.memory import build_optimizer, decay_groups
+        if cfg.decay_groups:
+            groups = decay_groups(model.named_parameters(), cfg.weight_decay)
+            self.decayed_params = sum(p.numel() for p in groups[0]["params"])
+            self.undecayed_params = sum(p.numel() for p in groups[1]["params"])
+            optimizer_params = groups
+        else:
+            optimizer_params = [p for p in model.parameters() if p.requires_grad]
+            self.decayed_params = sum(p.numel() for p in optimizer_params)
+            self.undecayed_params = 0
         self.optimizer = build_optimizer(
-            params, kind=cfg.optimizer, lr=cfg.lr, weight_decay=cfg.weight_decay
+            optimizer_params, kind=cfg.optimizer, lr=cfg.lr,
+            weight_decay=cfg.weight_decay, foreach=cfg.foreach,
         )
         from ..runtime.device import generator_for
         self.generator = generator_for(device, cfg.seed)
@@ -259,8 +302,12 @@ class Trainer:
             del losses, out, total, batch
         self.scaler.unscale_(self.optimizer)
         params = [p for p in self.model.parameters() if p.grad is not None]
+        # foreach=None lets torch fuse the norm reduction and the rescale across
+        # the whole parameter list. Pinning it False issued two kernels per
+        # tensor every single step, on a model that has thousands of them.
         norm = torch.nn.utils.clip_grad_norm_(params, self.cfg.grad_clip or float("inf"),
-                                             error_if_nonfinite=False, foreach=False)
+                                             error_if_nonfinite=False,
+                                             foreach=self.cfg.foreach)
         if not bool(torch.isfinite(norm)) and self.precision != "fp16":
             raise FloatingPointError("non-finite gradient; optimizer update cancelled")
         previous_scale = self.scaler.get_scale()

@@ -117,3 +117,70 @@ def test_roundtrip_through_dict():
     again = IridiumConfig.from_dict(cfg.to_dict())
     assert again.n_params == cfg.n_params
     assert again.stacks.spectral_stacks == cfg.stacks.spectral_stacks
+
+
+def test_text_id_offset_matches_the_definition_in_tasks():
+    """config.TEXT_ID_OFFSET is a copy; this is what stops it drifting.
+
+    ``iridium.config`` may not import torch — the multi-trillion rungs have to
+    be costable on a laptop — and ``training.tasks`` does, so the constant is
+    duplicated rather than imported. A duplicated constant is fine exactly as
+    long as something fails when the two disagree.
+    """
+    from iridium.config import TEXT_ID_OFFSET
+    from iridium.training.tasks import TEXT_OFFSET
+
+    assert TEXT_ID_OFFSET == TEXT_OFFSET
+
+
+def test_vocab_headroom_is_checked_before_a_run_not_during_one():
+    """An id past the embedding table is not an error anyone sees in time."""
+    import dataclasses
+
+    import pytest
+
+    from iridium.config import ConfigError, get_config
+
+    cfg = get_config("nano")
+    with pytest.raises(ConfigError, match="reserved control ids"):
+        dataclasses.replace(cfg, text_vocab_size=8192)
+
+    sized = dataclasses.replace(
+        cfg,
+        text_vocab_size=8192,
+        codecs=dataclasses.replace(cfg.codecs, vocab_size=8192 + 16),
+    )
+    assert sized.text_vocab_size == 8192
+
+
+def test_flow_head_options_are_validated_where_the_cost_is_computed():
+    import dataclasses
+
+    import pytest
+
+    from iridium.config import ConfigError, get_config
+
+    codecs = get_config("nano").codecs
+    for field, bad in (("continuous_conditioning", "film"),
+                       ("flow_timestep_sampling", "cosine"),
+                       ("continuous_head", "diffusion")):
+        with pytest.raises(ConfigError):
+            dataclasses.replace(codecs, **{field: bad})
+
+
+def test_adaln_conditioning_is_costed_against_the_real_module():
+    """The formula must track the option, not just the default."""
+    import dataclasses
+
+    import torch
+
+    from iridium.codecs.bank import CodecBank
+    from iridium.config import get_config
+
+    cfg = get_config("nano")
+    for conditioning in ("add", "adaln"):
+        codecs = dataclasses.replace(cfg.codecs, continuous_conditioning=conditioning)
+        bank = CodecBank(codecs, cfg.core.d_model)
+        expected = sum(codecs.params(cfg.core.d_model).values())
+        actual = sum(p.numel() for p in bank.parameters())
+        assert actual == expected, f"{conditioning}: formula {expected}, module {actual}"

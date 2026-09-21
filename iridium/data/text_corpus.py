@@ -409,6 +409,122 @@ def stream_mixture(
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# quality filters
+#
+# Each one is switchable independently because each catches a different,
+# unrelated failure mode of scraped/crowd-sourced text, and a corpus that is
+# clean on one axis can be filthy on another. Bundling them into one
+# all-or-nothing flag would make it impossible to, say, keep the dedup filter
+# (cheap, never wrong) while turning off the printable-ratio filter to
+# inspect what it is actually rejecting.
+# --------------------------------------------------------------------------
+
+
+def _printable_ratio(text: str) -> float:
+    """Fraction of characters that are printable text (plus newline/tab)
+    rather than control bytes, private-use codepoints, or other debris that
+    an HTML-to-text or PDF-to-text extractor leaves behind. A document that
+    is mostly binary noise costs the same shuffle-buffer slot and download as
+    a clean one but teaches the model nothing about language — worse, it
+    teaches a byte-level model that these particular non-text byte sequences
+    are worth predicting accurately, which is capacity spent on precisely
+    the wrong thing."""
+    if not text:
+        return 0.0
+    printable = sum(1 for c in text if c.isprintable() or c in "\n\t")
+    return printable / len(text)
+
+
+def _repeat_run_pattern(min_run: int):
+    return re.compile(r"(.)\1{%d,}" % min_run)
+
+
+def collapse_repeated_runs(text: str, max_repeat: int = 8) -> str:
+    """Collapse a run of more than ``max_repeat`` identical characters down to
+    exactly ``max_repeat`` of them.
+
+    Divider lines ("--------------------------------"), decorative ASCII-art
+    borders, and repeated-character spam ("hahahahaha...") are common in
+    scraped web text and teach a byte-level model a genuinely useless skill:
+    predicting "same byte again" hundreds of times in a row. That is trivial
+    loss to minimise and buys the model nothing, so long runs are truncated
+    rather than deleted outright — the document still shows *that* a
+    separator was there, just not how long it happened to be. ``.`` does not
+    match a newline by default, so a run of blank lines (often meaningful
+    paragraph spacing) is left alone; only a single repeated non-newline
+    character triggers this.
+    """
+    return _repeat_run_pattern(max_repeat).sub(lambda m: m.group(1) * max_repeat, text)
+
+
+def _prefix_hash(text: str, n: int = 512) -> bytes:
+    """A hash of a document's first ``n`` bytes, not the whole document.
+
+    Hashing everything is the obviously-more-thorough version and also the
+    expensive one: at Gutenberg's half-megabyte documents, hashing every byte
+    of every candidate before deciding whether to keep it undoes the point of
+    *streaming* text in the first place. Templated boilerplate — mirrored
+    articles, a scraper's repeated page header, a duplicated disclaimer —
+    overwhelmingly repeats in a document's opening even when the body differs
+    further down, so the prefix is where duplication actually shows up; this
+    catches that at a fixed, small cost per document regardless of its length.
+    """
+    head = text.encode("utf-8", "ignore")[:n]
+    return hashlib.blake2b(head, digest_size=8).digest()
+
+
+def _clean_doc(
+    doc: str,
+    *,
+    filter_printable: bool,
+    min_printable_ratio: float,
+    collapse_repeats: bool,
+    max_repeat_run: int,
+    dedupe: bool,
+    seen_hashes: set,
+) -> Optional[str]:
+    """Run the enabled filters in order; ``None`` means "drop this document".
+
+    Order is not arbitrary. Printable-ratio is checked on the document
+    *before* collapsing repeats, so a document that is mostly one repeated
+    control byte cannot dodge the ratio check by first being tidied up into
+    something that looks like eight bytes of it. The dedup hash is taken
+    *after* collapsing, so two copies of the same template differing only in
+    how a divider line got mangled by extraction still hash identically.
+    """
+    if filter_printable and _printable_ratio(doc) < min_printable_ratio:
+        return None
+    if collapse_repeats:
+        doc = collapse_repeated_runs(doc, max_repeat_run)
+    if dedupe:
+        h = _prefix_hash(doc)
+        if h in seen_hashes:
+            return None
+        seen_hashes.add(h)
+    return doc
+
+
+def _encode_doc(doc: str, tokenizer) -> bytes:
+    """Raw UTF-8 bytes when ``tokenizer`` is ``None`` (today's behaviour,
+    unchanged), or token ids from ``tokenizer`` otherwise. Both are returned
+    as a sequence supporting ``len``, slicing and concatenation, so the
+    packing logic below never needs to know which case it is in — see
+    ``text_items`` for where that distinction actually matters (building the
+    ``Span``)."""
+    if tokenizer is None:
+        return doc.encode("utf-8", errors="ignore")
+    return tokenizer.encode(doc)
+
+
+def _preview(chunk, tokenizer) -> str:
+    """A short human-readable prefix of a window, for :attr:`Item.prompt`."""
+    head = bytes(chunk[:40]) if tokenizer is None else list(chunk[:40])
+    if tokenizer is None:
+        return head.decode("utf-8", errors="replace")
+    return tokenizer.decode(head)
+
+
 def text_items(
     n_items: int,
     window: int = 256,
@@ -417,36 +533,71 @@ def text_items(
     offset: int = 16,
     max_windows_per_doc: Optional[int] = None,
     split: str = "train",
+    pack: bool = True,
+    tokenizer=None,
+    filter_printable: bool = True,
+    min_printable_ratio: float = 0.85,
+    collapse_repeats: bool = True,
+    max_repeat_run: int = 8,
+    dedupe: bool = True,
 ):
-    """Build byte-level language-modelling items from streamed real text.
+    """Build language-modelling items from streamed real text.
 
-    Bytes rather than a learned tokenizer: the model's text codec is
-    byte-level, so there is no vocabulary to train, nothing to go stale, and
-    no silent mismatch between a tokenizer trained on one corpus and a model
-    trained on another.
+    ``tokenizer=None`` keeps the original byte-level behaviour (id == byte
+    value): there is no vocabulary to train, nothing to go stale, and no
+    silent mismatch between a tokenizer trained on one corpus and a model
+    trained on another. Passing a trained :class:`~iridium.data.tokenizer.BytePairTokenizer`
+    switches windows to be measured in *tokens* rather than bytes, which at a
+    fixed sequence length lets the model see several times more text — see
+    ``iridium/data/tokenizer.py`` for why that gap exists and how large it is.
 
-    Two things here are deliberate, and both were wrong in the obvious version:
+    **Packing (the actual fix this function exists for).** The previous
+    version cut ``window``-byte slices at *random* byte offsets inside each
+    document and wrapped every single one in BOS/EOS as though it were a
+    whole document. That is wrong in a way that is easy to miss and expensive
+    once trained on: the overwhelming majority of a 500 kB book's 2,000
+    windows start and end mid-word, mid-sentence, sometimes mid-UTF-8-
+    sequence, and the model is told, a few hundred thousand times, "a
+    document begins here" about a position that is nothing of the sort. A
+    model trained that way has no working notion of what a document boundary
+    even is, which is a large part of why free-running generation "says a
+    bunch of crap": it was never shown a real one to imitate.
 
-    * ``max_windows_per_doc``, defaulting per source to
-      :attr:`SourceSpec.windows_per_doc`. Taking every consecutive window of a
-      document looks like it respects the mixture weights and does not: one
-      Gutenberg book is a megabyte, so four thousand consecutive windows arrive
-      from a single author before any other source is touched. Windows are
-      capped per document and spread across it. The cap is per source because
-      the right answer differs by an order of magnitude: eight windows from a
-      3 kB web page is most of it, and eight windows from a 1 MB book means
-      downloading five hundred times what you keep.
-    * **The quota is counted in items, per source, and each source is drained
-      before the next opens.** Drawing documents and stopping when the item
-      budget fills leaves the tail of the document list unused, and the
-      realised mixture then misses the requested one by ten points or more on
-      a short run. Counting items makes it exact, and opening one connection
-      at a time is what survives a proxy.
+    With ``pack=True`` (the default), encoded documents for a source are
+    concatenated into one long token stream, EOS-free at the token level —
+    the boundary is tracked out-of-band as a set of stream positions, not
+    spliced into the text vocabulary — and windows are cut *contiguously*
+    from that stream. A window gets a leading, unsupervised BOS control span
+    only when its first token is genuinely the first token of some document;
+    it gets a trailing EOS control span only when its last token is genuinely
+    a document's last token. Most packed windows are interior and get
+    neither, which is the correct thing to model: the middle of a book is not
+    a place where a fresh document starts or an old one ends, and no longer
+    claims to be either. This also fixes the tail-dropping the random-window
+    version had: every byte/token of every fetched document is used exactly
+    once (modulo at most one partial window at each end of the packed
+    stream), instead of one random window in twenty and the rest of the
+    document discarded.
 
-    Check the result rather than trusting it: :func:`realised_mixture` reports
-    what the items actually contain.
+    ``pack=False`` reproduces the old random-window behaviour byte-for-byte
+    (modulo the new quality filters, which apply either way) — kept for
+    direct comparison, not for training a model you want to be coherent.
+    ``max_windows_per_doc`` (see :attr:`SourceSpec.windows_per_doc`) only
+    means something in that mode: under packing, the "one book must not
+    dominate" problem it solved is already solved by fetching many documents
+    into one packed stream, and a per-document window cap on top of that
+    would just throw away already-packed tokens for no benefit.
+
+    **Quality filters**, applied before packing (see the functions above for
+    what each one catches and why it is worth the cost): printable-character
+    ratio, repeated-character-run collapsing, and prefix-hash de-duplication.
+    Each is independently switchable via its own flag.
+
+    **The quota is still counted in items, per source, with each source
+    drained before the next opens** — unchanged from before, and
+    :func:`realised_mixture` still reports what was actually produced.
     """
-    from ..codecs.spans import Sample, text_span
+    from ..codecs.spans import Sample, Span, text_span
     from ..training.tasks import Item, control_span, BOS, EOS
 
     mix = mix or DEFAULT_MIX
@@ -458,43 +609,121 @@ def text_items(
         quota = int(round(n_items * weight / total))
         if quota <= 0:
             continue
-        cap = max_windows_per_doc or SOURCES[key].windows_per_doc
-        got = 0
-        # Document allowance, deliberately generous. Sizing it by the *mean*
-        # document length under-draws badly: Wikipedia's mean article is ~12 kB
-        # and its median is a small fraction of that, so a budget computed from
-        # the mean runs out of documents at three-quarters of the quota. The
-        # loop breaks the moment the quota is met, so headroom is free.
-        budget = max(8, -(-quota // max(cap, 1)) * 8 + 8)
-        for doc in stream_documents(key, limit=budget, seed=seed + i, split=split):
-            raw = doc.encode("utf-8", errors="ignore")
-            n_windows = max(len(raw) // window, 1)
-            take = min(cap, n_windows, quota - got)
-            starts = (
-                rng.choice(n_windows, size=take, replace=False) * window
-                if n_windows > take
-                else np.arange(take) * window
+        seen_hashes: set = set()
+
+        def clean(doc: str) -> Optional[str]:
+            return _clean_doc(
+                doc,
+                filter_printable=filter_printable,
+                min_printable_ratio=min_printable_ratio,
+                collapse_repeats=collapse_repeats,
+                max_repeat_run=max_repeat_run,
+                dedupe=dedupe,
+                seen_hashes=seen_hashes,
             )
-            for start in sorted(int(x) for x in starts):
-                chunk = raw[start : start + window]
-                if len(chunk) < window // 2:
+
+        if pack:
+            # Enough tokens for `quota` windows, plus one window of slack so
+            # a random starting phase (see below) never leaves the packed
+            # stream a few tokens short of a full quota.
+            needed = (quota + 1) * window
+            max_scanned = max(quota * 200 + 500, 500)
+            stream = bytearray() if tokenizer is None else []
+            doc_starts: list[int] = []
+            for doc in stream_documents(
+                key, limit=None, seed=seed + i, split=split, max_scanned=max_scanned,
+            ):
+                doc = clean(doc)
+                if doc is None:
                     continue
-                items.append(Item(
-                    sample=Sample(
-                        [
-                            control_span(BOS, supervised=False),
-                            text_span(chunk, supervised=True, offset=offset),
-                            control_span(EOS),
-                        ],
-                        meta={"family": "text_lm", "source": key},
-                    ),
-                    family="text_lm",
-                    prompt=chunk[:40].decode("utf-8", errors="replace"),
-                    truth={"source": key, "bytes": len(chunk)},
-                ))
-                got += 1
-            if got >= quota:
-                break
+                ids = _encode_doc(doc, tokenizer)
+                if not ids:
+                    continue
+                doc_starts.append(len(stream))
+                stream.extend(ids)
+                if len(stream) >= needed:
+                    break
+
+            n = len(stream)
+            n_windows = n // window
+            if n_windows > 0:
+                # A random phase, rather than always starting at index 0,
+                # keeps "is this window a real document start" from
+                # correlating with "which window index is this" across many
+                # calls with different seeds — the packed stream's own
+                # document lengths, not the caller's seed, should decide that.
+                phase = int(rng.integers(0, window)) if n_windows > 1 else 0
+                doc_start_set = set(doc_starts)
+                idx = phase
+                got = 0
+                while idx + window <= n and got < quota:
+                    chunk = stream[idx : idx + window]
+                    is_start = idx in doc_start_set
+                    end = idx + window
+                    is_end = end in doc_start_set or end == n
+                    spans = []
+                    if is_start:
+                        spans.append(control_span(BOS, supervised=False))
+                    if tokenizer is None:
+                        spans.append(text_span(bytes(chunk), supervised=True, offset=offset))
+                    else:
+                        ids_arr = np.asarray(chunk, dtype=np.int64) + offset
+                        spans.append(Span("text", ids_arr, supervised=True))
+                    if is_end:
+                        spans.append(control_span(EOS))
+                    items.append(Item(
+                        sample=Sample(spans, meta={"family": "text_lm", "source": key}),
+                        family="text_lm",
+                        prompt=_preview(chunk, tokenizer),
+                        truth={"source": key, "bytes": len(chunk)},
+                    ))
+                    got += 1
+                    idx += window
+        else:
+            # Legacy path: random windows, always BOS/EOS-wrapped, capped and
+            # spread per document. Kept only for comparing against `pack=True`
+            # — see the docstring above for why this window is a documented
+            # falsehood the model was trained to believe.
+            cap = max_windows_per_doc or SOURCES[key].windows_per_doc
+            got = 0
+            budget = max(8, -(-quota // max(cap, 1)) * 8 + 8)
+            for doc in stream_documents(key, limit=budget, seed=seed + i, split=split):
+                doc = clean(doc)
+                if doc is None:
+                    continue
+                raw = _encode_doc(doc, tokenizer)
+                n_windows = max(len(raw) // window, 1)
+                take = min(cap, n_windows, quota - got)
+                starts = (
+                    rng.choice(n_windows, size=take, replace=False) * window
+                    if n_windows > take
+                    else np.arange(take) * window
+                )
+                for start in sorted(int(x) for x in starts):
+                    chunk = raw[start : start + window]
+                    if len(chunk) < window // 2:
+                        continue
+                    if tokenizer is None:
+                        text_span_obj = text_span(bytes(chunk), supervised=True, offset=offset)
+                    else:
+                        ids_arr = np.asarray(chunk, dtype=np.int64) + offset
+                        text_span_obj = Span("text", ids_arr, supervised=True)
+                    items.append(Item(
+                        sample=Sample(
+                            [
+                                control_span(BOS, supervised=False),
+                                text_span_obj,
+                                control_span(EOS),
+                            ],
+                            meta={"family": "text_lm", "source": key},
+                        ),
+                        family="text_lm",
+                        prompt=_preview(chunk, tokenizer),
+                        truth={"source": key, "bytes": len(chunk)},
+                    ))
+                    got += 1
+                if got >= quota:
+                    break
 
     rng.shuffle(items)
     if len(items) < n_items:

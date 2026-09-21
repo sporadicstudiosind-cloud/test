@@ -33,6 +33,7 @@ import torch
 from iridium.codecs.spans import Sample, quantity_span, text_span
 from iridium.config import IridiumConfig, get_config
 from iridium.model.iridium1 import Iridium1
+from iridium.runtime import backend as backend_module
 from iridium.runtime.device import detect as detect_device, device_of
 from iridium.runtime.generate import generate
 
@@ -207,6 +208,7 @@ def available() -> list[dict]:
             "caveat": loaded["caveat"] if loaded else spec["caveat"],
             "parameters": cfg.n_params,
             "loaded": name in _models,
+            "device": loaded["device"] if loaded else None,
             "geometry": {
                 "core_layers": cfg.core.n_layers,
                 "d_model": cfg.core.d_model,
@@ -215,7 +217,6 @@ def available() -> list[dict]:
                 "top_k": cfg.router.top_k,
                 "max_loops": cfg.router.max_loops,
                 "specializations": list(cfg.stacks.specializations),
-        "device": info.describe(),
             },
         })
     return out
@@ -487,6 +488,11 @@ class Handler(BaseHTTPRequestHandler):
                 "torch": torch.__version__,
                 "threads": torch.get_num_threads(),
                 "device": detect_device(os.environ.get("IRIDIUM_DEVICE")).describe(),
+                # Full backend report (HIP vs CUDA, arch, bf16 basis, SDPA
+                # kernels, torch.compile, matmul precision, env vars) so a
+                # user pointing this at an AMD card can see what they actually
+                # got instead of inferring it from a one-line device string.
+                "backend": backend_module.capabilities(os.environ.get("IRIDIUM_DEVICE")),
             })
         if route == "/api/models":
             return self._json(200, {"models": available()})
@@ -551,6 +557,11 @@ def main() -> int:
     info = detect_device(os.environ.get("IRIDIUM_DEVICE"))
     print(f"[iridium] torch {torch.__version__}, {info.describe()}, "
           f"{threads} threads, port {port}", flush=True)
+    if info.backend == "rocm":
+        caps = backend_module.capabilities(os.environ.get("IRIDIUM_DEVICE"))
+        compiled = caps["torch_compile"]
+        print(f"[iridium] ROCm: torch.compile {'ok' if compiled['available'] else 'unavailable'} "
+              f"({compiled['detail']}), matmul precision: {caps['matmul_precision']}", flush=True)
     if os.environ.get("IRIDIUM_PRELOAD", "1") not in ("0", "false", ""):
         try:
             load("nano-trained")

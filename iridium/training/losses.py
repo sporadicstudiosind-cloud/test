@@ -20,6 +20,13 @@ import torch
 @dataclass(frozen=True)
 class LossWeights:
     text: float = 1.0
+    #: Output-softmax z-loss. 1e-4 is PaLM's value and has become the default
+    #: everywhere it is used, because the term is not trying to shape the
+    #: distribution — it only removes cross-entropy's invariance to a constant
+    #: shift of every logit. Large enough to pin the drift, small enough that it
+    #: contributes almost nothing to the gradient once the drift is pinned.
+    #: Raising it does not make the model more stable, it makes it underconfident.
+    text_z: float = 1e-4
     action_op: float = 1.0
     action_scalar: float = 0.5
     image: float = 0.5

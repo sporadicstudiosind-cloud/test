@@ -85,8 +85,13 @@ def generate(
     text_offset: int = 16,
     text_only: bool = False,
     force_modality: Optional[str] = None,
+    min_p: float = 0.0,
 ) -> Generated:
-    """Greedy (``temperature=0``) or sampled continuation of ``sample``."""
+    """Greedy (``temperature=0``) or sampled continuation of ``sample``.
+
+    See :func:`_pick` for what each truncation knob does and why ``min_p`` is
+    the one to reach for first on an undertrained model.
+    """
     if n_loops is None:
         n_loops = min(3, model.cfg.router.max_loops) if model.cfg.controller_mode else 1
     if len(sample) < 1 or max_new_tokens < 1:
@@ -130,10 +135,11 @@ def generate(
         if name in ("text", "control"):
             logits = codecs.text_head(h)[0, -1]
             token = _pick(logits, temperature, rng, top_p, top_k,
-                          repetition_penalty, result.ids)
+                          repetition_penalty, result.ids, min_p)
         elif name == "action":
             op_logits, action_scalars = codecs.action_head(h)
-            token = _pick(op_logits[0, -1], temperature, rng, top_p, top_k)
+            token = _pick(op_logits[0, -1], temperature, rng, top_p, top_k,
+                          min_p=min_p)
         else:
             token = 0
             value = codecs.decode_continuous(h, name, steps=flow_steps, generator=rng)
@@ -174,10 +180,11 @@ def _pick(
     top_k: int = 0,
     repetition_penalty: float = 1.0,
     emitted: Optional[Sequence[int]] = None,
+    min_p: float = 0.0,
 ) -> int:
     """Sample one token.
 
-    Three knobs beyond temperature, and a small model needs all three:
+    Four knobs beyond temperature, and a small model needs all of them:
 
     * **repetition_penalty** divides the logit of anything already emitted.
       Undertrained networks fall into two-word cycles within a sentence, and
@@ -185,6 +192,27 @@ def _pick(
     * **top_k / top_p** cut the tail before sampling. Raising temperature
       without truncating makes the long tail of near-zero-probability bytes
       reachable, which is how "creative" turns into mojibake.
+    * **min_p** cuts the tail *relative to the most likely token* — everything
+      below ``min_p * p_max`` goes. This is the one that suits this model best
+      and it is worth being precise about why, because it looks like a
+      reparametrisation of top_p and is not. A fixed nucleus applies the same
+      mass budget to every step, but the two kinds of step want opposite
+      treatment: where the model is confident (mid-word, inside a number, after
+      an opening brace) the correct next token holds nearly all the mass and
+      top_p still admits a tail of plausible-looking alternatives that are
+      simply wrong; where it is genuinely uncertain, the same budget truncates
+      options it should keep. Scaling the floor by ``p_max`` makes the cut
+      tighten exactly when the model is sure and loosen when it is not, which
+      is why min_p tolerates far higher temperatures without degenerating. That
+      matters more here than for most models: this one emits bytes or subwords
+      into a *shared* discrete space with control and action slots, so a
+      tail-sampled token is not merely a poor word choice, it can be a
+      structurally invalid slot.
+
+      Applied to the temperature-scaled distribution, as in the original
+      formulation — applying it before temperature would make the threshold
+      mean something different at every temperature setting and defeat the
+      point.
 
     Greedy (``temperature <= 0``) ignores all of them by construction, and is
     still the right default for a grader that wants a reproducible answer.
@@ -220,6 +248,17 @@ def _pick(
         drop[0] = False
         ordered = ordered.masked_fill(drop, float("-inf"))
         logits = torch.full_like(logits, float("-inf")).scatter(0, index, ordered)
+
+    if 0.0 < min_p < 1.0:
+        probs = torch.softmax(logits, dim=-1)
+        floor = min_p * float(probs.max())
+        keep = probs >= floor
+        # The argmax always clears its own floor, so `keep` cannot be empty --
+        # but assert it rather than trust it, because an all -inf logit vector
+        # (every candidate already masked by top_k/top_p) would make `max` NaN
+        # and silently drop every token.
+        if bool(keep.any()):
+            logits = logits.masked_fill(~keep, float("-inf"))
 
     probs = torch.softmax(logits, dim=-1)
     if not torch.isfinite(probs).all() or float(probs.sum()) <= 0:
