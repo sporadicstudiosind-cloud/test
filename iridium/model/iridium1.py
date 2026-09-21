@@ -112,36 +112,70 @@ class Iridium1(nn.Module):
 
     def enable_gradient_checkpointing(self, enabled: bool = True,
                                       stacks: bool = False) -> None:
-        """Not available in this architecture. Measured, not assumed.
+        """Re-measured. The earlier "returns incorrect gradients" verdict was
+        real but mis-attributed: it was PyTorch's *reentrant* checkpointing
+        (``use_reentrant=True``, still the undocumented default when the flag
+        is omitted), not gradient checkpointing per se. ``use_reentrant=False``
+        is exact here; this method uses it unconditionally and does not expose
+        the choice.
 
-        Gradient checkpointing recomputes a layer's activations during the
-        backward pass instead of storing them, and is normally free apart from
-        the time. Here it is not correct, in two separate ways:
+        What was actually going on, measured on the ``tiny`` config with the
+        router's gumbel noise pinned by seed (so the stochastic path is
+        identical between runs) and gradients compared to an unchecked
+        reference at the same seed:
 
-        * **Superstacks** raise ``CheckpointError: a different number of tensors
-          was saved during the original forward and recomputation``. Their
-          layers branch on data — which field grids survived routing, which
-          tokens are still alive on the depth ladder — so the recomputed pass is
-          a different graph.
-        * **The control core** accepts checkpointing and silently returns
-          *different gradients*: with the stochastic path pinned and the
-          unchecked run reproducible to 0.0, enabling it moved the modality
-          embedding's gradient by **2.75**. The loss is unchanged, so nothing
-          in a training curve would ever show it.
+        * **The control core.** Checkpointing each core layer and comparing to
+          the unchecked run gave *exact* (0.0 max-abs-delta) gradients with
+          ``n_loops=1``, under both ``use_reentrant`` settings. The earlier
+          "moved the modality embedding's gradient by 2.75" symptom only
+          appears with ``n_loops=2`` — i.e. once the *same* core layer is
+          checkpointed twice in one backward pass, once per ponder-loop
+          iteration — and only under ``use_reentrant=True``: fp32 gives a
+          reentrant/non-reentrant delta of 3.7e-4 (relative 1.4e-7) and bf16
+          autocast gives 1.875 (relative 2.6e-3) on ``core.layers.0.attn.wo``.
+          ``use_reentrant=False`` gives 0.0 in every one of these cases,
+          including ``controller_mode`` True and False. Reentrant
+          checkpointing's known restriction is exactly this: correctness is
+          not guaranteed when the same checkpointed parameters are visited by
+          more than one checkpoint call in a single backward. The ponder loop
+          guarantees that whenever ``n_loops > 1``.
+        * **Superstacks.** ``use_reentrant=True`` does not silently corrupt
+          gradients here — it raises outright: ``RuntimeError: Trying to
+          backward through the graph a second time``. Every active stack's
+          bridge cross-attention reads the *same* upstream core-state tensor
+          (see ``SuperstackBank.forward``'s ``bridge_by_device`` sharing), so
+          two or more checkpointed stacks root their nested backward calls in
+          a shared ancestor — unsupported by reentrant checkpointing without
+          ``retain_graph=True``, which per-call checkpointing does not set.
+          ``use_reentrant=False`` has no such restriction (it saves via hooks
+          instead of nested ``autograd.backward`` calls) and reproduced the
+          unchecked gradients exactly, including with ``hard_exit=True``,
+          where each row's executed depth is a genuine function of activation
+          values (PonderNet's ``alive`` mask) — the data-dependence the
+          original docstring worried about lives entirely inside the Python
+          loop that decides *how many* checkpoint calls to make, not inside
+          any one checkpointed call, so recompute of a call that did happen
+          always replays the same layer it originally ran.
 
-        PyTorch's ``determinism_check="none"`` silences the first symptom and
-        would have shipped the second. A wrong gradient degrades a run
-        invisibly; an OOM at least announces itself. So this raises instead.
+        Both are therefore correct and both default off, gated separately
+        (``enabled`` for the core, ``stacks`` additionally for the
+        superstacks) so a training run opts in deliberately. Checkpointing is
+        skipped whenever a KV cache is live (incremental serving): the
+        segment would otherwise write its cache entry twice, once in the
+        checkpoint's own no-grad forward and once in the backward recompute,
+        and serving never runs backward anyway so there is nothing to gain
+        there. See ``tests/unit/test_checkpointing.py`` for the gradient-
+        equality regression test and the measured peak-memory saving on the
+        ``nano`` config (CPU): modest but real for the core, and additionally
+        real for the stacks once both are enabled together.
 
-        The memory it would have saved is available elsewhere, and cheaply:
-        fused attention removed the dominant allocation already, and
-        ``TrainConfig.accumulate`` trades steps for peak memory exactly.
+        ``TrainConfig.accumulate`` still is not a substitute: it cuts the
+        batch dimension, this cuts the depth dimension, and a deep model
+        trained at small batch is bounded by the latter.
         """
-        raise NotImplementedError(
-            "gradient checkpointing returns incorrect gradients in this "
-            "architecture (see the docstring; measured, not assumed). Use "
-            "TrainConfig.accumulate to cut peak memory instead."
-        )
+        self.core.gradient_checkpointing = enabled
+        for stack in self.bank.stacks:
+            stack.gradient_checkpointing = enabled and stacks
 
     def forward(
         self,

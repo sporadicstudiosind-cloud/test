@@ -35,9 +35,8 @@ already has (see ``iridium/codecs/bank.py``):
   Lossy (frames are a summary, not an inverse), approximate, but the right
   shape for a flow-matching head: nearby patches vary smoothly, which a
   discrete vertex-index stream deliberately does not (index 41 and index 42
-  are not "close" in any sense the model should generalise across). See the
-  module-level docstring section "Discrete vs. continuous" below for the
-  tradeoff spelled out.
+  are not "close" in any sense the model should generalise across). See
+  :func:`face_patches`'s own docstring for the tradeoff spelled out in full.
 
 Nothing here touches ``spans.py``, ``bank.py`` or ``config.py``: integration
 (a modality registration, a ``CodecConfig`` field for vertex bits and patch
@@ -48,8 +47,7 @@ those files rather than made here.
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass, field
-from typing import Optional, Sequence
+from dataclasses import dataclass
 
 import numpy as np
 

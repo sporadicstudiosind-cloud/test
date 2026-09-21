@@ -52,6 +52,7 @@ from typing import Optional, Sequence
 
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint as torch_checkpoint
 
 from ..config import IridiumConfig, SuperstackConfig
 from .fno import FNOBlock
@@ -225,6 +226,9 @@ class Superstack(nn.Module):
         self.exit_norm = RMSNorm(cfg.d_model, eps)
         # Focus -> halting bias. Positive gain means "more focus, halt later".
         self.focus_gain = nn.Parameter(torch.tensor(4.0))
+        # See Iridium1.enable_gradient_checkpointing for what this does and
+        # does not cover, and the measurements behind why it defaults off.
+        self.gradient_checkpointing = False
 
     def forward(
         self,
@@ -268,22 +272,52 @@ class Superstack(nn.Module):
         alive = valid.clone()
         executed = 0
 
+        # Checkpointing recomputes each layer during backward, which would
+        # write its cache entry a second time if a KV cache were live here.
+        # cache is only non-None during incremental serving, where there is
+        # no backward pass anyway. hard_exit's per-row early stop lives in
+        # this Python loop, outside the checkpointed call, so recompute
+        # replays exactly the layer that was actually run — see the
+        # docstring on Iridium1.enable_gradient_checkpointing for the
+        # measurement that this holds even with hard_exit=True.
+        use_checkpoint = (
+            self.gradient_checkpointing
+            and self.training
+            and cache is None
+            and x.requires_grad
+            and torch.is_grad_enabled()
+        )
+
         for depth, layer in enumerate(self.layers):
             if hard_exit and not bool(alive.any()):
                 break
             executed += 1
             key = (cache_prefix, depth) if cache is not None else None
-            x = layer(
-                x,
-                positions,
-                self_keep,
-                core_states,
-                core_positions,
-                bridge_keep,
-                grids,
-                cache,
-                key,
-            )
+            if use_checkpoint:
+                def run_layer(
+                    xx: torch.Tensor,
+                    layer: SuperstackLayer = layer,
+                ) -> torch.Tensor:
+                    return layer(
+                        xx, positions, self_keep, core_states, core_positions,
+                        bridge_keep, grids, None, None,
+                    )
+
+                x = torch_checkpoint.checkpoint(
+                    run_layer, x, use_reentrant=False, preserve_rng_state=True,
+                )
+            else:
+                x = layer(
+                    x,
+                    positions,
+                    self_keep,
+                    core_states,
+                    core_positions,
+                    bridge_keep,
+                    grids,
+                    cache,
+                    key,
+                )
             logit = layer.halt_head(x).squeeze(-1).to(torch.float64 if x.dtype == torch.float64 else torch.float32) + focus_bias
             lam = torch.sigmoid(logit)
             if depth == len(self.layers) - 1:

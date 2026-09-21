@@ -1,0 +1,10 @@
+........F.                                                               [100%]
+=================================== FAILURES ===================================
+_______ test_cfg_dropout_trains_null_branch_and_guidance_changes_output ________
+tests/unit/test_heads.py:252: in test_cfg_dropout_trains_null_branch_and_guidance_changes_output
+    assert not torch.allclose(unguided, guided)
+E   assert not True
+E    +  where True = <built-in method allclose of type object at 0x7efdbe5cf140>(tensor([[ 0.3923, -0.2236, -0.3195],\n        [-1.2050,  1.0445, -0.6332],\n        [ 0.5731,  0.5409, -0.3919]]), tensor([[ 0.3923, -0.2236, -0.3195],\n        [-1.2050,  1.0445, -0.6332],\n        [ 0.5731,  0.5409, -0.3919]]))
+E    +    where <built-in method allclose of type object at 0x7efdbe5cf140> = torch.allclose
+=========================== short test summary info ============================
+FAILED tests/unit/test_heads.py::test_cfg_dropout_trains_null_branch_and_guidance_changes_output

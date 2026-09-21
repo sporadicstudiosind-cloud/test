@@ -24,6 +24,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint as torch_checkpoint
 
 from ..config import CoreConfig
 from .layers import RMSNorm, TransformerBlock, causal_keep
@@ -52,6 +53,9 @@ class ControlCore(nn.Module):
         self.loop_gate = nn.Parameter(torch.zeros(cfg.d_model))
         self.loop_halt_head = nn.Linear(cfg.d_model, 1)
         nn.init.zeros_(self.loop_halt_head.bias)
+        # See Iridium1.enable_gradient_checkpointing for what this does and
+        # does not cover, and the measurements behind why it defaults off.
+        self.gradient_checkpointing = False
 
     @property
     def split(self) -> int:
@@ -66,9 +70,31 @@ class ControlCore(nn.Module):
         loop_index: int,
         cache: Optional[dict],
     ) -> torch.Tensor:
+        # Checkpointing recomputes each layer during backward, which would
+        # write its cache entry a second time if a KV cache were live here.
+        # cache is only non-None during incremental serving, where there is
+        # no backward pass anyway, so this excludes nothing checkpointing
+        # could otherwise help with.
+        use_checkpoint = (
+            self.gradient_checkpointing
+            and self.training
+            and cache is None
+            and h.requires_grad
+            and torch.is_grad_enabled()
+        )
         for i in layer_range:
             key = ("core", loop_index, i) if cache is not None else None
-            h = self.layers[i](h, positions, keep, cache, key)
+            if use_checkpoint:
+                layer = self.layers[i]
+
+                def run_layer(hh: torch.Tensor, layer: TransformerBlock = layer) -> torch.Tensor:
+                    return layer(hh, positions, keep, None, None)
+
+                h = torch_checkpoint.checkpoint(
+                    run_layer, h, use_reentrant=False, preserve_rng_state=True,
+                )
+            else:
+                h = self.layers[i](h, positions, keep, cache, key)
         return h
 
     def stage_one(
