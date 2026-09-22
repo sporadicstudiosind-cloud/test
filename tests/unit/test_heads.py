@@ -244,6 +244,9 @@ def test_cfg_dropout_trains_null_branch_and_guidance_changes_output():
     assert head.cond.weight.grad is not None
 
     guided_head = FlowMatchingHead(6, 3, d_hidden=16, cfg_dropout=0.5)
+    with torch.no_grad():
+        guided_head.out.weight.normal_(std=0.1)
+        guided_head.out.bias.normal_(std=0.1)
     h2 = torch.randn(3, 6)
     unguided = guided_head.sample(h2, steps=4, generator=torch.Generator().manual_seed(2),
                                   guidance_scale=1.0)
