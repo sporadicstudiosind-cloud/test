@@ -5,6 +5,7 @@ function preservation, strict causality, and exact masking.
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from iridium.model.embeddings import HashedNgramEmbedding, PerLayerEmbedding
@@ -144,3 +145,51 @@ def test_ngram_early_positions_use_a_fixed_sentinel_not_future_data():
     out_a = m(ids_a, mask)
     out_b = m(ids_b, mask)
     assert torch.equal(out_a[:, :1], out_b[:, :1])
+
+
+def test_ngram_missing_history_does_not_collide_with_token_zero():
+    """Real id 0 and 'no token here' must hash differently.
+
+    The earlier encoding zeroed missing positions and then added 1, so both
+    became 1. Position 1 of [0, 5] has a real predecessor (id 0); position 0 of
+    [5] has none. Their 2-gram hashes must differ.
+    """
+    torch.manual_seed(0)
+    emb = HashedNgramEmbedding(vocab_size=16, d_model=8, table_size=997, n_values=(2,))
+    with_zero = emb._ngram_hash(emb.encode(torch.tensor([[0, 5]]), torch.ones(1, 2, dtype=torch.bool)), 2)
+    alone = emb._ngram_hash(emb.encode(torch.tensor([[5]]), torch.ones(1, 1, dtype=torch.bool)), 2)
+    assert int(with_zero[0, 1]) != int(alone[0, 0])
+
+
+def test_ngram_does_not_read_non_text_slots_as_words():
+    """A text token after an image patch hashes as if its predecessor were missing."""
+    emb = HashedNgramEmbedding(vocab_size=64, d_model=8, table_size=997, n_values=(2,))
+    ids_a = torch.tensor([[7, 9]])
+    ids_b = torch.tensor([[33, 9]])
+    mask = torch.tensor([[False, True]])            # position 0 is not text
+    h_a = emb._ngram_hash(emb.encode(ids_a, mask), 2)
+    h_b = emb._ngram_hash(emb.encode(ids_b, mask), 2)
+    assert int(h_a[0, 1]) == int(h_b[0, 1])
+
+
+@pytest.mark.parametrize("chunk", [1, 2, 3, 5])
+def test_ngram_streamed_in_chunks_equals_one_shot(chunk):
+    """Incremental decoding embeds one token at a time; the result must not change.
+
+    Carrying the last max(n)-1 encoded ids between chunks is what makes this
+    hold -- without it every chunk boundary reads 'missing' history and cached
+    decoding computes a different function from teacher forcing.
+    """
+    torch.manual_seed(0)
+    emb = HashedNgramEmbedding(vocab_size=50, d_model=8, table_size=1009, n_values=(2, 3))
+    g = torch.Generator().manual_seed(1)
+    ids = torch.randint(0, 50, (2, 11), generator=g)
+    mask = torch.rand(2, 11, generator=g) > 0.2
+    full = emb(ids, mask)
+    history = None
+    pieces = []
+    for start in range(0, 11, chunk):
+        out, history = emb.forward_with_history(ids[:, start:start + chunk],
+                                                mask[:, start:start + chunk], history)
+        pieces.append(out)
+    assert torch.equal(torch.cat(pieces, dim=1), full)

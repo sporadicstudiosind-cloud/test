@@ -38,7 +38,7 @@ False.
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -149,28 +149,76 @@ class HashedNgramEmbedding(nn.Module):
     def param_count(table_size: int, d_model: int, n_values: Sequence[int] = (2, 3)) -> int:
         return len(n_values) * table_size * d_model
 
-    def _ngram_hash(self, token_ids: torch.Tensor, n: int) -> torch.Tensor:
+    @property
+    def history_length(self) -> int:
+        """Preceding positions the longest n-gram reads: ``max(n_values) - 1``."""
+        return max(self.n_values) - 1
+
+    @staticmethod
+    def encode(token_ids: torch.Tensor, text_mask: torch.Tensor) -> torch.Tensor:
+        """Hash alphabet: ``id + 1`` for a text token, ``0`` for anything else.
+
+        ``0`` stands for "no usable token here" and covers two cases that must
+        hash identically: history before the start of the stream, and a
+        non-text slot (an image patch, an action, a control token) inside it.
+        The earlier encoding zeroed missing positions and *then* added 1, so a
+        missing token and a real token with id 0 both became 1 and collided;
+        it also let a text token hash an image slot's meaningless discrete id as
+        its "previous word".
+        """
+        return torch.where(text_mask, token_ids + 1, torch.zeros_like(token_ids))
+
+    def _ngram_hash(self, encoded: torch.Tensor, n: int) -> torch.Tensor:
         """``[B, T]`` long hash of the n-gram ending at each position, mod table_size.
 
-        Built with plain shifts (``torch.roll`` + masking), not a Python loop
-        over ``T``: this runs once per forward, over the whole sequence, and a
-        per-position loop would be the slowest part of an otherwise O(1)-per-
-        token embedding lookup.
+        ``encoded`` is already in the :meth:`encode` alphabet. Built with
+        shifts (``torch.roll`` + masking), not a Python loop over ``T``: this
+        runs once per forward over the whole sequence, and a per-position loop
+        would be the slowest part of an otherwise O(1)-per-token lookup.
         """
-        b, t = token_ids.shape
+        b, t = encoded.shape
         multiplier = _HASH_PRIMES[n]
-        acc = torch.zeros_like(token_ids)
+        acc = torch.zeros_like(encoded)
+        idx = torch.arange(t, device=encoded.device)
         for offset in range(n):
-            # offset 0 is the current token, offset (n-1) is the oldest one in
-            # the window; shifting right by `offset` and zeroing the wrapped
-            # tail is how position i reads position i - offset without ever
-            # reading a real token from i + 1 or later.
-            shifted = torch.roll(token_ids, shifts=offset, dims=1)
-            idx = torch.arange(t, device=token_ids.device)
-            valid = idx >= offset
-            shifted = torch.where(valid.unsqueeze(0), shifted, torch.zeros_like(shifted))
-            acc = acc * multiplier + (shifted + 1)  # +1 so id 0 and "missing" differ
+            # offset 0 is the current token, offset (n-1) the oldest in the
+            # window; shifting right by `offset` and zeroing the wrapped tail
+            # means position i reads i - offset and never i + 1 or later.
+            shifted = torch.roll(encoded, shifts=offset, dims=1)
+            shifted = torch.where((idx >= offset).unsqueeze(0), shifted,
+                                  torch.zeros_like(shifted))
+            acc = acc * multiplier + shifted
         return acc.remainder(self.table_size)
+
+    def forward_with_history(
+        self, token_ids: torch.Tensor, text_mask: torch.Tensor,
+        history: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Embed a chunk that continues a stream; return the history to carry.
+
+        This is what makes the layer compatible with incremental decoding. A
+        decode step embeds a *single* token, and without the preceding ids its
+        2-gram and 3-gram hashes would read "missing" where the full forward
+        read real tokens -- cached decoding would then compute a different
+        function from teacher forcing, which is precisely what
+        ``tests/integration/test_kv_parity.py`` exists to forbid. ``history``
+        is the last :attr:`history_length` encoded positions of everything
+        before this chunk (``None`` at the start of a stream, which is
+        equivalent to all-missing, exactly as the full forward sees it).
+        """
+        encoded = self.encode(token_ids, text_mask)
+        k = self.history_length
+        if history is None:
+            history = torch.zeros(encoded.shape[0], k, dtype=encoded.dtype,
+                                  device=encoded.device)
+        full = torch.cat([history.to(encoded), encoded], dim=1)
+        total = None
+        for n in self.n_values:
+            h = self._ngram_hash(full, n)[:, k:]
+            contribution = self.tables[str(n)](h)
+            total = contribution if total is None else total + contribution
+        out = total * text_mask.to(total.dtype).unsqueeze(-1)
+        return out, full[:, full.shape[1] - k:] if k else full[:, :0]
 
     def forward(self, token_ids: torch.Tensor, text_mask: torch.Tensor) -> torch.Tensor:
         """``token_ids``/``text_mask`` are ``[B, T]``; returns ``[B, T, d_model]``.
@@ -179,12 +227,7 @@ class HashedNgramEmbedding(nn.Module):
         position contributes nothing, by construction (multiplied by the mask
         before the sum, not merely "usually small").
         """
-        total = None
-        for n in self.n_values:
-            h = self._ngram_hash(token_ids, n)
-            contribution = self.tables[str(n)](h)
-            total = contribution if total is None else total + contribution
-        return total * text_mask.to(total.dtype).unsqueeze(-1)
+        return self.forward_with_history(token_ids, text_mask)[0]
 
 
 __all__ = ["PerLayerEmbedding", "HashedNgramEmbedding"]
