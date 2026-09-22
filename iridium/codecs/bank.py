@@ -79,6 +79,12 @@ class CodecBank(nn.Module):
         self.dims = continuous_dims(cfg)
 
         self.text_embedding = nn.Embedding(cfg.vocab_size, d_model)
+        if cfg.ngram_table_size:
+            from ..model.embeddings import HashedNgramEmbedding
+            self.ngram = HashedNgramEmbedding(cfg.vocab_size, d_model,
+                                              cfg.ngram_table_size, cfg.ngram_orders)
+        else:
+            self.ngram = None
         self.modality_embedding = nn.Embedding(cfg.n_modalities, d_model)
         nn.init.normal_(self.text_embedding.weight, std=0.02)
         nn.init.normal_(self.modality_embedding.weight, std=0.02)
@@ -116,7 +122,7 @@ class CodecBank(nn.Module):
 
     # -- input ------------------------------------------------------------
 
-    def embed(self, batch: TensorBatch) -> torch.Tensor:
+    def embed(self, batch: TensorBatch, cache: Optional[dict] = None) -> torch.Tensor:
         b, t = batch.modality.shape
         h = self.modality_embedding(batch.modality)
 
@@ -126,6 +132,16 @@ class CodecBank(nn.Module):
         if bool(discrete_mask.any()):
             ids = batch.discrete.clamp(0, self.cfg.vocab_size - 1)
             h = h + self.text_embedding(ids) * discrete_mask.unsqueeze(-1)
+        if self.ngram is not None:
+            # The n-gram at a decode step reads the tokens before it, which a
+            # one-token batch does not contain; the cache carries them, so the
+            # cached path embeds exactly what the full forward embeds.
+            ids = batch.discrete.clamp(0, self.cfg.vocab_size - 1)
+            history = cache.get(("ngram", "history")) if cache is not None else None
+            extra, history = self.ngram.forward_with_history(ids, text_mask, history)
+            h = h + extra.to(h.dtype)
+            if cache is not None:
+                cache[("ngram", "history")] = history
 
         act_mask = batch.modality == MODALITY_INDEX["action"]
         if bool(act_mask.any()):

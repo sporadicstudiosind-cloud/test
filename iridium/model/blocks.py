@@ -154,12 +154,19 @@ def _zero_init_delta(block: nn.Module) -> nn.Module:
     weights upstream of them -- upstream weights only ever reach the
     residual stream through one of these two projections.
     """
+    from .core_blocks import output_projections
     new_block = copy.deepcopy(block)
+    projections = output_projections(new_block)
+    if len(projections) < 2:
+        raise ValueError(f"cannot find the output projections of {type(block).__name__}")
     with torch.no_grad():
-        nn.init.zeros_(new_block.attn.wo.weight)
-        if new_block.attn.wo.bias is not None:
-            nn.init.zeros_(new_block.attn.wo.bias)
-        nn.init.zeros_(new_block.ffn.down.weight)
+        # Every linear that writes into the residual stream, whatever the block
+        # type: a token-conditioned FFN writes through two (base and U), and
+        # zeroing only one would leave the inserted block a non-identity.
+        for proj in projections:
+            nn.init.zeros_(proj.weight)
+            if proj.bias is not None:
+                nn.init.zeros_(proj.bias)
     return new_block
 
 

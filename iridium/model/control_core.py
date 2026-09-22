@@ -36,18 +36,29 @@ class ControlCore(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.max_loops = max_loops
+        from .core_blocks import build_core_block
+        # MLA rotates only an ``mla_rope_dim``-wide slice, so it needs a table
+        # of that width; handing it the core's ``d_head`` table would rotate
+        # the wrong number of channels whenever the two differ.
+        mla_rope = (RotaryEmbedding(cfg.mla_rope_dim, cfg.rope_theta)
+                    if "mla" in cfg.layer_kinds() and cfg.mla_rope_dim != cfg.d_head
+                    else rope)
         self.layers = nn.ModuleList(
-            TransformerBlock(
-                cfg.d_model,
-                cfg.n_query_heads,
-                cfg.n_kv_heads,
-                cfg.d_head,
-                cfg.d_ff,
-                rope,
-                cfg.norm_eps,
-            )
-            for _ in range(cfg.n_layers)
+            build_core_block(cfg, mla_rope if kind == "mla" else rope, i)
+            for i, kind in enumerate(cfg.layer_kinds())
         )
+        if cfg.hyper_streams > 1:
+            from .residual import HyperConnections, StreamCollapse
+            self.hyper = nn.ModuleList(
+                HyperConnections(cfg.d_model, cfg.hyper_streams, constrained=True,
+                                 sinkhorn_iters=cfg.hyper_sinkhorn_iters,
+                                 dynamic=cfg.hyper_dynamic)
+                for _ in range(cfg.n_layers)
+            )
+            self.hyper_collapse = StreamCollapse(cfg.d_model, cfg.hyper_streams,
+                                                 dynamic=cfg.hyper_dynamic)
+        else:
+            self.hyper = None
         self.out_norm = RMSNorm(cfg.d_model, cfg.norm_eps)
         # Re-injection gate for the loop entry state (sigmoid(0) = 0.5).
         self.loop_gate = nn.Parameter(torch.zeros(cfg.d_model))
@@ -82,20 +93,38 @@ class ControlCore(nn.Module):
             and h.requires_grad
             and torch.is_grad_enabled()
         )
-        for i in layer_range:
+        def apply(i: int, x: torch.Tensor) -> torch.Tensor:
             key = ("core", loop_index, i) if cache is not None else None
             if use_checkpoint:
                 layer = self.layers[i]
 
-                def run_layer(hh: torch.Tensor, layer: TransformerBlock = layer) -> torch.Tensor:
+                def run_layer(hh: torch.Tensor, layer: nn.Module = layer) -> torch.Tensor:
                     return layer(hh, positions, keep, None, None)
 
-                h = torch_checkpoint.checkpoint(
-                    run_layer, h, use_reentrant=False, preserve_rng_state=True,
+                return torch_checkpoint.checkpoint(
+                    run_layer, x, use_reentrant=False, preserve_rng_state=True,
                 )
-            else:
-                h = self.layers[i](h, positions, keep, cache, key)
-        return h
+            return self.layers[i](x, positions, keep, cache, key)
+
+        if self.hyper is None:
+            for i in layer_range:
+                h = apply(i, h)
+            return h
+
+        # mHC: n residual streams for the duration of this run of layers.
+        # Each block is a full-residual function (it adds its own input), so
+        # it is wrapped with delta=False and only its increment is written
+        # back into the streams. The per-layer closure is what keeps each
+        # layer's KV-cache key its own -- one shared *args tuple would give
+        # every layer the same key. Stream mixing is computed per token from
+        # that token's own state, so cached decoding stays exact.
+        from .residual import expand_streams
+        if len(layer_range) == 0:
+            return h
+        streams = expand_streams(h, self.cfg.hyper_streams)
+        for i in layer_range:
+            streams = self.hyper[i](streams, lambda x, i=i: apply(i, x), delta=False)
+        return self.hyper_collapse(streams)
 
     def stage_one(
         self,

@@ -67,6 +67,17 @@ class ConfigError(ValueError):
 # --------------------------------------------------------------------------
 
 
+def _deltanet_params(d: int, h: int, dh: int, conv: int) -> int:
+    """Gated DeltaNet layer parameters; mirrors ``GatedDeltaNet.param_count``.
+
+    Five bias-free ``d x d_qkv`` projections (q, k, v, output gate, out),
+    two per-head gates (forget ``alpha`` and write strength ``beta``) with
+    biases, three depthwise causal convs with biases, one RMSNorm.
+    """
+    d_qkv = h * dh
+    return 5 * d * d_qkv + 2 * (d * h + h) + 3 * (d_qkv * conv + d_qkv) + d_qkv
+
+
 @dataclass(frozen=True)
 class CoreConfig:
     """The control stack: every token enters and leaves through these layers.
@@ -85,15 +96,65 @@ class CoreConfig:
     stage_split: int | None = None      # default: n_layers // 2
     rope_theta: float = 500_000.0
     norm_eps: float = 1e-5
+    # -- architecture options. Every default reproduces the original core. --
+    #: Per-layer attention, repeated cyclically across the core. Entries:
+    #: ``"global"`` (full causal GQA), ``"local"`` (sliding-window GQA of
+    #: ``local_window`` tokens), ``"mla"`` (multi-head latent attention),
+    #: ``"deltanet"`` (Gated DeltaNet linear attention, fixed-size state).
+    #: ``("deltanet", "deltanet", "deltanet", "global")`` is the 3:1 hybrid
+    #: Qwen3-Next and Kimi Linear use; ``("local",) * 5 + ("global",)`` is
+    #: Gemma 3's. Empty means every layer is ``"global"``.
+    layer_pattern: tuple[str, ...] = ()
+    local_window: int = 4096
+    #: MLA geometry. The cache holds ``mla_kv_rank + mla_rope_dim`` numbers
+    #: per token per layer *regardless of head count*, which is the whole
+    #: reason to use it: it is how many query heads become affordable. At the
+    #: head counts the shipped rungs use, narrow GQA is already cheaper.
+    mla_kv_rank: int = 512
+    mla_q_rank: int = 0
+    mla_rope_dim: int = 64
+    deltanet_conv: int = 4
+    #: ``"rms"`` (default), ``"dyt"`` or ``"derf"`` -- the normalisation-free
+    #: elementwise replacements. Not ``"adaptive"``: a core block has no
+    #: conditioning input to drive it.
+    norm_kind: str = "rms"
+    #: ``"sequential"`` (attention then FFN) or ``"parallel"`` (both from one
+    #: normed input, PaLM style; one norm per block instead of two).
+    block_kind: str = "sequential"
+    #: Rank of the token-conditioned correction on every FFN projection; 0 off.
+    ffn_dynamic_rank: int = 0
+    #: mHC residual streams. 1 is the ordinary single residual stream; 4 is
+    #: what DeepSeek-V4 uses. Streams live only inside one run of core layers
+    #: -- expanded on entry, collapsed on exit -- so the router, superstacks,
+    #: bridge and cache all keep seeing a single ``d_model`` state.
+    hyper_streams: int = 1
+    hyper_dynamic: bool = True
+    hyper_sinkhorn_iters: int = 20
 
     def __post_init__(self) -> None:
-        if self.d_model != self.n_query_heads * self.d_head:
+        kinds = set(self.layer_pattern) or {"global"}
+        unknown = kinds - {"global", "local", "mla", "deltanet"}
+        if unknown:
+            raise ConfigError(f"unknown layer kinds {sorted(unknown)}")
+        if kinds & {"global", "local"} and self.d_model != self.n_query_heads * self.d_head:
+            # Only a GQA layer needs its heads to tile d_model exactly. MLA's
+            # per-head content width is independent of d_model, which is what
+            # lets it run many heads without making each one narrow.
             raise ConfigError(
                 f"d_model {self.d_model} != n_query_heads {self.n_query_heads} "
                 f"* d_head {self.d_head}"
             )
         if self.n_query_heads % self.n_kv_heads:
             raise ConfigError("n_query_heads must be a multiple of n_kv_heads")
+        if self.norm_kind not in ("rms", "dyt", "derf"):
+            raise ConfigError(f"norm_kind must be rms, dyt or derf, got {self.norm_kind!r}")
+        if self.block_kind not in ("sequential", "parallel"):
+            raise ConfigError(f"block_kind must be sequential or parallel, got {self.block_kind!r}")
+        if min(self.local_window, self.mla_kv_rank, self.hyper_streams,
+               self.hyper_sinkhorn_iters, self.deltanet_conv) < 1:
+            raise ConfigError("window, ranks, stream count and iteration counts must be positive")
+        if self.mla_rope_dim % 2 or self.mla_q_rank < 0 or self.ffn_dynamic_rank < 0:
+            raise ConfigError("mla_rope_dim must be even; ranks must be nonnegative")
         if self.n_layers < 2:
             raise ConfigError("the control core needs at least two layers")
         if self.split < 1 or self.split >= self.n_layers:
@@ -109,13 +170,64 @@ class CoreConfig:
     def d_kv(self) -> int:
         return self.n_kv_heads * self.d_head
 
+    def layer_kinds(self) -> tuple[str, ...]:
+        """The attention kind of every core layer, in order."""
+        pattern = self.layer_pattern or ("global",)
+        return tuple(pattern[i % len(pattern)] for i in range(self.n_layers))
+
+    def attention_params(self, kind: str) -> int:
+        """One layer's attention module. Each branch restates the module's own
+        ``param_count`` as arithmetic, because this file may not import torch;
+        ``tests/unit/test_core_blocks.py`` asserts every branch equals the
+        instantiated module, so a restated formula cannot drift."""
+        d, h, dh = self.d_model, self.n_query_heads, self.d_head
+        if kind in ("global", "local"):
+            return 2 * d * d + 2 * d * self.d_kv
+        if kind == "mla":
+            kvr, qr, rr = self.mla_kv_rank, self.mla_q_rank, self.mla_rope_dim
+            q = (d * qr + qr + qr * h * dh + qr * h * rr) if qr else (d * h * dh + d * h * rr)
+            return q + (d * kvr + kvr + 2 * kvr * h * dh) + d * rr + h * dh * d
+        if kind == "deltanet":
+            return _deltanet_params(d, h, dh, self.deltanet_conv)
+        raise ConfigError(f"unknown layer kind {kind!r}")
+
+    def ffn_params(self) -> int:
+        d, f, r = self.d_model, self.d_ff, self.ffn_dynamic_rank
+        if not r:
+            return 3 * d * f
+        dyn = lambda i, o: i * o + i * r + r * o + i * r + r      # noqa: E731
+        return 2 * dyn(d, f) + dyn(f, d)
+
+    def norm_params(self) -> int:
+        """Per block: two norms sequentially, one shared norm in parallel form."""
+        one = {"rms": self.d_model, "dyt": 2 * self.d_model + 1,
+               "derf": 2 * self.d_model + 2}[self.norm_kind]
+        return one if self.block_kind == "parallel" else 2 * one
+
+    def layer_params(self, kind: str) -> int:
+        return self.attention_params(kind) + self.ffn_params() + self.norm_params()
+
     @property
     def params_per_layer(self) -> int:
-        d, d_kv, d_ff = self.d_model, self.d_kv, self.d_ff
-        attn = 2 * d * d + 2 * d * d_kv
-        ffn = 3 * d * d_ff
-        norms = 2 * d
-        return attn + ffn + norms
+        """A ``"global"`` layer. Kept for the callers that cost a homogeneous
+        core; use :meth:`layer_params` or :attr:`layers_params` for a mixed one."""
+        return self.layer_params("global")
+
+    @property
+    def layers_params(self) -> int:
+        return sum(self.layer_params(k) for k in self.layer_kinds())
+
+    @property
+    def hyper_params(self) -> int:
+        """mHC maps: per layer a stream mix and two stream vectors, plus one
+        collapse. Zero with a single stream, where no module is built."""
+        n, d = self.hyper_streams, self.d_model
+        if n == 1:
+            return 0
+        dyn = self.hyper_dynamic
+        vector = n + (d * n + n if dyn else 0)
+        mix = n * n + (d * n * n + n * n if dyn else 0)
+        return self.n_layers * (mix + 2 * vector) + vector
 
     @property
     def params(self) -> int:
@@ -125,7 +237,8 @@ class CoreConfig:
         the loop halting head reads the stage-II output and so belongs here.
         """
         return (
-            self.n_layers * self.params_per_layer
+            self.layers_params
+            + self.hyper_params
             + self.d_model          # output RMSNorm
             + self.d_model          # loop re-injection gate
             + self.d_model + 1      # loop halting head
@@ -374,6 +487,15 @@ class CodecConfig:
     #: unlike ``continuous_conditioning`` it can be changed between runs freely
     #: -- though not mid-run, since it changes what the loss is an average over.
     flow_timestep_sampling: str = "uniform"
+    #: Hashed n-gram input embeddings (Over-Tokenized Transformer, arXiv
+    #: 2501.16975): each text token also adds embeddings of the 2-gram and
+    #: 3-gram ending at it, hashed into tables of this many rows. The paper's
+    #: finding is that loss falls log-linearly in input-vocabulary size, and a
+    #: hashed table grows that vocabulary without growing the softmax. 0 off.
+    #: Costs ``len(ngram_orders) * ngram_table_size * d`` parameters and almost
+    #: no FLOPs -- it is a lookup.
+    ngram_table_size: int = 0
+    ngram_orders: tuple[int, ...] = (2, 3)
 
     def __post_init__(self) -> None:
         # Validated here rather than in the module, because an unknown value
@@ -391,6 +513,8 @@ class CodecConfig:
                 f"continuous_conditioning must be 'add' or 'adaln', "
                 f"got {self.continuous_conditioning!r}"
             )
+        if self.ngram_table_size < 0 or any(n < 2 for n in self.ngram_orders):
+            raise ConfigError("ngram_table_size must be >= 0 and every order >= 2")
         if self.flow_timestep_sampling not in ("uniform", "logit_normal"):
             raise ConfigError(
                 f"flow_timestep_sampling must be 'uniform' or 'logit_normal', "
@@ -468,6 +592,8 @@ class CodecConfig:
         )
         out["slot_type_head"] = d + d * self.n_modalities + self.n_modalities
         out["confidence_head"] = d + d + 1
+        if self.ngram_table_size:
+            out["ngram_embedding"] = len(self.ngram_orders) * self.ngram_table_size * d
         out["text_head"] = (
             d if self.tie_text_embedding
             else d + d * self.vocab_size + self.vocab_size
@@ -750,6 +876,11 @@ class IridiumConfig:
             "qk_norm": self.qk_norm,
             "gated_bank": self.gated_bank,
             "loop_identity": self.loop_identity,
+            # The vocabulary a checkpoint was trained with. Omitting these made a
+            # BPE-trained config reload as byte-level -- a tokenizer mismatch,
+            # which does not raise; it produces fluent nonsense.
+            "text_vocab_size": self.text_vocab_size,
+            "text_tokenizer_cache": self.text_tokenizer_cache,
             "notes": self.notes,
         }
 
@@ -759,12 +890,17 @@ class IridiumConfig:
         stacks = dict(data["stacks"])
         spec = stacks.get("specializations") or ()
         stacks["specializations"] = tuple(spec)
+        core = dict(data["core"])
+        # JSON has no tuples; a list here would make the frozen config unhashable.
+        core["layer_pattern"] = tuple(core.get("layer_pattern") or ())
         return cls(
             name=data["name"],
-            core=CoreConfig(**data["core"]),
+            core=CoreConfig(**core),
             stacks=SuperstackConfig(**stacks),
             router=RouterConfig(**data.get("router", {})),
-            codecs=CodecConfig(**data.get("codecs", {})),
+            codecs=CodecConfig(**{**data.get("codecs", {}),
+                                  **({"ngram_orders": tuple(data["codecs"]["ngram_orders"])}
+                                     if "ngram_orders" in data.get("codecs", {}) else {})}),
             max_seq_len=data.get("max_seq_len", 4096),
             dropout=data.get("dropout", 0.0),
             controller_mode=data.get("controller_mode", False),
@@ -776,6 +912,8 @@ class IridiumConfig:
             qk_norm=data.get("qk_norm", False),
             gated_bank=data.get("gated_bank", False),
             loop_identity=data.get("loop_identity", False),
+            text_vocab_size=data.get("text_vocab_size", 0),
+            text_tokenizer_cache=data.get("text_tokenizer_cache", "artifacts/tokenizers"),
             notes=data.get("notes", ""),
         )
 

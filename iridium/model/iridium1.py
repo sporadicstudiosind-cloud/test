@@ -84,13 +84,21 @@ class Iridium1(nn.Module):
         # weights override this initialization on load.
         import math
         with torch.no_grad():
+            from .blocks import ParallelBlock
+            from .core_blocks import output_projections
             for module in self.modules():
                 from .layers import TransformerBlock, BridgeCrossAttention
-                if isinstance(module, TransformerBlock):
+                if isinstance(module, (TransformerBlock, ParallelBlock)):
                     depth = cfg.core.n_layers + cfg.stacks.n_layers
                     std = 1.0 / math.sqrt(2 * depth * cfg.core.d_model)
-                    nn.init.normal_(module.attn.wo.weight, std=std)
-                    nn.init.normal_(module.ffn.down.weight, std=std)
+                    for proj in output_projections(module):
+                        # A token-conditioned FFN's low-rank U starts at zero
+                        # on purpose -- that is what makes it exactly a plain
+                        # FFN at init -- so it is left alone; only its base
+                        # projection takes the depth-scaled draw.
+                        if proj is getattr(getattr(module.ffn, "down", None), "U", None):
+                            continue
+                        nn.init.normal_(proj.weight, std=std)
                 elif isinstance(module, BridgeCrossAttention):
                     nn.init.normal_(module.wo.weight, std=1.0 / math.sqrt(
                         2 * cfg.stacks.n_layers * cfg.stacks.d_model))
@@ -196,7 +204,7 @@ class Iridium1(nn.Module):
                 f"n_loops {n_loops} exceeds max_loops {self.cfg.router.max_loops}"
             )
 
-        h = self.codecs.embed(batch) if embedded is None else embedded
+        h = self.codecs.embed(batch, cache) if embedded is None else embedded
         memory_loss = h.sum() * 0
         if self.context_memory is not None:
             memory_state = cache.get(("context", "state")) if cache is not None else None
