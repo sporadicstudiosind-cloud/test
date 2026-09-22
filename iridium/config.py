@@ -698,6 +698,14 @@ class IridiumConfig:
     #: served with a different tokenizer than it was trained with does not fail,
     #: it just produces confident nonsense, which is the worst way to fail.
     text_tokenizer_cache: str = "artifacts/tokenizers"
+    #: Per-layer embeddings (Gemma 3n): every core layer also receives a small
+    #: per-token embedding, looked up from the token id and projected into
+    #: that layer's input. Capacity that lives in a lookup table -- almost no
+    #: FLOPs, and offloadable from accelerator memory -- at a cost of
+    #: ``vocab * n_layers * ple_dim + n_layers * ple_dim * d`` parameters.
+    #: The projections start at zero, so enabling it is function-preserving.
+    #: 0 disables.
+    ple_dim: int = 0
     notes: str = ""
 
     def __post_init__(self) -> None:
@@ -705,6 +713,8 @@ class IridiumConfig:
             raise ConfigError("invalid perceptual encoder dimensions")
         if self.memory_slots < 0 or self.memory_stride < 1 or self.memory_rank < 1:
             raise ConfigError("invalid context memory dimensions")
+        if self.ple_dim < 0:
+            raise ConfigError("ple_dim must be nonnegative (0 = off)")
         if self.text_vocab_size < 0:
             raise ConfigError("text_vocab_size must be nonnegative (0 = byte level)")
         if self.text_vocab_size:
@@ -749,6 +759,9 @@ class IridiumConfig:
             parts["controller_dispatch"] = d + 1
         if self.memory_slots:
             parts["context_memory"] = 4 * d * self.memory_rank + self.memory_rank + d + 2
+        if self.ple_dim:
+            parts["per_layer_embedding"] = (self.codecs.vocab_size * self.core.n_layers * self.ple_dim
+                                            + self.core.n_layers * self.ple_dim * d)
         if self.perception_layers:
             parts["perceptual_encoders"] = (len(self.codecs.continuous_dims()) + bool(self.codecs.camera_features)) * self.perception_layers * (2 * d * self.perception_rank + self.perception_rank + 3 * d)
         if self.gated_bank:
@@ -895,6 +908,7 @@ class IridiumConfig:
             # which does not raise; it produces fluent nonsense.
             "text_vocab_size": self.text_vocab_size,
             "text_tokenizer_cache": self.text_tokenizer_cache,
+            "ple_dim": self.ple_dim,
             "notes": self.notes,
         }
 
@@ -928,6 +942,7 @@ class IridiumConfig:
             loop_identity=data.get("loop_identity", False),
             text_vocab_size=data.get("text_vocab_size", 0),
             text_tokenizer_cache=data.get("text_tokenizer_cache", "artifacts/tokenizers"),
+            ple_dim=data.get("ple_dim", 0),
             notes=data.get("notes", ""),
         )
 
@@ -1127,6 +1142,71 @@ def _ladder() -> dict[str, IridiumConfig]:
             "~0.1 B trainable-on-CPU rung. The stacks are the same depth as "
             "the core rather than deeper: at this width the depth ratio buys "
             "less than the steps it costs, and converging is the point."
+        ),
+    )
+
+    # -- modern: the ~0.7 B rung with the recommended architecture options. --
+    # What this session's options look like assembled, choosing only those
+    # with published evidence at scale, and leaving out the ones without:
+    #
+    # * core layers 3 Gated DeltaNet : 1 latent attention -- the Qwen3-Next /
+    #   Kimi Linear ratio. DeltaNet's decode state is fixed-size, so the core's
+    #   cache stops growing with context on three layers in four;
+    # * mHC with 4 residual streams (DeepSeek-V4), QK-norm for low-precision
+    #   stability, a 32k subword vocabulary, hashed n-gram input embeddings,
+    #   SD3-style flow heads (AdaLN conditioning, logit-normal timesteps), the
+    #   camera modality and 14-wide splat geometry for the world model.
+    #
+    # Left out on purpose: DyT/Derf (the DyT paper reports its alpha is
+    # sensitive for LLMs), parallel blocks (PaLM measured a small loss at 8B),
+    # dynamic FFN weights (no evidence at scale), per-layer embeddings (at a
+    # 32k vocabulary they would be 33 M parameters of table on a 0.7 B model).
+    #
+    # UNTRAINED. The superstacks keep ordinary attention, so at long context
+    # their KV cache dominates (docs/long-context.md); max_seq_len is what the
+    # architecture supports, not what anything has been trained to use.
+    rungs["modern"] = IridiumConfig(
+        name="iridium-1-modern",
+        core=CoreConfig(
+            d_model=1024, n_layers=16, n_query_heads=16, n_kv_heads=4,
+            d_head=64, d_ff=2816,
+            layer_pattern=("deltanet", "deltanet", "deltanet", "mla"),
+            mla_kv_rank=256, mla_rope_dim=64, hyper_streams=4,
+        ),
+        stacks=SuperstackConfig(
+            n_stacks=5,
+            n_layers=6,
+            d_model=1024,
+            n_query_heads=16,
+            n_kv_heads=4,
+            d_head=64,
+            d_ff=2816,
+            cross_stride=3,
+            spectral_stride=6,
+            spectral_modes=12,
+            spectral_channels=48,
+            spectral_stacks=(0,),
+            min_depth=2,
+            specializations=(
+                "science_physics_simulation",
+                "mathematics_symbolic_proof",
+                "code_systems_tools",
+                "language_reasoning_intent",
+                "perception_geometry_action",
+            ),
+        ),
+        router=RouterConfig(top_k=2, max_loops=3),
+        codecs=CodecConfig(
+            vocab_size=32_768 + TEXT_ID_OFFSET, point_features=14,
+            continuous_conditioning="adaln", flow_timestep_sampling="logit_normal",
+            ngram_table_size=16_384, camera_features=6, n_modalities=10,
+        ),
+        max_seq_len=32_768,
+        qk_norm=True,
+        text_vocab_size=32_768,
+        notes=(
+            "Recommended-options rung, untrained: 3:1 DeltaNet:MLA core, mHC x4, "
+            "32k BPE, n-gram embeddings, SD3-style flow heads, camera modality."
         ),
     )
 

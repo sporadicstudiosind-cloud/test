@@ -184,3 +184,19 @@ def test_adaln_conditioning_is_costed_against_the_real_module():
         expected = sum(codecs.params(cfg.core.d_model).values())
         actual = sum(p.numel() for p in bank.parameters())
         assert actual == expected, f"{conditioning}: formula {expected}, module {actual}"
+
+
+def test_modern_rung_is_costed_exactly_without_allocating_it():
+    """0.7 B parameters is too large to allocate in a unit test; the meta device
+    builds every module and shape without any storage, which is all the
+    accounting check needs."""
+    import torch
+
+    from iridium.model.iridium1 import Iridium1
+
+    cfg = get_config("modern")
+    with torch.device("meta"):
+        model = Iridium1(cfg)
+    assert sum(p.numel() for p in model.parameters()) == cfg.n_params
+    assert cfg.text_vocab_size and cfg.codecs.vocab_size >= cfg.text_vocab_size + 16
+    assert set(cfg.core.layer_kinds()) == {"deltanet", "mla"}

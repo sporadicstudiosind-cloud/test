@@ -80,7 +80,11 @@ class ControlCore(nn.Module):
         layer_range: range,
         loop_index: int,
         cache: Optional[dict],
+        layer_bias=None,
     ) -> torch.Tensor:
+        # ``layer_bias(i)``, when given, is added to layer ``i``'s input: the
+        # per-layer embeddings (Gemma 3n PLE). It depends only on each token's
+        # own id, never on history, so it needs nothing from the cache.
         # Checkpointing recomputes each layer during backward, which would
         # write its cache entry a second time if a KV cache were live here.
         # cache is only non-None during incremental serving, where there is
@@ -95,6 +99,8 @@ class ControlCore(nn.Module):
         )
         def apply(i: int, x: torch.Tensor) -> torch.Tensor:
             key = ("core", loop_index, i) if cache is not None else None
+            if layer_bias is not None:
+                x = x + layer_bias(i)
             if use_checkpoint:
                 layer = self.layers[i]
 
@@ -134,8 +140,10 @@ class ControlCore(nn.Module):
         loop_index: int = 0,
         cache: Optional[dict] = None,
         start: int = 0,
+        layer_bias=None,
     ) -> torch.Tensor:
-        return self._run(h, positions, keep, range(start, self.split), loop_index, cache)
+        return self._run(h, positions, keep, range(start, self.split), loop_index, cache,
+                         layer_bias)
 
     def stage_two(
         self,
@@ -144,9 +152,11 @@ class ControlCore(nn.Module):
         keep: torch.Tensor,
         loop_index: int = 0,
         cache: Optional[dict] = None,
+        layer_bias=None,
     ) -> torch.Tensor:
         h = self._run(
-            h, positions, keep, range(self.split, self.cfg.n_layers), loop_index, cache
+            h, positions, keep, range(self.split, self.cfg.n_layers), loop_index, cache,
+            layer_bias,
         )
         return h
 

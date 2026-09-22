@@ -307,3 +307,57 @@ def test_generation_never_emits_a_camera_token():
         model.codecs.slot_type_head.proj.bias[9] = 1e4   # make "camera" the argmax
     out = generate(model, _camera_sample(model.cfg), max_new_tokens=3, allow_continuous=True)
     assert "camera" not in out.modalities
+
+
+# -- per-layer embeddings ------------------------------------------------------
+
+
+def _ple_model(dtype=torch.float64, **core) -> Iridium1:
+    tiny = get_config("tiny")
+    cfg = dataclasses.replace(tiny, ple_dim=8,
+                              core=dataclasses.replace(tiny.core, **core))
+    torch.manual_seed(0)
+    return Iridium1(cfg).to(dtype).eval()
+
+
+def test_per_layer_embeddings_are_costed_exactly():
+    model = _ple_model(torch.float32)
+    cfg = model.cfg
+    assert sum(p.numel() for p in model.parameters()) == cfg.n_params
+    n_layers, vocab, d = cfg.core.n_layers, cfg.codecs.vocab_size, cfg.core.d_model
+    assert model.parameter_inventory()["per_layer_embedding"] == vocab * n_layers * 8 + n_layers * 8 * d
+
+
+def test_per_layer_embeddings_are_function_preserving_until_trained():
+    """Zero-initialised projections: switching PLE on changes nothing at step 0."""
+    torch.manual_seed(0)
+    plain = Iridium1(get_config("tiny")).double().eval()
+    with_ple = _ple_model()
+    state = {k: v for k, v in with_ple.state_dict().items() if not k.startswith("ple.")}
+    plain.load_state_dict(state)
+    batch = _batch(plain.cfg, seed=4)
+    with torch.no_grad():
+        torch.testing.assert_close(with_ple(batch, n_loops=1).hidden,
+                                   plain(batch, n_loops=1).hidden, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("core", [{}, {"hyper_streams": 3, "layer_pattern": ("mla", "global"),
+                                       "mla_kv_rank": 24, "mla_rope_dim": 8}])
+def test_per_layer_embeddings_keep_cached_decoding_exact(core):
+    model = _ple_model(**core)
+    with torch.no_grad():
+        for proj in model.ple.projections:     # make them matter
+            proj.weight.normal_(std=0.1)
+    batch = _batch(model.cfg, seed=5)
+    with torch.no_grad():
+        reference = model(batch, n_loops=1).hidden
+        cached = run_chunked(model, batch, chunk=1, n_loops=1)
+    torch.testing.assert_close(cached, reference, rtol=0, atol=1e-10)
+
+
+def test_per_layer_embeddings_train():
+    model = _ple_model(torch.float32).train()
+    losses, _ = model.losses(_batch(model.cfg, dtype=torch.float32), n_loops=1)
+    sum(losses.values()).backward()
+    assert all(p.grad is not None and torch.isfinite(p.grad).all()
+               for p in model.ple.parameters())

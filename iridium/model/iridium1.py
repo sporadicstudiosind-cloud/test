@@ -76,6 +76,12 @@ class Iridium1(nn.Module):
         self.context_memory = ContextMemory(cfg.core.d_model, cfg.memory_slots,
                                             cfg.memory_stride, cfg.memory_rank) if cfg.memory_slots else None
         self.bank_gate = nn.Parameter(torch.zeros(cfg.core.d_model)) if cfg.gated_bank else None
+        if cfg.ple_dim:
+            from .embeddings import PerLayerEmbedding
+            self.ple = PerLayerEmbedding(cfg.codecs.vocab_size, cfg.core.n_layers,
+                                         cfg.ple_dim, cfg.core.d_model)
+        else:
+            self.ple = None
         from .layers import GroupedQueryAttention, BridgeCrossAttention
         for module in self.modules():
             if isinstance(module, (GroupedQueryAttention, BridgeCrossAttention)):
@@ -110,6 +116,8 @@ class Iridium1(nn.Module):
                   "superstacks": self.bank}
         if self.context_memory is not None:
             groups["context_memory"] = self.context_memory
+        if self.ple is not None:
+            groups["per_layer_embedding"] = self.ple
         counts = {k: sum(p.numel() for p in m.parameters()) for k, m in groups.items()}
         if self.bank_gate is not None:
             counts["bank_gate"] = self.bank_gate.numel()
@@ -213,6 +221,14 @@ class Iridium1(nn.Module):
                 cache[("context", "state")] = memory_state.detach() if not self.training else memory_state
         positions = batch.positions
         b, t, _ = h.shape
+        layer_bias = None
+        if self.ple is not None:
+            from ..codecs.spans import MODALITY_INDEX
+            ple_ids = batch.discrete.clamp(0, self.cfg.codecs.vocab_size - 1)
+            # Text positions only: a discrete id at an image or field slot is
+            # not a token, and its "embedding" would be noise.
+            ple_mask = (batch.modality == MODALITY_INDEX["text"]).unsqueeze(-1)
+            layer_bias = lambda i: self.ple(ple_ids, i).to(h.dtype) * ple_mask  # noqa: E731
 
         history = cache.get(("stream", "n"), 0) if cache is not None else 0
         keep = self._stream_keep(batch, history)
@@ -232,8 +248,10 @@ class Iridium1(nn.Module):
         stats["subject_loss"] = h.sum() * 0
         for loop in range(n_loops):
             start = 0 if loop == 0 else self.cfg.router.loop_entry
-            h1 = (self.core._run(h, positions, keep, range(self.cfg.core.n_layers), loop, cache)
-                  if self.cfg.controller_mode else self.core.stage_one(h, positions, keep, loop, cache, start))
+            h1 = (self.core._run(h, positions, keep, range(self.cfg.core.n_layers), loop, cache,
+                                 layer_bias)
+                  if self.cfg.controller_mode
+                  else self.core.stage_one(h, positions, keep, loop, cache, start, layer_bias))
 
             if loop == 0:
                 # The focus summary, like the bridge states, is a loop-0
@@ -334,7 +352,8 @@ class Iridium1(nn.Module):
             if self.bank_gate is not None:
                 # A per-channel learned integration strength; gate starts at 0.5.
                 stack_out = stack_out * torch.sigmoid(self.bank_gate)
-            h2 = h1 if self.cfg.controller_mode else self.core.stage_two(h1 + stack_out, positions, keep, loop, cache)
+            h2 = h1 if self.cfg.controller_mode else self.core.stage_two(
+                h1 + stack_out, positions, keep, loop, cache, layer_bias)
             per_loop.append(self.core.finalize(h2))
             halt_logits.append(self.core.halt_logit(h2))
             h = self.core.reinject(h2 + stack_out if self.cfg.controller_mode else h2, entry)

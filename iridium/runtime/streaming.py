@@ -261,6 +261,7 @@ class StreamingSession:
                     ("block_kind='parallel'", core.block_kind != "sequential"),
                     ("hyper_streams > 1", core.hyper_streams > 1),
                     ("ngram embeddings", bool(model.cfg.codecs.ngram_table_size)),
+                    ("per-layer embeddings", bool(model.cfg.ple_dim)),
                 ) if bad
             ]
             if unsupported:
