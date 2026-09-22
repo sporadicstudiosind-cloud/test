@@ -224,3 +224,86 @@ def test_ngram_orders_survive_serialisation():
     cfg = _ngram_model(torch.float32).cfg
     restored = IridiumConfig.from_dict(json.loads(json.dumps(cfg.to_dict())))
     assert restored.codecs == cfg.codecs and restored.n_params == cfg.n_params
+
+
+# -- the camera modality -------------------------------------------------------
+
+
+def _camera_model(dtype=torch.float64) -> Iridium1:
+    tiny = get_config("tiny")
+    cfg = dataclasses.replace(tiny, codecs=dataclasses.replace(
+        tiny.codecs, camera_features=6, n_modalities=10))
+    torch.manual_seed(0)
+    return Iridium1(cfg).to(dtype).eval()
+
+
+def _camera_sample(cfg, seed=0):
+    from iridium.codecs.spans import Span
+    from iridium.world.camera import Camera, look_at
+    from iridium.world.tokens import camera_span
+
+    patch = cfg.codecs.image_patch
+    cam = Camera.from_fov(60.0, 4 * patch, 2 * patch,
+                          look_at((0.0, -1.0, -4.0), (0.0, 0.0, 0.0), dtype=torch.float64))
+    rng = np.random.default_rng(seed)
+    image_dim = continuous_dims(cfg.codecs)["image"]
+    return Sample([text_span("see"),
+                   camera_span(cam, patch=patch),
+                   Span("image", rng.normal(size=(8, image_dim))),
+                   text_span("ok")])
+
+
+def test_camera_modality_is_opt_in_and_leaves_the_default_model_unchanged():
+    from iridium.codecs.spans import MODALITIES, MODALITY_INDEX
+
+    assert MODALITIES[:9] == ("control", "text", "image", "video", "audio", "field",
+                              "geometry", "action", "quantity")
+    assert MODALITY_INDEX["camera"] == 9
+    assert get_config("tiny").codecs.n_modalities == 9
+    assert "camera" not in Iridium1(get_config("tiny")).codecs.encoders
+
+
+def test_camera_modality_is_costed_exactly_and_has_no_decoder():
+    model = _camera_model(torch.float32)
+    assert sum(p.numel() for p in model.parameters()) == model.cfg.n_params
+    assert "camera" in model.codecs.encoders and "camera" not in model.codecs.decoders
+
+
+def test_camera_modality_requires_a_modality_slot():
+    tiny = get_config("tiny")
+    with pytest.raises(ConfigError, match="n_modalities"):
+        dataclasses.replace(tiny.codecs, camera_features=6)
+
+
+def test_camera_tokens_change_the_representation_and_keep_decoding_exact():
+    model = _camera_model()
+    cfg = model.cfg
+    sample = _camera_sample(cfg)
+    batch = TensorBatch(collate([sample], continuous_dims(cfg.codecs)), dtype=torch.float64)
+    with torch.no_grad():
+        reference = model(batch, n_loops=1).hidden
+        cached = run_chunked(model, batch, chunk=1, n_loops=1)
+        # Move the camera: the final state must depend on where it looks.
+        moved = batch.continuous["camera"].clone()
+        moved[..., :3] = -moved[..., :3]
+        batch.continuous["camera"] = moved
+        other = model(batch, n_loops=1).hidden
+    torch.testing.assert_close(cached, reference, rtol=0, atol=1e-10)
+    assert not torch.allclose(other[0, -1], reference[0, -1])
+
+
+def test_a_camera_span_without_the_modality_enabled_is_refused():
+    cfg = get_config("tiny")
+    with pytest.raises(ValueError, match="camera_features"):
+        collate([_camera_sample(cfg)], continuous_dims(cfg.codecs))
+
+
+def test_generation_never_emits_a_camera_token():
+    from iridium.runtime.generate import generate
+
+    model = _camera_model(torch.float32)
+    with torch.no_grad():
+        model.codecs.slot_type_head.proj.bias.zero_()
+        model.codecs.slot_type_head.proj.bias[9] = 1e4   # make "camera" the argmax
+    out = generate(model, _camera_sample(model.cfg), max_new_tokens=3, allow_continuous=True)
+    assert "camera" not in out.modalities

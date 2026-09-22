@@ -496,6 +496,11 @@ class CodecConfig:
     #: no FLOPs -- it is a lookup.
     ngram_table_size: int = 0
     ngram_orders: tuple[int, ...] = (2, 3)
+    #: Width of a camera token (6 = one Plucker ray per patch). 0 disables the
+    #: camera modality entirely; enabling it also needs ``n_modalities >= 10``
+    #: so the modality embedding and slot head have a row for it. Input-only:
+    #: costs an encoder, never a decoder. See ``iridium.world.tokens``.
+    camera_features: int = 0
 
     def __post_init__(self) -> None:
         # Validated here rather than in the module, because an unknown value
@@ -512,6 +517,13 @@ class CodecConfig:
             raise ConfigError(
                 f"continuous_conditioning must be 'add' or 'adaln', "
                 f"got {self.continuous_conditioning!r}"
+            )
+        if self.camera_features < 0:
+            raise ConfigError("camera_features must be >= 0")
+        if self.camera_features and self.n_modalities < 10:
+            raise ConfigError(
+                "camera_features needs n_modalities >= 10: the camera modality "
+                "is index 9, appended after the original nine"
             )
         if self.ngram_table_size < 0 or any(n < 2 for n in self.ngram_orders):
             raise ConfigError("ngram_table_size must be >= 0 and every order >= 2")
@@ -592,6 +604,8 @@ class CodecConfig:
         )
         out["slot_type_head"] = d + d * self.n_modalities + self.n_modalities
         out["confidence_head"] = d + d + 1
+        if self.camera_features:
+            out["camera_encoder"] = self.camera_features * d + d
         if self.ngram_table_size:
             out["ngram_embedding"] = len(self.ngram_orders) * self.ngram_table_size * d
         out["text_head"] = (
@@ -736,7 +750,7 @@ class IridiumConfig:
         if self.memory_slots:
             parts["context_memory"] = 4 * d * self.memory_rank + self.memory_rank + d + 2
         if self.perception_layers:
-            parts["perceptual_encoders"] = len(self.codecs.continuous_dims()) * self.perception_layers * (2 * d * self.perception_rank + self.perception_rank + 3 * d)
+            parts["perceptual_encoders"] = (len(self.codecs.continuous_dims()) + bool(self.codecs.camera_features)) * self.perception_layers * (2 * d * self.perception_rank + self.perception_rank + 3 * d)
         if self.gated_bank:
             parts["bank_gate"] = d
         parts.update(

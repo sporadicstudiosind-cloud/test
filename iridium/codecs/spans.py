@@ -29,9 +29,17 @@ MODALITIES: tuple[str, ...] = (
     "geometry",   # point / splat features
     "action",     # UI and tool actuation tuples
     "quantity",   # a dimensional scalar, carried as a value and a role
+    "camera",     # per-patch Plucker rays: where each visual token is looking
 )
 MODALITY_INDEX = {name: i for i, name in enumerate(MODALITIES)}
 CONTINUOUS = ("image", "video", "audio", "field", "geometry", "quantity")
+#: Continuous modalities the model reads but never emits. A camera is
+#: conditioning -- "render this from here" -- not content to generate, so it
+#: gets an encoder and no decoder. Appended *after* every other modality so
+#: that the indices of the original nine never move: a model built without it
+#: (``CodecConfig.n_modalities == 9``) is byte-identical to one built before it
+#: existed, and existing checkpoints still load.
+CONDITIONING = ("camera",)
 DISCRETE = ("control", "text", "action")
 
 
@@ -106,7 +114,7 @@ class Span:
         if self.modality not in MODALITY_INDEX:
             raise ValueError(f"unknown modality {self.modality!r}")
         self.payload = np.asarray(self.payload)
-        if self.modality in CONTINUOUS and self.payload.ndim != 2:
+        if (self.modality in CONTINUOUS or self.modality in CONDITIONING) and self.payload.ndim != 2:
             raise ValueError(
                 f"{self.modality} span payload must be [n_tokens, dim], got "
                 f"{self.payload.shape}"
@@ -220,7 +228,12 @@ def collate(
             if span.atomic and n == len(span):
                 span_id[i, sl] = next_span
                 next_span += 1
-            if span.modality in CONTINUOUS:
+            if span.modality in CONTINUOUS or span.modality in CONDITIONING:
+                if span.modality not in continuous:
+                    raise ValueError(
+                        f"{span.modality} span given, but this codec has no "
+                        f"{span.modality} input (for cameras: CodecConfig.camera_features)"
+                    )
                 dim = continuous[span.modality].shape[-1]
                 payload = span.payload[:n]
                 if payload.shape[-1] != dim:

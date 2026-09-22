@@ -52,7 +52,7 @@ from .camera import Camera
 __all__ = ["camera_span", "anchor_coordinates", "scene_span"]
 
 
-def camera_span(camera: Camera, patch: int = 8, modality: str = "field",
+def camera_span(camera: Camera, patch: int = 8, modality: str = "camera",
                 supervised: bool = False, meta: Optional[dict] = None) -> Span:
     """Per-patch Plücker rays ``(d, o x d)`` for ``camera``, as a continuous span.
 

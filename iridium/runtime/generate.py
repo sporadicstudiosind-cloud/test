@@ -18,7 +18,7 @@ import numpy as np
 import torch
 
 from ..codecs.bank import TensorBatch, continuous_dims
-from ..codecs.spans import MODALITY_INDEX, MODALITIES, Sample, collate
+from ..codecs.spans import CONDITIONING, MODALITY_INDEX, MODALITIES, Sample, collate
 from .device import device_of, generator_for
 
 
@@ -122,7 +122,10 @@ def generate(
         h = hidden[:, -1:]
         slot = int(codecs.slot_type_head(h).argmax(-1).item())
         name = MODALITIES[slot]
-        if not allow_continuous and name not in ("text", "control", "action"):
+        if (not allow_continuous and name not in ("text", "control", "action")) \
+                or name in CONDITIONING:
+            # A camera is conditioning the model reads, never content it emits;
+            # it has no decoder, so a slot head that predicts one is overruled.
             name = "text"
             slot = MODALITY_INDEX["text"]
 

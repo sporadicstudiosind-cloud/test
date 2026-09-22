@@ -31,7 +31,7 @@ from ..model.heads import (
     SlotTypeHead,
     TextHead,
 )
-from .spans import CONTINUOUS, MODALITIES, MODALITY_INDEX, Batch
+from .spans import CONDITIONING, CONTINUOUS, MODALITIES, MODALITY_INDEX, Batch
 
 
 def continuous_dims(cfg: CodecConfig) -> dict[str, int]:
@@ -42,6 +42,7 @@ def continuous_dims(cfg: CodecConfig) -> dict[str, int]:
         "field": cfg.field_channels * cfg.field_patch ** 2,
         "geometry": cfg.point_features,
         "quantity": 3 + cfg.quantity_roles,
+        **({"camera": cfg.camera_features} if cfg.camera_features else {}),
     }
 
 
@@ -98,6 +99,8 @@ class CodecBank(nn.Module):
 
         decoders: dict[str, nn.Module] = {}
         for name, dim in self.dims.items():
+            if name in CONDITIONING:
+                continue                    # read, never emitted: no decoder
             if name == "quantity":
                 decoders[name] = RegressionHead(d_model, 1)
             elif cfg.continuous_head == "flow":
@@ -151,7 +154,9 @@ class CodecBank(nn.Module):
             act_in = torch.cat([ops, batch.scalars], dim=-1)
             h = h + self.action_encoder(act_in) * act_mask.unsqueeze(-1)
 
-        for name in CONTINUOUS:
+        for name in CONTINUOUS + CONDITIONING:
+            if name not in self.encoders:
+                continue
             mask = batch.modality == MODALITY_INDEX[name]
             if not bool(mask.any()):
                 continue

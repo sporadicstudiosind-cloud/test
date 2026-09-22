@@ -161,8 +161,13 @@ def load(name: str) -> dict:
         blob = torch.load(REPO / ckpt, map_location="cpu", weights_only=False)
         manifest = blob["manifest"]
         model = Iridium1(IridiumConfig.from_dict(manifest["model_config"]))
-        model.load_state_dict({k: v.float() for k, v in blob["state_dict"].items()})
-        source = f"checkpoint {ckpt}"
+        # Named, per-key compatibility rather than strict=True (which has refused
+        # this file since the quantity modality was added) or strict=False
+        # (which would also accept a missing attention projection). See
+        # iridium/runtime/checkpoint_compat.py.
+        from iridium.runtime.checkpoint_compat import load_compatible
+        compat = load_compatible(model, {k: v.float() for k, v in blob["state_dict"].items()})
+        source = f"checkpoint {ckpt} ({compat.summary()})"
     else:
         torch.manual_seed(0)
         model = Iridium1(get_config(spec["rung"]))
