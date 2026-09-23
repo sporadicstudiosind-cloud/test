@@ -360,45 +360,89 @@ def chat_items(
     seed: int = 0,
     max_bytes: int = 1024,
     split: str = "train",
+    tokenizer=None,
 ):
-    """Conversations as training items, supervised on the assistant only."""
-    from ..runtime.chat import conversation_sample, fit_to_budget
+    """Conversations as training items, supervised on the assistant only.
+
+    A source can underfill: conversations whose single reply is longer than
+    ``max_bytes`` cannot be fitted and are skipped, and some sources are mostly
+    long answers. Rather than failing a whole training run over it, the
+    shortfall is topped up from the other sources in the mix, and the run
+    fails only if the mix as a whole cannot supply ``n_items``.
+    """
     from ..training.datasets import allocate_mixture
-    from ..training.tasks import Item
-    from .text_corpus import SPLIT_SHARES, in_split
+    from .text_corpus import SPLIT_SHARES
 
     mix = mix or DEFAULT_CHAT_MIX
     quotas = allocate_mixture(n_items, mix)
-    items = []
+    lo, hi = SPLIT_SHARES.get(split, SPLIT_SHARES["train"])
+    seen: set[int] = set()
+    items: list = []
+    shortfall = 0
+    exhausted: set[str] = set()
     for i, (key, quota) in enumerate(sorted(quotas.items())):
         if quota <= 0:
             continue
-        got = 0
-        # The held-out splits receive only 10% of conversations. A fixed 8x
-        # allowance underfills even a modest evaluation request there.
-        lo, hi = SPLIT_SHARES.get(split, SPLIT_SHARES["train"])
-        budget = int(np.ceil(2 * quota * 100 / (hi - lo))) + 32
-        for turns in CONVERSATION_LOADERS[key](limit=budget, seed=seed + i):
-            joined = "\n".join(t.text for t in turns)
-            if not in_split(joined, split):
-                continue
-            turns = fit_to_budget(turns, max_bytes)
-            while turns and turns[0].role != "user":
-                turns = turns[1:]
-            if len(turns) < 2 or turns[-1].role != "assistant":
-                continue
-            items.append(Item(
-                sample=conversation_sample(turns, supervise_assistant=True,
-                                           meta={"family": "chat", "source": key}),
-                family="chat",
-                prompt=turns[-2].text[:80],
-                answer=turns[-1].text,
-                truth={"source": key, "turns": len(turns)},
-            ))
-            got += 1
-            if got >= quota:
+        got = _take(key, quota, seed + i, split, max_bytes, lo, hi, seen, items, tokenizer)
+        if got < quota:
+            shortfall += quota - got
+            exhausted.add(key)
+    # Top up from the sources that did not run dry, fresh seeds so the scan
+    # reaches rows the first pass did not; ``seen`` keeps it from repeating.
+    spare = [k for k in sorted(quotas) if quotas[k] > 0 and k not in exhausted]
+    round_ = 1
+    while shortfall and spare and round_ <= 4:
+        for j, key in enumerate(list(spare)):
+            share = -(-shortfall // max(len(spare) - j, 1))
+            got = _take(key, share, seed + 1000 * round_ + j, split, max_bytes, lo, hi,
+                        seen, items, tokenizer)
+            shortfall -= got
+            if got < share:
+                spare.remove(key)
+            if not shortfall:
                 break
+        round_ += 1
 
     rng = np.random.default_rng(seed)
     rng.shuffle(items)
     return items[:n_items]
+
+
+def _take(key, quota, seed, split, max_bytes, lo, hi, seen, items, tokenizer) -> int:
+    """Append up to ``quota`` fitted conversations from ``key``; return how many."""
+    from ..runtime.chat import conversation_sample, fit_to_budget
+    from ..training.tasks import Item
+    from .text_corpus import in_split
+
+    got = 0
+    # Scan generously: held-out splits keep ~10% of rows, and long replies are
+    # skipped, so a small multiple of the quota routinely underfills.
+    budget = int(np.ceil(8 * quota * 100 / (hi - lo))) + 64
+    for turns in CONVERSATION_LOADERS[key](limit=budget, seed=seed):
+        joined = "\n".join(t.text for t in turns)
+        if not in_split(joined, split):
+            continue
+        fingerprint = hash(joined)
+        if fingerprint in seen:
+            continue
+        turns = fit_to_budget(turns, max_bytes)
+        # A system prompt may lead; an assistant turn may not.
+        while turns and turns[0].role == "assistant":
+            turns = turns[1:]
+        users = [t for t in turns if t.role == "user"]
+        if not users or turns[-1].role != "assistant":
+            continue
+        seen.add(fingerprint)
+        kwargs = {"tokenizer": tokenizer} if tokenizer is not None else {}
+        items.append(Item(
+            sample=conversation_sample(turns, supervise_assistant=True,
+                                       meta={"family": "chat", "source": key}, **kwargs),
+            family="chat",
+            prompt=users[-1].text[:80],
+            answer=turns[-1].text,
+            truth={"source": key, "turns": len(turns)},
+        ))
+        got += 1
+        if got >= quota:
+            break
+    return got

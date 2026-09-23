@@ -59,3 +59,20 @@ def test_default_mix_is_commercially_usable_and_opt_ins_are_marked():
     assert all(not chat_corpus.CHAT_SOURCES[k].commercial_ok
                for k in chat_corpus.CHAT_SOURCES if chat_corpus.CHAT_SOURCES[k].opt_in)
     assert set(chat_corpus.CONVERSATION_LOADERS) == set(chat_corpus.CHAT_SOURCES)
+
+
+def test_an_underfilling_source_is_topped_up_from_the_rest(monkeypatch):
+    def too_long(**_kwargs):
+        for _ in range(50):
+            yield [Turn("user", "q"), Turn("assistant", "x" * 5000)]
+
+    def plenty(limit=None, seed=0):
+        for i in range(limit or 100):
+            yield [Turn("user", f"question {seed}-{i}"), Turn("assistant", "short")]
+
+    monkeypatch.setattr(chat_corpus, "CONVERSATION_LOADERS", {"a": too_long, "b": plenty})
+    monkeypatch.setattr(text_corpus, "in_split", lambda *_args: True)
+    items = chat_corpus.chat_items(10, mix={"a": 0.5, "b": 0.5}, max_bytes=256)
+    assert len(items) == 10
+    assert {it.truth["source"] for it in items} == {"b"}
+    assert len({it.prompt for it in items}) == 10          # no duplicates
