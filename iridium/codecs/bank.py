@@ -66,6 +66,8 @@ class TensorBatch:
         self.media_coordinates = t(coords, torch.float32) if coords is not None else None
         cv = getattr(batch, 'coordinate_valid', None)
         self.coordinate_valid = t(cv, torch.bool) if cv is not None else None
+        rp = getattr(batch, 'rope_positions', None)
+        self.rope_positions = t(rp, torch.long) if rp is not None else None
 
     @property
     def shape(self) -> tuple[int, int]:

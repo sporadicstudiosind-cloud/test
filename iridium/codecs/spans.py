@@ -170,6 +170,14 @@ class Batch:
     meta: list[dict[str, Any]]
     media_coordinates: np.ndarray | None = None
     coordinate_valid: np.ndarray | None = None
+    #: ``[B, T, 3]`` int64 multi-axis rotary positions (M-RoPE). A text token
+    #: at stream position ``p`` is ``(p, p, p)`` -- which reduces M-RoPE to
+    #: ordinary 1-D RoPE exactly -- and a media token at row ``y``, column ``x``
+    #: (frame ``t``) of a span starting at ``s`` is ``(s + t, s + y, s + x)``,
+    #: Qwen2-VL's layout. Only the control core reads it; everything that
+    #: needs a *scalar* order (superstack packing, the bridge's position mask,
+    #: the cache) keeps using ``positions``.
+    rope_positions: np.ndarray | None = None
 
     @property
     def batch_size(self) -> int:
@@ -198,6 +206,7 @@ def collate(
     supervised = np.zeros((b, t), dtype=bool)
     span_id = np.full((b, t), -1, dtype=np.int64)
     media_coordinates = np.zeros((b, t, 3), dtype=np.float32)
+    rope_positions = np.zeros((b, t, 3), dtype=np.int64)
     coordinate_valid = np.zeros((b, t), dtype=bool)
     continuous = {
         name: np.zeros((b, t, dim), dtype=np.float32)
@@ -225,6 +234,7 @@ def collate(
             valid[i, sl] = True
             supervised[i, sl] = span.supervised
             positions[i, sl] = np.arange(cursor, cursor + n)
+            rope_positions[i, sl] = _rope_positions(span, cursor, n)
             if span.atomic and n == len(span):
                 span_id[i, sl] = next_span
                 next_span += 1
@@ -264,7 +274,27 @@ def collate(
         grids=grids,
         meta=[s.meta for s in samples],
         media_coordinates=media_coordinates, coordinate_valid=coordinate_valid,
+        rope_positions=rope_positions,
     )
+
+
+def _rope_positions(span: "Span", start: int, n: int) -> np.ndarray:
+    """``[n, 3]`` M-RoPE positions for the first ``n`` tokens of ``span``.
+
+    A span with a 2-D grid ``(h, w)`` is laid out row-major; a 3-D grid
+    ``(t, h, w)`` frame by frame. Anything else -- text, actions, quantities,
+    a gridless continuous span -- gets ``(p, p, p)``, i.e. plain 1-D RoPE.
+    """
+    p = np.arange(start, start + n, dtype=np.int64)
+    out = np.stack([p, p, p], axis=-1)
+    grid = span.grid
+    if grid is None or len(grid) not in (2, 3):
+        return out
+    shape = (1, *grid) if len(grid) == 2 else tuple(grid)
+    k = np.arange(n, dtype=np.int64)
+    t_idx, rem = np.divmod(k, shape[1] * shape[2])
+    y_idx, x_idx = np.divmod(rem, shape[2])
+    return np.stack([start + t_idx, start + y_idx, start + x_idx], axis=-1)
 
 
 # -- convenience constructors ------------------------------------------------

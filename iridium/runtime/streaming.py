@@ -160,6 +160,7 @@ def _tokens_batch(
     view.modality = torch.full((1, n), modality, dtype=torch.long, device=device)
     view.discrete = torch.tensor([token_ids], dtype=torch.long, device=device)
     view.positions = torch.arange(start_position, start_position + n, device=device).view(1, n)
+    view.rope_positions = view.positions.unsqueeze(-1).expand(1, n, 3).contiguous()
     view.valid = torch.ones(1, n, dtype=torch.bool, device=device)
     view.supervised = torch.ones(1, n, dtype=torch.bool, device=device)
     view.span_id = torch.full((1, n), -1, dtype=torch.long, device=device)

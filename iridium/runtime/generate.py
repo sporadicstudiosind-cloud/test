@@ -52,6 +52,10 @@ def _single_token_batch(
     view.modality = one(modality, torch.long)
     view.discrete = one(token_id, torch.long)
     view.positions = one(position, torch.long)
+    # A generated token is placed on the 1-D diagonal (p, p, p). For
+    # text that is exact; for generated media it is not the grid
+    # position training used, which needs a layout-aware decoder.
+    view.rope_positions = view.positions.unsqueeze(-1).expand(1, 1, 3).contiguous()
     view.valid = one(True, torch.bool)
     view.supervised = one(True, torch.bool)
     view.span_id = one(-1, torch.long)

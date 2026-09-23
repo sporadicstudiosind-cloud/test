@@ -56,6 +56,8 @@ def slice_batch(batch: TensorBatch, start: int, end: int) -> TensorBatch:
     view.media_coordinates = coords[:, start:end] if coords is not None else None
     cv = getattr(batch, 'coordinate_valid', None)
     view.coordinate_valid = cv[:, start:end] if cv is not None else None
+    rp = getattr(batch, 'rope_positions', None)
+    view.rope_positions = rp[:, start:end] if rp is not None else None
     view.meta = batch.meta
     return view
 

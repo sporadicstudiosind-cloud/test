@@ -767,6 +767,18 @@ class IridiumConfig:
     #: The projections start at zero, so enabling it is function-preserving.
     #: 0 disables.
     ple_dim: int = 0
+    #: M-RoPE (Qwen2-VL): split the control core's rotary frequencies into
+    #: (temporal, height, width) sections that sum to ``core.d_head // 2``, so a
+    #: patch's position is its place in the grid rather than its place in a
+    #: flattened sequence. Text tokens sit on the diagonal and see exactly 1-D
+    #: RoPE. Empty = off. Qwen2-VL's split is (16, 24, 24) at d_head 128.
+    mrope_sections: tuple[int, ...] = ()
+    #: YaRN context extension (Peng et al. 2023) for every rotary table: a
+    #: per-frequency-band ramp between untouched high frequencies and linearly
+    #: interpolated low ones, plus the attention-temperature correction.
+    #: 1.0 = off. ``rope_original_max_position`` is the length trained at.
+    rope_yarn_factor: float = 1.0
+    rope_original_max_position: int = 0
     notes: str = ""
 
     def __post_init__(self) -> None:
@@ -776,6 +788,21 @@ class IridiumConfig:
             raise ConfigError("invalid context memory dimensions")
         if self.ple_dim < 0:
             raise ConfigError("ple_dim must be nonnegative (0 = off)")
+        if self.mrope_sections:
+            if sum(self.mrope_sections) != self.core.d_head // 2 or min(self.mrope_sections) < 1:
+                raise ConfigError(
+                    f"mrope_sections {self.mrope_sections} must be positive and sum to "
+                    f"core.d_head // 2 = {self.core.d_head // 2}"
+                )
+            if "mla" in self.core.layer_kinds() and self.core.mla_rope_dim != self.core.d_head:
+                raise ConfigError(
+                    "M-RoPE with MLA core layers needs mla_rope_dim == d_head, so they "
+                    "share the sectioned rotary table"
+                )
+        if self.rope_yarn_factor < 1.0:
+            raise ConfigError("rope_yarn_factor must be >= 1 (1 = off)")
+        if self.rope_yarn_factor > 1.0 and self.rope_original_max_position < 1:
+            raise ConfigError("YaRN needs rope_original_max_position (the trained length)")
         if self.text_vocab_size < 0:
             raise ConfigError("text_vocab_size must be nonnegative (0 = byte level)")
         if self.text_vocab_size:
@@ -970,6 +997,9 @@ class IridiumConfig:
             "text_vocab_size": self.text_vocab_size,
             "text_tokenizer_cache": self.text_tokenizer_cache,
             "ple_dim": self.ple_dim,
+            "mrope_sections": list(self.mrope_sections),
+            "rope_yarn_factor": self.rope_yarn_factor,
+            "rope_original_max_position": self.rope_original_max_position,
             "notes": self.notes,
         }
 
@@ -1005,6 +1035,9 @@ class IridiumConfig:
             text_vocab_size=data.get("text_vocab_size", 0),
             text_tokenizer_cache=data.get("text_tokenizer_cache", "artifacts/tokenizers"),
             ple_dim=data.get("ple_dim", 0),
+            mrope_sections=tuple(data.get("mrope_sections") or ()),
+            rope_yarn_factor=data.get("rope_yarn_factor", 1.0),
+            rope_original_max_position=data.get("rope_original_max_position", 0),
             notes=data.get("notes", ""),
         )
 

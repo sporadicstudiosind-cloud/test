@@ -51,7 +51,11 @@ class Iridium1(nn.Module):
     def __init__(self, cfg: IridiumConfig) -> None:
         super().__init__()
         self.cfg = cfg
-        self.rope = RotaryEmbedding(cfg.core.d_head, cfg.core.rope_theta)
+        scaling = ({"type": "yarn", "factor": cfg.rope_yarn_factor,
+                    "original_max_position": cfg.rope_original_max_position}
+                   if cfg.rope_yarn_factor > 1.0 else None)
+        self.rope = RotaryEmbedding(cfg.core.d_head, cfg.core.rope_theta, scaling=scaling,
+                                    sections=tuple(cfg.mrope_sections) or None)
         self.codecs = CodecBank(cfg.codecs, cfg.core.d_model)
         self.codecs.spatial_coordinates = cfg.controller_mode
         if cfg.perception_layers:
@@ -221,6 +225,12 @@ class Iridium1(nn.Module):
                 cache[("context", "state")] = memory_state.detach() if not self.training else memory_state
         positions = batch.positions
         b, t, _ = h.shape
+        # The core alone reads grid positions (M-RoPE); its masks are
+        # index-based, so a [B, T, 3] tensor passes through unchanged. The
+        # router, superstacks, bridge and cache keep the scalar order.
+        core_positions = positions
+        if self.cfg.mrope_sections and getattr(batch, "rope_positions", None) is not None:
+            core_positions = batch.rope_positions
         layer_bias = None
         if self.ple is not None:
             from ..codecs.spans import MODALITY_INDEX
@@ -248,10 +258,10 @@ class Iridium1(nn.Module):
         stats["subject_loss"] = h.sum() * 0
         for loop in range(n_loops):
             start = 0 if loop == 0 else self.cfg.router.loop_entry
-            h1 = (self.core._run(h, positions, keep, range(self.cfg.core.n_layers), loop, cache,
-                                 layer_bias)
+            h1 = (self.core._run(h, core_positions, keep, range(self.cfg.core.n_layers), loop,
+                                 cache, layer_bias)
                   if self.cfg.controller_mode
-                  else self.core.stage_one(h, positions, keep, loop, cache, start, layer_bias))
+                  else self.core.stage_one(h, core_positions, keep, loop, cache, start, layer_bias))
 
             if loop == 0:
                 # The focus summary, like the bridge states, is a loop-0
@@ -353,7 +363,7 @@ class Iridium1(nn.Module):
                 # A per-channel learned integration strength; gate starts at 0.5.
                 stack_out = stack_out * torch.sigmoid(self.bank_gate)
             h2 = h1 if self.cfg.controller_mode else self.core.stage_two(
-                h1 + stack_out, positions, keep, loop, cache, layer_bias)
+                h1 + stack_out, core_positions, keep, loop, cache, layer_bias)
             per_loop.append(self.core.finalize(h2))
             halt_logits.append(self.core.halt_logit(h2))
             h = self.core.reinject(h2 + stack_out if self.cfg.controller_mode else h2, entry)

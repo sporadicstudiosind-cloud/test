@@ -457,3 +457,83 @@ def test_core_cache_formula_matches_the_bytes_actually_cached(pattern):
     held = sum(_tensor_bytes(v) for k, v in cache.items()
                if isinstance(k, tuple) and k[:2] == ("core", 0))
     assert held == model.cfg.core.cache_bytes(t, bytes_per_element=8)
+
+
+# -- M-RoPE and YaRN -------------------------------------------------------------
+
+
+def _mrope_model(dtype=torch.float64, **extra) -> Iridium1:
+    tiny = get_config("tiny")               # core d_head 16 -> 8 rotary pairs
+    cfg = dataclasses.replace(tiny, mrope_sections=(2, 3, 3), **extra)
+    torch.manual_seed(0)
+    return Iridium1(cfg).to(dtype).eval()
+
+
+def _image_sample(cfg, grid, seed=0):
+    from iridium.codecs.spans import Span
+    rng = np.random.default_rng(seed)
+    dim = continuous_dims(cfg.codecs)["image"]
+    n = int(np.prod(grid))
+    return Sample([text_span("look"), Span("image", rng.normal(size=(n, dim)), grid=grid),
+                   text_span("done")])
+
+
+def test_rope_positions_follow_the_grid():
+    from iridium.codecs.spans import collate as _collate
+    cfg = get_config("tiny")
+    batch = _collate([_image_sample(cfg, (2, 3))], continuous_dims(cfg.codecs))
+    rp, pos = batch.rope_positions[0], batch.positions[0]
+    s = 4                                     # "look" is 4 tokens
+    assert (rp[:s] == np.stack([pos[:s]] * 3, -1)).all()           # text on the diagonal
+    assert rp[s + 4].tolist() == [s, s + 1, s + 1]                   # row 1, col 1
+    assert (rp[s + 6:] == np.stack([pos[s + 6:]] * 3, -1)).all()     # text resumes 1-D
+
+
+def test_mrope_leaves_text_bit_identical():
+    plain = _model({})
+    mrope = _mrope_model()
+    mrope.load_state_dict(plain.state_dict())
+    batch = _batch(plain.cfg, seed=9)
+    with torch.no_grad():
+        torch.testing.assert_close(mrope(batch, n_loops=1).hidden,
+                                   plain(batch, n_loops=1).hidden, rtol=0, atol=0)
+
+
+def test_mrope_makes_image_layout_matter():
+    """A 2x4 and a 4x2 image of the same patches differ only in layout; with
+    M-RoPE the model can tell them apart, without it it cannot."""
+    def final_state(model, grid):
+        batch = TensorBatch(collate([_image_sample(model.cfg, grid)],
+                                    continuous_dims(model.cfg.codecs)), dtype=torch.float64)
+        with torch.no_grad():
+            return model(batch, n_loops=1).hidden[0, -1]
+    plain, mrope = _model({}), _mrope_model()
+    assert torch.equal(final_state(plain, (2, 4)), final_state(plain, (4, 2)))
+    assert not torch.allclose(final_state(mrope, (2, 4)), final_state(mrope, (4, 2)))
+
+
+@pytest.mark.parametrize("chunk", [1, 3])
+def test_mrope_keeps_cached_decoding_exact_with_images(chunk):
+    model = _mrope_model()
+    batch = TensorBatch(collate([_image_sample(model.cfg, (2, 3), seed=1)],
+                                continuous_dims(model.cfg.codecs)), dtype=torch.float64)
+    with torch.no_grad():
+        reference = model(batch, n_loops=1).hidden
+        from iridium.runtime.decode import run_atomic_chunked
+        cached = run_atomic_chunked(model, batch, chunk=chunk, n_loops=1)
+    torch.testing.assert_close(cached, reference, rtol=0, atol=1e-10)
+
+
+def test_mrope_and_yarn_validation_and_serialisation():
+    import json
+    tiny = get_config("tiny")
+    with pytest.raises(ConfigError, match="mrope_sections"):
+        dataclasses.replace(tiny, mrope_sections=(2, 2, 2))
+    with pytest.raises(ConfigError, match="rope_original_max_position"):
+        dataclasses.replace(tiny, rope_yarn_factor=4.0)
+    cfg = dataclasses.replace(tiny, mrope_sections=(2, 3, 3), rope_yarn_factor=4.0,
+                              rope_original_max_position=256)
+    restored = IridiumConfig.from_dict(json.loads(json.dumps(cfg.to_dict())))
+    assert restored.mrope_sections == (2, 3, 3) and restored.rope_yarn_factor == 4.0
+    model = Iridium1(cfg)
+    assert model.rope.scaling["type"] == "yarn"
