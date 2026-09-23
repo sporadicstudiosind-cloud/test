@@ -121,37 +121,30 @@ def build_corpus(
     training something that talks; :mod:`iridium.training.budget` reports it
     rather than leaving it to be discovered from the model's output.
     """
-    mixture = dict(mixture) if mixture else dict(DEFAULT_MIXTURE)
-    if n_items < 1 or any(not np.isfinite(v) or v < 0 for v in mixture.values()) or sum(mixture.values()) <= 0:
-        raise ValueError("positive item count and nonnegative finite mixture weights required")
-    norm = sum(mixture.values())
-    mixture = {k: v / norm for k, v in mixture.items() if v > 0}
-    text_weight = float(mixture.get("text_lm", 0.0))
-    chat_weight = float(mixture.get("chat", 0.0))
-    mixture = {k: v for k, v in mixture.items() if k not in ("text_lm", "chat")}
-    unknown = set(mixture) - set(GENERATORS)
+    mixture = dict(DEFAULT_MIXTURE) if mixture is None else dict(mixture)
+    unknown = set(mixture) - set(GENERATORS) - {"text_lm", "chat"}
     if unknown:
         raise ValueError(f"unknown families in mixture: {sorted(unknown)}")
-    total = sum(mixture.values())
+    quotas = allocate_mixture(n_items, mixture)
+    n_text = quotas.pop("text_lm", 0)
+    n_chat = quotas.pop("chat", 0)
     rng = np.random.default_rng(seed)
-    families = list(mixture)
-    weights = np.array([mixture[f] for f in families]) / total if total else np.array([])
-    n_text = int(round(n_items * text_weight)) if text_weight > 0 else 0
-    n_chat = int(round(n_items * chat_weight)) if chat_weight > 0 else 0
     items: list[Item] = []
     if n_text:
         from ..data.text_corpus import text_items
-        items.extend(text_items(n_text, window=text_window, mix=text_mix,
-                                seed=seed, split=split, tokenizer=tokenizer))
+        text = text_items(n_text, window=text_window, mix=text_mix,
+                          seed=seed, split=split, tokenizer=tokenizer)
+        if len(text) != n_text:
+            raise RuntimeError(f"text source returned {len(text)}/{n_text} requested items")
+        items.extend(text)
     if n_chat:
         from ..data.chat_corpus import chat_items
-        items.extend(chat_items(n_chat, mix=chat_mix, seed=seed, split=split))
-    if (n_text and not any(it.family == "text_lm" for it in items)) or (n_chat and not any(it.family == "chat" for it in items)):
-        raise RuntimeError("requested real text/chat source returned no examples; check network and dataset access")
-    n_items = max(n_items - len(items), 0)
-    if families:
-        for _ in range(n_items):
-            family = families[int(rng.choice(len(families), p=weights))]
+        chat = chat_items(n_chat, mix=chat_mix, seed=seed, split=split)
+        if len(chat) != n_chat:
+            raise RuntimeError(f"chat source returned {len(chat)}/{n_chat} requested items")
+        items.extend(chat)
+    for family, count in sorted(quotas.items()):
+        for _ in range(count):
             items.append(make_item(family, rng, split))
     rng.shuffle(items)
     return Corpus(items, split)

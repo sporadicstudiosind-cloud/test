@@ -21,6 +21,7 @@ import torch
 
 from iridium.runtime import backend
 from iridium.runtime.device import DeviceInfo, detect
+from iridium.runtime.placement import native_bf16
 
 
 @dataclass
@@ -112,6 +113,21 @@ def test_describe_reports_rocm_not_cuda(monkeypatch):
     text = detect().describe()
     assert "rocm" in text
     assert "MI300X" in text
+
+
+def test_training_bf16_checks_each_selected_device(monkeypatch):
+    from iridium.runtime import device as device_module
+
+    seen = []
+
+    def fake_detect(prefer):
+        seen.append(prefer)
+        return DeviceInfo(prefer, "rocm", prefer, prefer == "cuda:1", 16, "mock")
+
+    monkeypatch.setattr(device_module, "detect", fake_detect)
+    assert native_bf16(("cuda:1",)) is True
+    assert seen == ["cuda:1"]
+    assert native_bf16(("cuda:0", "cuda:1")) is False
 
 
 # ---------------------------------------------------------------------------

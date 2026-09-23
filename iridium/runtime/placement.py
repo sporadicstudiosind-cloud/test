@@ -72,18 +72,9 @@ def native_bf16(devices):
     if not all(str(d).startswith('cuda') for d in devices):
         return False
     from .device import detect
-    if torch.version.hip is not None:
-        # Per-device on ROCm: a host can mix archs, and detect() reports index 0.
-        props = [torch.cuda.get_device_properties(d) for d in devices]
-        archs = {getattr(p, 'gcnArchName', '') or '' for p in props}
-        if len(archs) == 1:
-            return detect().bf16
-        return all(
-            any(t in (getattr(p, 'gcnArchName', '') or '')
-                for t in ('gfx90a', 'gfx94', 'gfx110', 'gfx112', 'gfx115'))
-            for p in props
-        )
-    return all(torch.cuda.get_device_capability(d)[0] >= 8 for d in devices)
+    # Query every selected device. detect() without an index always inspects
+    # GPU 0, which is wrong when a single training worker runs on cuda:1.
+    return all(detect(str(device)).bf16 for device in devices)
 
 
 def memory_snapshot(devices):

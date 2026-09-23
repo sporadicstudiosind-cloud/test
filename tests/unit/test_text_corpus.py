@@ -584,3 +584,14 @@ def test_scoring_matches_the_harness():
     src = inspect.getsource(harness.grade_text_lm)
     assert "1.0 - bpb / 8.0" in src, "the harness no longer scales the way this test assumes"
     assert "entropy_reduction" in src
+
+
+def test_corpus_builder_uses_exact_mixture_quotas():
+    from iridium.training.datasets import build_corpus
+
+    corpus = build_corpus(7, seed=3, mixture={
+        "channel_depth": 0.5, "false_premise": 0.5,
+    })
+    assert corpus.counts() == {"channel_depth": 4, "false_premise": 3}
+    with pytest.raises(ValueError):
+        build_corpus(1, mixture={})
