@@ -81,6 +81,25 @@ class TrainConfig:
     #: broken. The larger of the two is used so an explicit ``warmup`` still
     #: wins on a short debug run.
     warmup_ratio: float = 0.02
+    #: ``"cosine"`` or ``"wsd"`` (warmup, stable, decay). WSD holds the peak
+    #: rate and decays only over the final ``decay_ratio`` of the run, with a
+    #: ``1 - sqrt`` cooldown -- Hagele et al. (2024, arXiv 2405.18392) found it
+    #: matches cosine at equal compute. Its practical advantage is that the
+    #: stable phase has no end date: a run can be extended, or branched into
+    #: several cooldowns, without restarting a schedule whose shape was fixed
+    #: by a step count chosen before anyone knew how long training should be.
+    schedule: str = "cosine"
+    decay_ratio: float = 0.2
+    #: Per-modality task-loss balancing; see :class:`~.losses.LossBalancer`.
+    #: Off by default because it changes the objective and is unvalidated here.
+    loss_balance: str = "none"
+    balance_momentum: float = 0.99
+    #: Exponential moving average of the weights, kept alongside them (0 off).
+    #: Generators -- the flow heads here -- are evaluated on the averaged
+    #: weights as standard practice (DDPM, EDM; Karras et al. 2024 on
+    #: post-hoc EMA), because the raw weights at any single step carry the
+    #: last few updates' noise straight into the samples. 0.999 is typical.
+    ema_decay: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -105,6 +124,27 @@ def warmup_steps(cfg: TrainConfig) -> int:
     """
     ratio = int(cfg.steps * max(cfg.warmup_ratio, 0.0))
     return min(max(cfg.warmup, ratio), max(cfg.steps - 1, 0))
+
+
+def learning_rate(step: int, cfg: TrainConfig) -> float:
+    """The configured schedule's rate at ``step``."""
+    if cfg.schedule == "cosine":
+        return cosine_lr(step, cfg)
+    if cfg.schedule == "wsd":
+        return wsd_lr(step, cfg)
+    raise ValueError(f"unknown schedule {cfg.schedule!r}")
+
+
+def wsd_lr(step: int, cfg: TrainConfig) -> float:
+    warm = warmup_steps(cfg)
+    if step < warm:
+        return cfg.lr * (step + 1) / max(warm, 1)
+    decay_start = max(warm, int(round(cfg.steps * (1.0 - cfg.decay_ratio))))
+    if step < decay_start:
+        return cfg.lr
+    t = min((step - decay_start) / max(cfg.steps - decay_start, 1), 1.0)
+    floor = cfg.lr * cfg.min_lr_ratio
+    return floor + (cfg.lr - floor) * (1.0 - math.sqrt(t))
 
 
 def cosine_lr(step: int, cfg: TrainConfig) -> float:
@@ -155,7 +195,21 @@ class Trainer:
         self.history: list[dict[str, Any]] = []
         self._apply_freeze()
         from ..runtime.memory import build_optimizer, decay_groups
-        if cfg.decay_groups:
+        if cfg.schedule not in ("cosine", "wsd") or not 0.0 < cfg.decay_ratio <= 1.0:
+            raise ValueError("schedule must be cosine or wsd, decay_ratio in (0, 1]")
+        if not 0.0 <= cfg.ema_decay < 1.0:
+            raise ValueError("ema_decay must lie in [0, 1)")
+        if cfg.optimizer == "muon":
+            # Muon is defined for hidden matrices only; embeddings, the output
+            # head, norms and biases go to its internal AdamW path. The split
+            # is by module type, so it needs the model, not a parameter list.
+            from .muon import muon_param_groups
+            optimizer_params = muon_param_groups(model, lr=cfg.lr, weight_decay=cfg.weight_decay)
+            self.decayed_params = sum(p.numel() for g in optimizer_params for p in g["params"]
+                                      if g.get("weight_decay", 0.0))
+            self.undecayed_params = sum(p.numel() for g in optimizer_params
+                                        for p in g["params"]) - self.decayed_params
+        elif cfg.decay_groups:
             groups = decay_groups(model, cfg.weight_decay)
             self.decayed_params = sum(p.numel() for p in groups[0]["params"])
             self.undecayed_params = sum(p.numel() for p in groups[1]["params"])
@@ -164,10 +218,20 @@ class Trainer:
             optimizer_params = [p for p in model.parameters() if p.requires_grad]
             self.decayed_params = sum(p.numel() for p in optimizer_params)
             self.undecayed_params = 0
-        self.optimizer = build_optimizer(
-            optimizer_params, kind=cfg.optimizer, lr=cfg.lr,
-            weight_decay=cfg.weight_decay, foreach=cfg.foreach,
-        )
+        if cfg.optimizer == "muon":
+            from .muon import Muon
+            self.optimizer = Muon(optimizer_params, lr=cfg.lr, weight_decay=cfg.weight_decay)
+        else:
+            self.optimizer = build_optimizer(
+                optimizer_params, kind=cfg.optimizer, lr=cfg.lr,
+                weight_decay=cfg.weight_decay, foreach=cfg.foreach,
+            )
+        from .losses import LossBalancer
+        self.balancer = LossBalancer(cfg.loss_balance, cfg.balance_momentum)
+        self.ema: Optional[dict[str, torch.Tensor]] = (
+            {k: v.detach().clone().float() for k, v in model.state_dict().items()
+             if v.is_floating_point()}
+            if cfg.ema_decay else None)
         from ..runtime.device import generator_for
         self.generator = generator_for(device, cfg.seed)
         cuda = str(device).startswith("cuda")
@@ -206,7 +270,7 @@ class Trainer:
         stream = self._infinite_batches()
         overflow_retries = 0
         while step < self.cfg.steps:
-            lr = cosine_lr(step, self.cfg)
+            lr = learning_rate(step, self.cfg)
             for group in self.optimizer.param_groups:
                 group["lr"] = lr
             # An OOM restarts the entire update, never an individual forward.
@@ -292,7 +356,11 @@ class Trainer:
                                 dtype=self.amp_dtype, enabled=self.precision != "fp32"):
                 losses, out = self.model.losses(batch, n_loops=self.cfg.n_loops,
                                                 generator=self.generator)
-                total, micro_report = combine(losses, self.weights)
+                total, micro_report = combine(self.balancer(losses), self.weights)
+                if self.balancer.mode != "none":
+                    # Balanced terms sit near 1 by construction; log the raw
+                    # values too, or the log hides whether anything is learning.
+                    micro_report.update({f"raw.{k}": float(v.detach()) for k, v in losses.items()})
             if not bool(torch.isfinite(total)):
                 raise FloatingPointError("non-finite loss; optimizer update cancelled")
             self.scaler.scale(total / self.cfg.accumulate).backward()
@@ -318,7 +386,26 @@ class Trainer:
                                "a smaller model/optimizer. Retrying could double-update weights.") from exc
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
-        return report, diagnostics, float(norm), self.scaler.get_scale() >= previous_scale
+        updated = self.scaler.get_scale() >= previous_scale
+        if self.ema is not None and updated:
+            self._update_ema()
+        return report, diagnostics, float(norm), updated
+
+    @torch.no_grad()
+    def _update_ema(self) -> None:
+        d = self.cfg.ema_decay
+        for name, value in self.model.state_dict().items():
+            shadow = self.ema.get(name)
+            if shadow is not None:
+                shadow.lerp_(value.detach().to(shadow.device, shadow.dtype), 1.0 - d)
+
+    def ema_state_dict(self) -> Optional[dict[str, torch.Tensor]]:
+        """The averaged weights, shaped like ``model.state_dict()`` (buffers
+        and non-float entries taken from the live model). ``None`` when off."""
+        if self.ema is None:
+            return None
+        live = self.model.state_dict()
+        return {k: (self.ema[k].to(v.dtype) if k in self.ema else v) for k, v in live.items()}
 
     def _infinite_batches(self):
         while True:
@@ -372,6 +459,11 @@ class Trainer:
         self.model.load_state_dict(blob["state_dict"])
         self.optimizer.load_state_dict(blob["optimizer"])
         self.scaler.load_state_dict(blob["scaler"])
+        if self.ema is not None and blob.get("ema_state_dict") is not None:
+            self.ema = {k: v.detach().clone().float() for k, v in blob["ema_state_dict"].items()
+                        if k in self.ema}
+        if blob.get("loss_balancer") is not None:
+            self.balancer.load_state_dict(blob["loss_balancer"])
         self.completed_steps = blob["completed_steps"]
         self.history = blob.get("history", [])
         torch.set_rng_state(blob["torch_rng"].cpu())
@@ -415,6 +507,8 @@ class Trainer:
                 "history": self.history,
                 "optimizer": self.optimizer.state_dict(),
                 "scaler": self.scaler.state_dict(),
+                "ema_state_dict": self.ema_state_dict(),
+                "loss_balancer": self.balancer.state_dict(),
                 "completed_steps": self.completed_steps,
                 "torch_rng": torch.get_rng_state(),
                 "generator_rng": self.generator.get_state(),

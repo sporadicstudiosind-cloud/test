@@ -17,15 +17,21 @@ measured only by training it, and nothing here has been. See
 [`small-model-coherence.md`](small-model-coherence.md) for why that is the
 binding constraint.
 
-The `modern` rung (`get_config("modern")`, 677 M parameters) assembles the
-options with published evidence at scale and leaves out the ones without.
+The `modern` rung (`get_config("modern")`, 743,752,454 parameters) assembles the
+options with published evidence at scale and leaves out the ones without. Its
+computed cache at 1M tokens is 10.7 GB (bf16, three ponder loops, worst-case
+routing), against 75 GB for `test1b`; see `CoreConfig.cache_bytes`.
 
-## Control core — `CoreConfig`
+## Control core — `CoreConfig`, and superstacks — `SuperstackConfig`
+
+Both accept the same per-layer fields (the superstack ones act on each stack's
+self-attention; the bridge cross-attention onto the core always stays GQA).
+`hyper_streams` is core-only.
 
 | field | values | what it does | evidence / caveat |
 | --- | --- | --- | --- |
 | `layer_pattern` | tuple of `global`, `local`, `mla`, `deltanet`, repeated | per-layer attention kind | 3:1 `deltanet`:full is Qwen3-Next / Kimi Linear; 5 `local` : 1 `global` is Gemma 3 |
-| `local_window` | int | sliding-window width for `local` layers | bounds KV growth on those layers |
+| `local_window` | int | sliding-window width for `local` layers | the cache keeps `window - 1` keys (an earlier version kept all of them) |
 | `mla_kv_rank`, `mla_q_rank`, `mla_rope_dim` | ints | multi-head latent attention (DeepSeek-V2/V3) | cache is flat in head count. **At the shipped head counts narrow GQA is already cheaper**; MLA pays when you raise heads. MLA-only cores lift the `d_model == heads × d_head` constraint |
 | `deltanet_conv` | int | Gated DeltaNet short-conv width | fixed-size decode state; cannot replace bridge cross-attention or sparse masks |
 | `norm_kind` | `rms`, `dyt`, `derf` | normalisation-free elementwise norms | DyT's α is reported sensitive for LLMs; Derf's outer affine is an extrapolation |
@@ -40,6 +46,8 @@ options with published evidence at scale and leaves out the ones without.
 | `text_vocab_size` | `IridiumConfig` | subword vocabulary (0 = byte level); `codecs.vocab_size` must be ≥ it + 16 |
 | `ple_dim` | `IridiumConfig` | Gemma 3n per-layer embeddings; zero-init, exactly function-preserving |
 | `qk_norm` | `IridiumConfig` | RMSNorm on Q and K before RoPE |
+| `mrope_sections` | `IridiumConfig` | M-RoPE (Qwen2-VL): media patches positioned by their grid (t, y, x); text exactly 1-D. Before this a 2×4 and a 4×2 image were indistinguishable |
+| `rope_yarn_factor`, `rope_original_max_position` | `IridiumConfig` | YaRN context extension for every rotary table |
 | `ngram_table_size`, `ngram_orders` | `CodecConfig` | hashed n-gram input embeddings (Over-Tokenized Transformer); history carried in the cache |
 | `continuous_conditioning` | `CodecConfig` | flow head conditioning: `add` or `adaln` (DiT/SD3) |
 | `flow_timestep_sampling` | `CodecConfig` | `uniform` or `logit_normal` (SD3) |
@@ -57,11 +65,26 @@ options with published evidence at scale and leaves out the ones without.
 | `Iridium1.enable_gradient_checkpointing` | exact (`use_reentrant=False`); off by default |
 | `world.*` | cameras, Gaussian-splat scenes and `.ply` I/O, persistent world memory, action rollout |
 
+## Training — `TrainConfig`, `phase1_pretrain --recipe omni`
+
+| field | what it does | status |
+| --- | --- | --- |
+| `schedule="wsd"`, `decay_ratio` | warmup–stable–decay with a `1 − √` cooldown (Hägele et al. 2024); extendable runs | standard |
+| `optimizer="muon"` | Muon (Moonlight RMS-matched) on hidden matrices, AdamW on embeddings/head/norms/biases | toy-scale only here |
+| `loss_balance="ema"` | per-modality task losses divided by a running estimate of their own scale; raw values still logged | heuristic, unvalidated, off by default |
+| `ema_decay` | exponential moving average of weights, saved in checkpoints, for evaluating generators | standard |
+| `decay_groups` | weight decay on hidden matrices only; embeddings excluded (OLMo 2) | default |
+| `OMNI_MIXTURE` | half natural language (prose + chat), half synthetic families | needs network |
+
+`--recipe omni` combines the omni mixture, the rung's own tokenizer (also for
+the evaluation corpora), WSD and EMA 0.999, and prints the data-budget audit
+before training.
+
 ## Not integrated
 
-* Options apply to the **control core** only. Superstacks keep GQA and
-  SwiGLU; at long context their KV cache dominates (`long-context.md`).
-* `codecs/spatial.py`'s multi-axis RoPE and `world.tokens.anchor_coordinates`
-  are built and tested but not yet fed into attention.
-* RoPE supports linear and NTK scaling, not full YaRN.
+* M-RoPE applies to the control core; superstacks and the bridge use the
+  scalar order (their packing and position masks need it).
+* Generated media tokens get 1-D rotary positions, not the grid positions
+  training used; a layout-aware decoder is needed for that.
 * Streaming supports only `controller_mode=False`, one loop, batch size 1.
+* Nothing is trained.

@@ -1247,6 +1247,8 @@ def _ladder() -> dict[str, IridiumConfig]:
     # * core layers 3 Gated DeltaNet : 1 latent attention -- the Qwen3-Next /
     #   Kimi Linear ratio. DeltaNet's decode state is fixed-size, so the core's
     #   cache stops growing with context on three layers in four;
+    # * superstacks 2 DeltaNet : 1 latent attention (their KV is the larger bill);
+    # * M-RoPE grid positions for media; YaRN available for context extension;
     # * mHC with 4 residual streams (DeepSeek-V4), QK-norm for low-precision
     #   stability, a 32k subword vocabulary, hashed n-gram input embeddings,
     #   SD3-style flow heads (AdaLN conditioning, logit-normal timesteps), the
@@ -1289,6 +1291,12 @@ def _ladder() -> dict[str, IridiumConfig]:
                 "language_reasoning_intent",
                 "perception_geometry_action",
             ),
+            # The stacks, not the core, are the long-context bill (their
+            # stack-local KV exceeds the whole core cache), so they get the
+            # same hybrid treatment: two DeltaNet layers per latent-attention
+            # layer. The bridges stay GQA cross-attention regardless.
+            layer_pattern=("deltanet", "deltanet", "mla"),
+            mla_kv_rank=256, mla_rope_dim=64,
         ),
         router=RouterConfig(top_k=2, max_loops=3),
         codecs=CodecConfig(
@@ -1299,6 +1307,9 @@ def _ladder() -> dict[str, IridiumConfig]:
         max_seq_len=32_768,
         qk_norm=True,
         text_vocab_size=32_768,
+        # Grid positions for image/video/camera patches, Qwen2-VL's 1:1.5:1.5
+        # (temporal:height:width) split of the 32 rotary pairs at d_head 64.
+        mrope_sections=(8, 12, 12),
         notes=(
             "Recommended-options rung, untrained: 3:1 DeltaNet:MLA core, mHC x4, "
             "32k BPE, n-gram embeddings, SD3-style flow heads, camera modality."

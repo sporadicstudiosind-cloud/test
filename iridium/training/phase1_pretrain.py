@@ -39,6 +39,14 @@ def main(argv=None) -> int:
     ap.add_argument("--eval-per-family", type=int, default=24)
     ap.add_argument("--mixture", default="",
                     help="family=weight,... ; default is DEFAULT_MIXTURE")
+    ap.add_argument("--recipe", choices=("default", "omni"), default="default",
+                    help="omni = OMNI_MIXTURE (half natural language), WSD schedule, "
+                         "EMA weights and the rung's own tokenizer; needs network")
+    ap.add_argument("--optimizer", default="eager_adamw",
+                    help="eager_adamw | adamw | muon | adafactor | ...")
+    ap.add_argument("--schedule", choices=("cosine", "wsd"), default=None)
+    ap.add_argument("--ema-decay", type=float, default=None)
+    ap.add_argument("--loss-balance", choices=("none", "ema"), default="none")
     ap.add_argument("--checkpoint-every", type=int, default=0,
                     help="periodic checkpoints; a long run that is killed "
                          "without one loses everything, which is how the "
@@ -51,18 +59,30 @@ def main(argv=None) -> int:
     print(f"{cfg.name}: {sum(p.numel() for p in model.parameters()):,} parameters")
 
     mixture = None
+    from .datasets import OMNI_MIXTURE
+    if args.recipe == "omni" and not args.mixture:
+        mixture = dict(OMNI_MIXTURE)
     if args.mixture:
         mixture = {}
         for part in args.mixture.split(","):
             name, _, weight = part.partition("=")
             mixture[name.strip()] = float(weight or 1.0)
         print("mixture:", mixture, flush=True)
+    from .tokenizer_bridge import tokenizer_for_config, tokenizer_manifest
+    tokenizer = tokenizer_for_config(cfg) if args.recipe == "omni" else None
+    print("tokenizer:", tokenizer_manifest(tokenizer, cfg))
+    from .budget import audit
+    from .datasets import DEFAULT_MIXTURE
+    print(audit(cfg, args.train_items, args.steps, args.batch_size,
+                mixture=mixture or DEFAULT_MIXTURE).describe(), flush=True)
     train = build_corpus(args.train_items, seed=args.seed, split="train",
-                         mixture=mixture)
+                         mixture=mixture, tokenizer=tokenizer)
+    # Same vocabulary for evaluation as for training; a mismatch does not
+    # raise, it just scores the model on text it reads differently.
     test = build_corpus(args.eval_items, seed=args.seed + 1000, split="test",
-                        mixture=mixture)
+                        mixture=mixture, tokenizer=tokenizer)
     extra = build_corpus(args.eval_items // 2, seed=args.seed + 2000,
-                         split="extrapolation", mixture=mixture)
+                         split="extrapolation", mixture=mixture, tokenizer=tokenizer)
     print(describe(train))
     print(describe(test))
 
@@ -71,6 +91,11 @@ def main(argv=None) -> int:
         n_loops=args.n_loops, seed=args.seed, label="phase1",
         log_every=max(args.steps // 60, 1),
         checkpoint_every=args.checkpoint_every,
+        optimizer=args.optimizer,
+        schedule=args.schedule or ("wsd" if args.recipe == "omni" else "cosine"),
+        ema_decay=(args.ema_decay if args.ema_decay is not None
+                   else (0.999 if args.recipe == "omni" else 0.0)),
+        loss_balance=args.loss_balance,
     )
     trainer = Trainer(model, train, tcfg, LossWeights(), out_dir=Path(args.out))
 

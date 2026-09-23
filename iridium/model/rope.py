@@ -265,7 +265,11 @@ class RotaryEmbedding(torch.nn.Module):
             # and ``codecs/spatial.py`` (the sibling implementation this
             # mirrors for the vision codecs).
             sizes = torch.tensor(self.sections)
-            axis_id = torch.repeat_interleave(torch.arange(len(self.sections)), sizes)
+            # output_size is known, and passing it is what lets this be built
+            # on the meta device (deferred / sharded initialisation), where a
+            # data-dependent output length cannot be computed.
+            axis_id = torch.repeat_interleave(torch.arange(len(self.sections)), sizes,
+                                              output_size=sum(self.sections))
             self.register_buffer("axis_id", axis_id, persistent=False)
         else:
             self.axis_id = None

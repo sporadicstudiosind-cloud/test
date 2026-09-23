@@ -34,6 +34,25 @@ DEFAULT_MIXTURE: dict[str, float] = {
 }
 
 
+#: The mixture for a model meant to *talk* as well as compute. Half natural
+#: language -- streamed licensed prose (``text_lm``) and human-written
+#: conversations supervised on the assistant's turns (``chat``) -- and half the
+#: exactly-checkable synthetic families, which carry the physics, quantity,
+#: scene and false-premise skills. ``DEFAULT_MIXTURE`` has no natural language
+#: at all, which is right for exercising the mechanisms and is why a model
+#: trained on it cannot write (``docs/small-model-coherence.md``). Needs
+#: network access to the text and chat sources.
+OMNI_MIXTURE: dict[str, float] = {
+    "text_lm": 0.35,
+    "chat": 0.15,
+    "channel_depth": 0.12,
+    "channel_intervention": 0.10,
+    "field_rollout": 0.10,
+    "scene_goal": 0.08,
+    "false_premise": 0.10,
+}
+
+
 @dataclass
 class Corpus:
     items: list[Item]
