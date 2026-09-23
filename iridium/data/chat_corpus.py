@@ -361,6 +361,7 @@ def chat_items(
     max_bytes: int = 1024,
     split: str = "train",
     tokenizer=None,
+    max_tokens: Optional[int] = None,
 ):
     """Conversations as training items, supervised on the assistant only.
 
@@ -383,7 +384,7 @@ def chat_items(
     for i, (key, quota) in enumerate(sorted(quotas.items())):
         if quota <= 0:
             continue
-        got = _take(key, quota, seed + i, split, max_bytes, lo, hi, seen, items, tokenizer)
+        got = _take(key, quota, seed + i, split, max_bytes, lo, hi, seen, items, tokenizer, max_tokens)
         if got < quota:
             shortfall += quota - got
             exhausted.add(key)
@@ -395,7 +396,7 @@ def chat_items(
         for j, key in enumerate(list(spare)):
             share = -(-shortfall // max(len(spare) - j, 1))
             got = _take(key, share, seed + 1000 * round_ + j, split, max_bytes, lo, hi,
-                        seen, items, tokenizer)
+                        seen, items, tokenizer, max_tokens)
             shortfall -= got
             if got < share:
                 spare.remove(key)
@@ -408,7 +409,8 @@ def chat_items(
     return items[:n_items]
 
 
-def _take(key, quota, seed, split, max_bytes, lo, hi, seen, items, tokenizer) -> int:
+def _take(key, quota, seed, split, max_bytes, lo, hi, seen, items, tokenizer,
+          max_tokens=None) -> int:
     """Append up to ``quota`` fitted conversations from ``key``; return how many."""
     from ..runtime.chat import conversation_sample, fit_to_budget
     from ..training.tasks import Item
@@ -432,11 +434,16 @@ def _take(key, quota, seed, split, max_bytes, lo, hi, seen, items, tokenizer) ->
         users = [t for t in turns if t.role == "user"]
         if not users or turns[-1].role != "assistant":
             continue
-        seen.add(fingerprint)
         kwargs = {"tokenizer": tokenizer} if tokenizer is not None else {}
+        sample = conversation_sample(turns, supervise_assistant=True,
+                                     meta={"family": "chat", "source": key}, **kwargs)
+        # Bytes only bound tokens loosely; a reply cut off by the window has
+        # no targets left and would stop training, so it is skipped here.
+        if max_tokens is not None and len(sample) > max_tokens:
+            continue
+        seen.add(fingerprint)
         items.append(Item(
-            sample=conversation_sample(turns, supervise_assistant=True,
-                                       meta={"family": "chat", "source": key}, **kwargs),
+            sample=sample,
             family="chat",
             prompt=users[-1].text[:80],
             answer=turns[-1].text,

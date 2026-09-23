@@ -143,7 +143,8 @@ def build_corpus(
     if n_chat:
         from ..data.chat_corpus import chat_items
         chat = chat_items(n_chat, mix=chat_mix, seed=seed, split=split,
-                          max_bytes=chat_max_bytes)
+                          max_bytes=chat_max_bytes, tokenizer=tokenizer,
+                          max_tokens=text_window)
         if len(chat) != n_chat:
             raise RuntimeError(f"chat source returned {len(chat)}/{n_chat} requested items")
         items.extend(chat)

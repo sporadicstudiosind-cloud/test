@@ -244,8 +244,14 @@ def cmd_chat(args) -> int:
 
     trained_loops = (manifest.get("train_config") or {}).get("n_loops")
     loops = args.n_loops if args.n_loops is not None else trained_loops
+    from .training.tokenizer_bridge import tokenizer_from_manifest
+    try:
+        tokenizer = tokenizer_from_manifest(manifest)
+    except ValueError as exc:
+        print(f"chat: {exc}", file=sys.stderr)
+        return 2
     session = ChatSession(
-        model, system=args.system, temperature=args.temperature, top_p=args.top_p,
+        model, tokenizer=tokenizer, system=args.system, temperature=args.temperature, top_p=args.top_p,
         top_k=args.top_k, max_new_tokens=args.max_new_tokens, n_loops=loops,
         seed=args.seed,
     )

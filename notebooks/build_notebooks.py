@@ -343,9 +343,10 @@ def chat_cell() -> str:
     return '''
     from iridium.training.trainer import load_checkpoint
     from iridium.runtime.chat import ChatSession
+    from iridium.training.tokenizer_bridge import tokenizer_from_manifest
 
     model, manifest = load_checkpoint(str(checkpoint), device=DEVICE)
-    chat = ChatSession(model)
+    chat = ChatSession(model, tokenizer=tokenizer_from_manifest(manifest))
     print(chat.send('Hello! What are you, and what can you actually do right now?'))
     '''
 

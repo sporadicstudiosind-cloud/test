@@ -99,6 +99,7 @@ def conversation_spans(
     turns: Sequence[Turn],
     supervise_assistant: bool = True,
     open_for_reply: bool = False,
+    tokenizer=None,
 ) -> list[Span]:
     """The exact span layout, for training and for inference alike.
 
@@ -123,7 +124,7 @@ def conversation_spans(
         supervised = supervise_assistant and turn.role in _MODEL_TURNS
         if turn.text:
             spans.append(text_span(turn.text, supervised=supervised,
-                                   offset=TEXT_OFFSET))
+                                   offset=TEXT_OFFSET, tokenizer=tokenizer))
         if turn.role in _MODEL_TURNS:
             spans.append(_control(EOS, supervised=supervised))
     if open_for_reply:
@@ -136,9 +137,10 @@ def conversation_sample(
     supervise_assistant: bool = True,
     open_for_reply: bool = False,
     meta: Optional[dict] = None,
+    tokenizer=None,
 ) -> Sample:
     return Sample(
-        conversation_spans(turns, supervise_assistant, open_for_reply),
+        conversation_spans(turns, supervise_assistant, open_for_reply, tokenizer=tokenizer),
         meta=meta or {"family": "chat"},
     )
 
@@ -182,6 +184,9 @@ class ChatSession:
     n_loops: Optional[int] = None
     seed: int = 0
     turns: list[Turn] = field(default_factory=list)
+    #: The checkpoint's subword tokenizer (``tokenizer_from_manifest``);
+    #: ``None`` for byte-level models.
+    tokenizer: object = None
 
     def __post_init__(self) -> None:
         if self.system:
@@ -219,6 +224,7 @@ class ChatSession:
             seed=self.seed,
             text_offset=TEXT_OFFSET,
             text_only=True,
+            tokenizer=self.tokenizer,
         )
         params.update(overrides)
 
@@ -242,7 +248,7 @@ class ChatSession:
         while context and context[0].role == "assistant":
             context = context[1:]
         sample = conversation_sample(context, supervise_assistant=False,
-                                     open_for_reply=True)
+                                     open_for_reply=True, tokenizer=self.tokenizer)
         if len(sample) + max_new_tokens > max_seq_len:
             raise ValueError("conversation exceeds the model context window")
         reply = generate(self.model, sample, **params).text.strip()
