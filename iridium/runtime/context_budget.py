@@ -25,7 +25,7 @@ argument for a hybrid schedule and one function would bury it:
   codebase today.
 * :func:`sliding_window_cache_bytes` -- exact, bounded. ``GroupedQueryAttention``
   with ``window=W`` (Mistral's uniform window; Gemma 3's 5-local:1-global
-  interleave). Cache is ``O(min(tokens, W))``: flat past ``W`` tokens, but
+  interleave). Cache is ``O(min(tokens, W - 1))``: flat past ``W`` tokens, but
   every token more than ``W`` back is gone, not summarised -- there is no
   partial credit for "it was pretty recent".
 * :func:`deltanet_state_bytes` -- constant. A :class:`~iridium.model.deltanet.
@@ -104,17 +104,21 @@ def full_attention_cache_bytes(tokens: int, d_kv: int, n_layers: int = 1,
 
 def sliding_window_cache_bytes(tokens: int, window: int, d_kv: int, n_layers: int = 1,
                                 bytes_per_element="bf16") -> int:
-    """Same per-token rate as full attention, capped at ``window`` live tokens.
+    """Same per-token rate as full attention, capped at ``window - 1`` live tokens.
 
-    Not ``min(tokens, window) * rate`` because the window is generous by
-    accident -- it is ``min`` because past ``window`` tokens back, the
-    layer's own ``sliding_window_keep`` (see ``model/layers.py``) has already
-    made those keys unreachable, so keeping their K/V around would be paying
-    memory for something no query can ever read again.
+    It is a ``min`` because past ``window`` tokens back, the layer's own
+    ``sliding_window_keep`` (see ``model/layers.py``) has already made those
+    keys unreachable, so keeping their K/V would be paying memory for
+    something no query can read again. And it is ``window - 1``, not
+    ``window``, because the next query's own key is computed fresh rather
+    than read from the cache -- which is exactly what the layer keeps, and
+    what an earlier version of this function overcounted by one.
     """
     if window < 1:
         raise ValueError("window must be >= 1")
-    return 2 * d_kv * _bytes(bytes_per_element) * n_layers * min(tokens, window)
+    # window - 1: the cache keeps only the keys the *next* query can see; the
+    # current token's own key is computed fresh (see GroupedQueryAttention).
+    return 2 * d_kv * _bytes(bytes_per_element) * n_layers * min(tokens, max(window - 1, 0))
 
 
 def deltanet_state_bytes(n_heads: int, d_head: int, n_layers: int = 1, conv_size: int = 4,

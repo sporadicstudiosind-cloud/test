@@ -57,7 +57,25 @@ def test_sliding_window_cache_saturates_at_window():
     at = cb.sliding_window_cache_bytes(1024, window=1024, d_kv=32, n_layers=4)
     above = cb.sliding_window_cache_bytes(1_048_576, window=1024, d_kv=32, n_layers=4)
     assert below < at == above
-    assert at == 2 * 32 * 2 * 4 * 1024
+    # window - 1: what GroupedQueryAttention's cache actually keeps.
+    assert at == 2 * 32 * 2 * 4 * 1023
+
+
+def test_sliding_window_formula_agrees_with_the_config_accounting():
+    """Two implementations of one quantity; this keeps them from drifting.
+
+    The config's copy was fixed to window - 1 first and this one was missed;
+    the model's real cache is the arbiter (tests/unit/test_core_blocks.py).
+    """
+    import dataclasses
+
+    from iridium.config import get_config
+
+    core = dataclasses.replace(get_config("tiny").core, layer_pattern=("local",),
+                               local_window=64)
+    for tokens in (10, 63, 64, 5000):
+        assert core.cache_bytes(tokens) == cb.sliding_window_cache_bytes(
+            tokens, window=64, d_kv=core.d_kv, n_layers=core.n_layers)
 
 
 def test_deltanet_state_is_independent_of_tokens():
