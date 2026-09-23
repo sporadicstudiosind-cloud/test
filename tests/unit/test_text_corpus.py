@@ -47,6 +47,19 @@ def test_default_mixture_is_a_normalised_subset():
     assert all(w > 0 for w in tc.DEFAULT_MIX.values())
 
 
+def test_small_text_budget_keeps_exact_source_quota(monkeypatch):
+    monkeypatch.setattr(tc, "stream_documents", lambda key, **kwargs: iter(["hello " * 80]))
+    items = tc.text_items(1, window=128, mix={"gutenberg": 0.5, "wikipedia": 0.5})
+    assert len(items) == 1
+    assert items[0].truth["source"] == "gutenberg"
+
+
+def test_small_document_budget_keeps_exact_source_quota(monkeypatch):
+    monkeypatch.setattr(tc, "stream_documents", lambda key, **kwargs: iter([key]))
+    docs = tc.collect_documents(1, mix={"gutenberg": 0.5, "wikipedia": 0.5})
+    assert docs == [("gutenberg", "gutenberg")]
+
+
 def test_licence_notice_names_every_source_it_covers():
     notice = tc.licence_notice(tc.DEFAULT_MIX)
     for key in tc.DEFAULT_MIX:

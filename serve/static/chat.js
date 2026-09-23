@@ -27,6 +27,19 @@ const PRESETS = [
 ];
 
 let MODELS = [];
+let CHAT_HISTORY = [];
+let CHAT_EPOCH = 0;
+
+function resetChat() {
+  CHAT_EPOCH += 1;
+  CHAT_HISTORY = [];
+  $("transcript").replaceChildren();
+  $("telemetry-tiles").replaceChildren();
+  $("fig-dispatch").replaceChildren();
+  addMessage("assistant",
+    "Ready. Type a message or choose a preset. Earlier turns in this chat will be sent as context.",
+    "no forward pass run yet");
+}
 
 function showTip(evt, lines) {
   tip.innerHTML = lines.join("<br>");
@@ -143,8 +156,10 @@ function controlsReadout() {
 }
 
 async function send() {
+  if ($("send").disabled) return;
   const prompt = $("prompt").value.trim();
   if (!prompt) return;
+  const epoch = CHAT_EPOCH;
   $("send").disabled = true;
   addMessage("user", prompt);
   $("prompt").value = "";
@@ -154,7 +169,7 @@ async function send() {
     const res = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        prompt, model: $("model").value,
+        prompt, history: CHAT_HISTORY, model: $("model").value,
         max_new_tokens: +$("tokens").value,
         temperature: +$("temp").value,
         loops: +$("loops").value,
@@ -179,14 +194,21 @@ async function send() {
       throw new Error(data.error ? `${res.status} — ${data.error}`
                                  : `${res.status} — ${data.message || "request rejected"}`);
     }
+    if (epoch !== CHAT_EPOCH) return;
     pending.querySelector(".body").textContent =
       data.text && data.text.trim() ? data.text : "(emitted no printable bytes)";
+    if (data.text && data.text.trim()) {
+      CHAT_HISTORY.push({ role: "user", text: prompt },
+                        { role: "assistant", text: data.text });
+      CHAT_HISTORY = CHAT_HISTORY.slice(-20);
+    }
     pending.querySelector(".meta").textContent =
       `${data.model.label} · ${data.tokens_generated} tokens · ` +
       `${data.seconds.toFixed(2)} s · stopped: ${data.stopped} · ` +
       `${data.telemetry.stacks_used}/${data.telemetry.routing.length} stacks used`;
     renderTelemetry(data);
   } catch (err) {
+    if (epoch !== CHAT_EPOCH) return;
     const why = (err && err.message) ? err.message
       : "the request did not complete (network error or the container went away)";
     pending.querySelector(".body").textContent = "request failed — " + why;
@@ -218,6 +240,8 @@ async function boot() {
   });
   ["tokens", "temp", "loops", "model"].forEach((id) =>
     $(id).addEventListener("input", controlsReadout));
+  $("model").addEventListener("change", resetChat);
+  $("reset").addEventListener("click", resetChat);
   controlsReadout();
   $("send").addEventListener("click", send);
   $("prompt").addEventListener("keydown", (e) => {
@@ -229,9 +253,7 @@ async function boot() {
       : (matchMedia("(prefers-color-scheme: dark)").matches ? "light" : "dark");
     document.documentElement.setAttribute("data-theme", next);
   });
-  addMessage("assistant",
-    "Ready. Pick a preset below or type a prompt — the telemetry panel fills in on the right.",
-    "no forward pass run yet");
+  resetChat();
 }
 
 boot();

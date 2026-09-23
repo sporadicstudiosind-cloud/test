@@ -17,6 +17,11 @@
 
 # Iridium-1
 
+**Small chat:** `python -m iridium chat` loads the bundled nano checkpoint.
+See [small chat and GPU instructions](docs/SMALL_CHAT.md) for interactive chat,
+the web interface, and a bounded chat fine-tuning command. The bundled weights
+were trained on synthetic tasks, not conversations; chat quality is unverified.
+
 **One dense multimodal foundation model** that perceives, reasons, generates, simulates and
 acts across text, code, mathematics, images, video, speech, sound, structured measurements,
 geometry and physical fields — served as one persistent instance that allocates its own
@@ -38,7 +43,7 @@ Iridium-1 checkpoint.
 > **Status: a working implementation of the routed architecture at small scale, plus a
 > costed ladder up to 9 T parameters.** The control core, macro-router, superstack bank,
 > omnimodal codecs, physics solvers, agentic environment, sandbox, persistent runtime,
-> quantizer and parallelism planner are built and tested (384 tests). Nothing here
+> quantizer and parallelism planner are built and covered by CPU tests. Nothing here
 > demonstrates a general system: the trained rung is 34 M parameters on a synthetic corpus.
 > [`docs/build.md`](docs/build.md) says what to run,
 > [`docs/verification.md`](docs/verification.md) lists the twenty findings against the
@@ -69,7 +74,8 @@ Iridium-1 checkpoint.
 
 ```bash
 pip install numpy torch pytest jsonschema
-python3 -m pytest                                # 384 tests, all passing
+python3 -m pytest                                # CPU correctness suite
+python3 -m iridium chat                          # small experimental chat
 python3 -m iridium ladder                        # tiny -> nano -> ... -> 9 T
 python3 -m iridium report nano --verify          # accounting, checked against the modules
 python3 -m iridium plan base --gpus 1024         # 4-D parallelism and its cost model

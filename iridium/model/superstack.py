@@ -151,7 +151,7 @@ class SuperstackLayer(nn.Module):
             )
         self.spectral: Optional[FNOBlock] = None
         if spectral:
-            modes = (cfg.spectral_modes, cfg.spectral_modes)
+            modes = (cfg.spectral_modes,) * cfg.spectral_dims
             self.spectral = FNOBlock(cfg.d_model, cfg.spectral_channels, modes, eps)
         self.halt_head = nn.Linear(cfg.d_model, 1)
         nn.init.zeros_(self.halt_head.bias)

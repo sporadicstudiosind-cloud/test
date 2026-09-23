@@ -45,15 +45,20 @@ def stopping_distribution(lambdas: np.ndarray) -> np.ndarray:
 
 
 def geometric_prior(n_steps: int, p_stop: float) -> np.ndarray:
-    """Truncated geometric prior over ``n_steps``, renormalized to sum to 1."""
+    """Geometric stop prior with the remaining mass forced onto the last step.
+
+    The model's stopping distribution always stops at its final budgeted step.
+    Conditioning an infinite geometric distribution on stopping *before* that
+    step would describe a different process and bias the KL toward early stops.
+    """
+    if n_steps < 1:
+        raise HaltingError("n_steps must be positive")
     if not 0.0 < p_stop <= 1.0:
         raise HaltingError("p_stop must lie in (0, 1]")
     r = np.arange(n_steps, dtype=np.float64)
     prior = p_stop * (1.0 - p_stop) ** r
-    total = prior.sum()
-    if total <= 0:
-        raise HaltingError("degenerate prior")
-    return prior / total
+    prior[-1] = (1.0 - p_stop) ** (n_steps - 1)
+    return prior
 
 
 def kl_divergence(p: np.ndarray, q: np.ndarray, eps: float = 1e-12) -> float:

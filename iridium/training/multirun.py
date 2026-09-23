@@ -402,9 +402,11 @@ def _process_worker(fn, kwargs, log_path, result_path, device, memory_fraction) 
             # cannot starve its co-located siblings; it does not reserve
             # memory, it only refuses to let this process exceed the slice.
             torch.cuda.set_per_process_memory_fraction(memory_fraction, device=device)
-        t0 = time.time()
+        t0 = time.perf_counter_ns()
         result = fn(**kwargs)
-        elapsed = time.time() - t0
+        # Wall-clock time.time() can return the same tick for a short run on
+        # Windows, making a successful worker disappear from throughput.
+        elapsed = max(time.perf_counter_ns() - t0, 1) / 1e9
         payload = {"ok": True, "result": result, "elapsed": elapsed, "error": None}
     except BaseException as exc:  # noqa: BLE001 - report every failure mode, then exit clean
         payload = {

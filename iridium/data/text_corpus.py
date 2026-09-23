@@ -352,17 +352,18 @@ def collect_documents(
     opening the next keeps exactly one connection live, and shuffling at the
     end recovers the interleaving that mattered.
 
-    The quota per source is exact (``round(weight * n_docs)``), so the realised
+    The quota per source uses largest-remainder allocation, so the realised
     mixture matches the requested one rather than approaching it in
     expectation. A source that runs dry short of its quota is reported by
     :func:`realised_mixture` rather than silently backfilled from elsewhere.
     """
+    from ..training.datasets import allocate_mixture
+
     mix = mix or DEFAULT_MIX
-    total = sum(mix.values())
+    quotas = allocate_mixture(n_docs, mix)
     rng = np.random.default_rng(seed)
     out: list[tuple[str, str]] = []
-    for i, (key, weight) in enumerate(sorted(mix.items())):
-        quota = int(round(n_docs * weight / total))
+    for i, (key, quota) in enumerate(sorted(quotas.items())):
         if quota <= 0:
             continue
         for doc in stream_documents(key, limit=quota, seed=seed + i):
@@ -600,13 +601,14 @@ def text_items(
     from ..codecs.spans import Sample, Span, text_span
     from ..training.tasks import Item, control_span, BOS, EOS
 
+    from ..training.datasets import allocate_mixture
+
     mix = mix or DEFAULT_MIX
-    total = sum(mix.values())
+    quotas = allocate_mixture(n_items, mix)
     rng = np.random.default_rng(seed)
     items = []
 
-    for i, (key, weight) in enumerate(sorted(mix.items())):
-        quota = int(round(n_items * weight / total))
+    for i, (key, quota) in enumerate(sorted(quotas.items())):
         if quota <= 0:
             continue
         seen_hashes: set = set()

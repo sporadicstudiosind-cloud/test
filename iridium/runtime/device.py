@@ -25,8 +25,9 @@ differences worth handling are these:
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Optional
+from typing import ContextManager, Optional
 
 import torch
 
@@ -39,50 +40,115 @@ class DeviceInfo:
     bf16: bool
     total_memory_gb: float
     detail: str
+    precision: str = "fp32"  # fp32 | bf16 | fp16; selected for inference
 
     @property
     def dtype(self) -> torch.dtype:
-        return torch.bfloat16 if self.bf16 else torch.float32
+        return {
+            "bf16": torch.bfloat16,
+            "fp16": torch.float16,
+            "fp32": torch.float32,
+        }[self.precision]
 
     def describe(self) -> str:
         mem = f", {self.total_memory_gb:.1f} GB" if self.total_memory_gb else ""
         return (f"{self.backend}: {self.name}{mem}, "
-                f"autocast dtype {'bfloat16' if self.bf16 else 'float32'}"
+                f"inference dtype {self.precision}"
                 + (f" ({self.detail})" if self.detail else ""))
 
 
-def detect(prefer: Optional[str] = None) -> DeviceInfo:
-    if prefer == "cpu":
+def detect(prefer: Optional[str] = None, precision: Optional[str] = None) -> DeviceInfo:
+    """Select a real torch device and a conservative inference precision.
+
+    ``torch.device('rocm')`` is invalid even in a ROCm build: HIP deliberately
+    uses ``cuda`` device strings.  Accepting ``rocm`` here is only a friendly
+    spelling for an environment variable, not a different PyTorch backend.
+    An explicit unavailable accelerator raises with diagnostics instead of
+    quietly falling back to CPU and making a GPU deployment look successful.
+    """
+    preferred = (prefer or "auto").strip().lower()
+    if preferred in ("", "auto"):
+        preferred = "auto"
+    if preferred in ("rocm", "hip"):
+        preferred = "cuda"
+    if preferred == "cpu":
+        if precision not in (None, "auto", "fp32", "float32"):
+            raise RuntimeError("CPU inference supports fp32 only")
         return _cpu()
-    if torch.cuda.is_available():
+    if preferred.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError(
+            "IRIDIUM_DEVICE requested CUDA/ROCm but torch.cuda.is_available() is false. "
+            "Install a matching ROCm PyTorch wheel, expose /dev/kfd and /dev/dri "
+            "to the container, then run `python -m iridium.runtime.device`."
+        )
+    if torch.cuda.is_available() and (preferred in ("auto", "cuda") or preferred.startswith("cuda:")):
+        try:
+            index = 0 if preferred in ("auto", "cuda") else int(preferred.split(":", 1)[1])
+            if index < 0 or (preferred not in ("auto", "cuda")
+                             and index >= torch.cuda.device_count()):
+                raise ValueError
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Invalid IRIDIUM_DEVICE={prefer!r}; available CUDA/HIP devices: "
+                f"0..{torch.cuda.device_count() - 1}"
+            ) from exc
         is_rocm = torch.version.hip is not None
-        props = torch.cuda.get_device_properties(0)
-        name = torch.cuda.get_device_name(0)
+        props = torch.cuda.get_device_properties(index)
+        name = torch.cuda.get_device_name(index)
         memory = props.total_memory / 1e9
+        device_name = "cuda" if index == 0 else f"cuda:{index}"
         if is_rocm:
             arch = getattr(props, "gcnArchName", "") or ""
-            # CDNA (gfx90a/gfx942) and RDNA3 (gfx11xx) carry bf16; older RDNA
-            # does not, and fp16 is not a safe substitute for a routed model.
-            bf16 = any(t in arch for t in ("gfx90a", "gfx94", "gfx110", "gfx112", "gfx115"))
-            if not bf16:
-                bf16 = bool(torch.cuda.is_bf16_supported())
-            return DeviceInfo("cuda", "rocm", name, bf16, memory,
-                              f"HIP {torch.version.hip}, arch {arch or 'unknown'}")
+            known_bf16 = any(tag in arch for tag in
+                             ("gfx90a", "gfx94", "gfx110", "gfx112", "gfx115"))
+            bf16 = known_bf16 or bool(torch.cuda.is_bf16_supported())
+            selected = _select_precision(precision, bf16)
+            return DeviceInfo(device_name, "rocm", name, bf16, memory,
+                              f"HIP {torch.version.hip}, arch {arch or 'unknown'}", selected)
         major = props.major
-        return DeviceInfo("cuda", "cuda", name, major >= 8, memory,
-                          f"CUDA {torch.version.cuda}, sm_{major}{props.minor}")
+        bf16 = major >= 8
+        selected = _select_precision(precision, bf16)
+        return DeviceInfo(device_name, "cuda", name, bf16, memory,
+                          f"CUDA {torch.version.cuda}, sm_{major}{props.minor}", selected)
+    if preferred not in ("auto", "mps"):
+        raise RuntimeError(f"Unsupported IRIDIUM_DEVICE={prefer!r}; use auto, cpu, cuda[:N], rocm, or mps")
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         # MPS has no bf16 autocast and no complex FFT; the spectral blocks fall
         # back to CPU there, which is slower than just staying on CPU.
         return DeviceInfo("mps", "mps", "Apple GPU", False, 0.0,
-                          "spectral blocks are unsupported on MPS")
+                          "spectral blocks are unsupported on MPS", "fp32")
     return _cpu()
 
 
 def _cpu() -> DeviceInfo:
     import os
     return DeviceInfo("cpu", "cpu", "CPU", False, 0.0,
-                      f"{os.cpu_count()} threads available")
+                      f"{os.cpu_count()} threads available", "fp32")
+
+
+def _select_precision(requested: Optional[str], bf16: bool) -> str:
+    requested = (requested or "auto").strip().lower()
+    aliases = {"float32": "fp32", "bfloat16": "bf16", "float16": "fp16"}
+    requested = aliases.get(requested, requested)
+    if requested == "auto":
+        return "bf16" if bf16 else "fp32"
+    if requested not in ("fp32", "bf16", "fp16"):
+        raise RuntimeError("IRIDIUM_INFERENCE_DTYPE must be auto, fp32, bf16, or fp16")
+    if requested == "bf16" and not bf16:
+        raise RuntimeError("bf16 was requested but this PyTorch device reports no bf16 support")
+    return requested
+
+
+def inference_autocast(info: DeviceInfo) -> ContextManager:
+    """Return the correct inference autocast context, or a no-op for fp32.
+
+    Keep weights in fp32 when loading a checkpoint.  Autocast supplies the
+    reduced precision kernels without permanently converting norms, routers,
+    or a user's checkpoint to half precision.
+    """
+    if info.precision == "fp32":
+        return nullcontext()
+    return torch.autocast(device_type=torch.device(info.device).type, dtype=info.dtype)
 
 
 def generator_for(device: str | torch.device, seed: int) -> torch.Generator:

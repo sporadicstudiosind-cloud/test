@@ -283,9 +283,15 @@ def stopping_distribution(halt_prob: torch.Tensor, dim: int = -1) -> torch.Tenso
 def geometric_prior(
     n_steps: int, p_stop: float, device=None, dtype=torch.float32
 ) -> torch.Tensor:
+    """Geometric stop prior with the last budgeted step absorbing the tail."""
+    if n_steps < 1:
+        raise ValueError("n_steps must be positive")
+    if not 0.0 < p_stop <= 1.0:
+        raise ValueError("p_stop must lie in (0, 1]")
     r = torch.arange(n_steps, device=device, dtype=dtype)
     prior = p_stop * (1.0 - p_stop) ** r
-    return prior / prior.sum()
+    prior[-1] = (1.0 - p_stop) ** (n_steps - 1)
+    return prior
 
 
 def ponder_kl(p: torch.Tensor, prior: torch.Tensor, dim: int = -1) -> torch.Tensor:

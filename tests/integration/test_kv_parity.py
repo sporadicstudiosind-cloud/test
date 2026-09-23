@@ -58,7 +58,8 @@ def mixed_batch(seed=0, n=2):
         rng = np.random.default_rng(seed + i)
         samples.append(Sample([
             text_span("abc"),
-            Span("field", rng.normal(size=(4, dims["field"])), grid=(2, 2)),
+            Span("field", rng.normal(size=(4, dims["field"])), grid=(2, 2),
+                 supervised=False, observed=True),
             text_span("defg"),
         ]))
     return TensorBatch(collate(samples, dims), dtype=torch.float64)
@@ -106,6 +107,29 @@ def test_splitting_a_field_span_across_chunks_changes_the_answer(model):
         reference = model(batch, n_loops=1).hidden
         naive = run_chunked(model, batch, chunk=1, n_loops=1)
     assert not torch.allclose(reference, naive, atol=1e-6)
+
+
+def test_supervised_field_future_cannot_change_earlier_hidden_states(model):
+    dims = continuous_dims(get_config("tiny").codecs)
+    target = np.zeros((4, dims["field"]), dtype=np.float64)
+
+    def batch_for(payload):
+        sample = Sample([
+            text_span("abc", supervised=False),
+            Span("field", payload, grid=(2, 2), supervised=True),
+            text_span("done"),
+        ])
+        return TensorBatch(collate([sample], dims), dtype=torch.float64)
+
+    altered = target.copy()
+    altered[-1] = 100.0
+    with torch.no_grad():
+        before = model(batch_for(target), n_loops=1).hidden
+        after = model(batch_for(altered), n_loops=1).hidden
+    # The first field patch predicts the next one. It cannot inspect the last
+    # target patch through atomic routing or a bidirectional spectral block.
+    torch.testing.assert_close(before[:, :4], after[:, :4], atol=0, rtol=0)
+    assert not torch.equal(before[:, -1], after[:, -1])
 
 
 def test_atomic_chunks_never_split_a_grid(model):

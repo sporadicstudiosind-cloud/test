@@ -57,7 +57,16 @@ def test_invalid_lambdas_rejected():
 def test_geometric_prior_normalized():
     prior = geometric_prior(8, 0.25)
     assert prior.sum() == pytest.approx(1.0)
-    assert np.all(np.diff(prior) < 0)          # decreasing
+    assert prior[0] == pytest.approx(0.25)
+    assert prior[-1] == pytest.approx(0.75 ** 7)
+
+
+def test_geometric_prior_matches_forced_final_stop():
+    prior = geometric_prior(3, 0.25)
+    np.testing.assert_allclose(prior, [0.25, 0.1875, 0.5625])
+    np.testing.assert_allclose(geometric_prior(1, 0.25), [1.0])
+    with pytest.raises(HaltingError, match="positive"):
+        geometric_prior(0, 0.25)
 
 
 def test_kl_is_zero_for_identical_distributions():

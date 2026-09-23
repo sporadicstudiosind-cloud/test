@@ -21,7 +21,7 @@ most common way a small chat model ends up interviewing itself.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, Optional, Sequence
+from typing import Optional, Sequence
 
 from ..codecs.spans import Sample, Span, text_span
 
@@ -144,21 +144,18 @@ class ChatSession:
     def history(self) -> list[tuple[str, str]]:
         return [(t.role, t.text) for t in self.turns]
 
-    def _budget(self) -> int:
+    def _budget(self, max_new_tokens: Optional[int] = None) -> int:
         cfg = self.model.cfg
-        # Leave room for the reply and the role markers around it.
-        return max(64, cfg.max_seq_len - self.max_new_tokens - 8)
+        # Leave room for the reply, BOS and the open ASSISTANT marker. The
+        # per-turn cost in fit_to_budget includes the remaining role markers.
+        reply_tokens = self.max_new_tokens if max_new_tokens is None else max_new_tokens
+        return cfg.max_seq_len - reply_tokens - 2
 
     # -- the actual exchange ----------------------------------------------
 
     def send(self, message: str, **overrides) -> str:
         """Append a user message, generate a reply, append and return it."""
         from .generate import generate
-
-        self.turns.append(Turn("user", message))
-        context = fit_to_budget(self.turns, self._budget())
-        sample = conversation_sample(context, supervise_assistant=False,
-                                     open_for_reply=True)
 
         params = dict(
             max_new_tokens=self.max_new_tokens,
@@ -173,7 +170,32 @@ class ChatSession:
             text_only=True,
         )
         params.update(overrides)
+
+        max_new_tokens = params["max_new_tokens"]
+        if not isinstance(max_new_tokens, int) or max_new_tokens < 1:
+            raise ValueError("max_new_tokens must be a positive integer")
+        max_seq_len = self.model.cfg.max_seq_len
+        message_bytes = len(message.encode("utf-8"))
+        if message_bytes + max_new_tokens + 3 > max_seq_len:
+            raise ValueError(
+                f"message is {message_bytes} UTF-8 bytes; at most "
+                f"{max(0, max_seq_len - max_new_tokens - 3)} fit with the "
+                f"requested {max_new_tokens}-token reply budget"
+            )
+
+        # A failed generation or an oversize message must not corrupt history.
+        candidate = [*self.turns, Turn("user", message)]
+        context = fit_to_budget(candidate, self._budget(max_new_tokens))
+        # Budgeting can discard a user turn but retain its following assistant
+        # turn. Do not prompt the model with an orphaned assistant response.
+        while context and context[0].role == "assistant":
+            context = context[1:]
+        sample = conversation_sample(context, supervise_assistant=False,
+                                     open_for_reply=True)
+        if len(sample) + max_new_tokens > max_seq_len:
+            raise ValueError("conversation exceeds the model context window")
         reply = generate(self.model, sample, **params).text.strip()
+        self.seed += 1  # Change sampling even if the model ends a turn blank.
 
         if not reply:
             # An untrained or barely-trained model ends its turn immediately.
@@ -182,11 +204,9 @@ class ChatSession:
             reply = ("(no output — the model ended its turn immediately. That is "
                      "what an undertrained model does; train for more steps, or "
                      "raise CHAT_WEIGHT so more of the corpus is conversation.)")
-            self.turns.pop()    # don't poison the history with the explanation
             return reply
 
-        self.seed += 1          # so a repeated question is not a repeated answer
-        self.turns.append(Turn("assistant", reply))
+        self.turns = [*candidate, Turn("assistant", reply)]
         return reply
 
     def transcript(self) -> str:

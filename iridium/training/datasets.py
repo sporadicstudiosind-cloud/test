@@ -53,6 +53,22 @@ OMNI_MIXTURE: dict[str, float] = {
 }
 
 
+def allocate_mixture(n_items: int, mixture: dict[str, float]) -> dict[str, int]:
+    """Allocate an exact item budget with deterministic largest remainders."""
+    if n_items < 1 or not mixture or any(
+        not np.isfinite(weight) or weight < 0 for weight in mixture.values()
+    ) or sum(mixture.values()) <= 0:
+        raise ValueError("positive item count and nonnegative finite mixture weights required")
+    names = sorted(name for name, weight in mixture.items() if weight > 0)
+    total = float(sum(mixture.values()))
+    ideal = {name: n_items * mixture[name] / total for name in names}
+    counts = {name: int(np.floor(ideal[name])) for name in names}
+    remainder = n_items - sum(counts.values())
+    for name in sorted(names, key=lambda key: (-(ideal[key] - counts[key]), key))[:remainder]:
+        counts[name] += 1
+    return counts
+
+
 @dataclass
 class Corpus:
     items: list[Item]

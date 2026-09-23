@@ -28,10 +28,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ..agency.actions import Action, Op, actions_to_span_payload
+from ..agency.actions import Action, Op, OPERAND_ARITY, actions_to_span_payload
 from ..agency.scene import Goal, SceneEditor
-from ..codecs.bank import TensorBatch
-from ..runtime.device import device_of, continuous_dims
+from ..codecs.bank import TensorBatch, continuous_dims
+from ..runtime.device import device_of
 from ..codecs.spans import MODALITY_INDEX, Sample, Span, collate
 from .tasks import Item, control_span
 from .trainer import load_checkpoint
@@ -108,7 +108,15 @@ def action_logprob(model, batch: TensorBatch, n_loops: int = 1) -> torch.Tensor:
     ).view_as(mask)
     # Operands are continuous: a Gaussian log-density with unit scale keeps the
     # two halves of an action on one comparable scale.
-    operand_ll = -0.5 * (scalars - batch.scalars[:, 1:]).pow(2).sum(-1)
+    arities = torch.tensor(
+        [OPERAND_ARITY.get(index, scalars.shape[-1])
+         for index in range(op_logits.shape[-1])], device=scalars.device,
+    )
+    used = torch.arange(scalars.shape[-1], device=scalars.device) < arities[
+        target.clamp(0, len(arities) - 1)
+    ].unsqueeze(-1)
+    operand_ll = -0.5 * ((scalars.float() - batch.scalars[:, 1:].float()).square()
+                         * used).sum(-1)
     return ((logp + operand_ll) * mask).sum()
 
 

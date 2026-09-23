@@ -8,6 +8,11 @@ import sys
 from pathlib import Path
 
 
+_DEFAULT_CHAT_CHECKPOINT = (
+    Path(__file__).resolve().parents[1] / "serve" / "weights" / "nano-phase1-fp16.pt"
+)
+
+
 def cmd_ladder(args) -> int:
     from .config import ladder_table
     print(ladder_table())
@@ -135,6 +140,149 @@ def cmd_generate(args) -> int:
     return 0
 
 
+def _load_chat_checkpoint(path: Path, device: str):
+    """Load inference weights without executing arbitrary checkpoint pickles.
+
+    The bundled phase-1 checkpoint serialised ``torch.__version__`` as a
+    ``TorchVersion`` value. It is the only extra type accepted here. Training
+    resume checkpoints with optimizer/RNG objects should be exported as an
+    inference-only state_dict + plain manifest before being used for chat.
+    """
+    import torch
+    from torch.serialization import safe_globals
+    from torch.torch_version import TorchVersion
+
+    from .config import IridiumConfig
+    from .model.iridium1 import Iridium1
+    from .runtime.checkpoint_compat import load_compatible
+
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"checkpoint not found: {path}. Train/export a chat checkpoint or "
+            "use the bundled serve/weights/nano-phase1-fp16.pt"
+        )
+    try:
+        with safe_globals([TorchVersion]):
+            blob = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as exc:
+        raise ValueError(
+            f"cannot safely load {path}; chat requires an inference checkpoint "
+            "containing only a state_dict and plain manifest"
+        ) from exc
+    if not isinstance(blob, dict) or not isinstance(blob.get("manifest"), dict) \
+            or not isinstance(blob.get("state_dict"), dict):
+        raise ValueError("checkpoint must contain a state_dict and manifest dict")
+    manifest = blob["manifest"]
+    if not isinstance(manifest.get("model_config"), dict):
+        raise ValueError("checkpoint manifest is missing model_config")
+    cfg = IridiumConfig.from_dict(manifest["model_config"])
+    model = Iridium1(cfg)
+    report = load_compatible(model, blob["state_dict"])
+    if not report.exact:
+        print(f"Checkpoint compatibility: {report.summary()}", file=sys.stderr)
+    model.to(device).eval()
+    return model, manifest
+
+
+def _chat_status(model, manifest: dict, path: Path, device_info) -> None:
+    current_params = sum(p.numel() for p in model.parameters())
+    trained_params = (manifest.get("parameters") or {}).get("total")
+    print(f"Model: {model.cfg.name} ({current_params:,} runtime parameters)")
+    if isinstance(trained_params, int) and trained_params != current_params:
+        print(f"Checkpoint recorded {trained_params:,} trained parameters")
+    print(f"Checkpoint: {path}")
+    print(f"Device: {device_info.describe()}")
+    completed = manifest.get("completed_steps")
+    configured = (manifest.get("train_config") or {}).get("steps")
+    if isinstance(completed, int) and completed > 0:
+        print(f"Training recorded: {completed:,} completed steps")
+    elif isinstance(configured, int) and configured > 0:
+        print(f"Training configured: {configured:,} steps; completion not recorded")
+    else:
+        print("Training steps: not recorded")
+    scores = ((manifest.get("evaluation") or {}).get("interpolation") or {})
+    graded = [r for r in scores.values() if isinstance(r, dict)
+              and isinstance(r.get("accuracy"), (int, float))
+              and isinstance(r.get("baseline"), (int, float))]
+    if graded:
+        above = sum(r["accuracy"] > r["baseline"] for r in graded)
+        print(f"Recorded tasks above baseline: {above}/{len(graded)}; these are not chat benchmarks")
+    print("Chat replies are experimental; conversational quality is not established.")
+
+
+def _terminal_text(value: str) -> str:
+    """Make arbitrary byte-model output safe for a terminal's text encoding."""
+    visible = "".join(
+        ch if ch in "\n\t" or ch.isprintable() else f"\\u{ord(ch):04x}"
+        for ch in value
+    )
+    encoding = sys.stdout.encoding or "utf-8"
+    return visible.encode(encoding, errors="backslashreplace").decode(encoding)
+
+
+def cmd_chat(args) -> int:
+    """Chat with an actual small checkpoint, with honest provenance and limits."""
+    from .runtime.chat import ChatSession
+    from .runtime.device import detect, inference_autocast
+
+    if args.max_new_tokens < 1 or args.n_loops is not None and args.n_loops < 1:
+        print("reply and loop budgets must be positive", file=sys.stderr)
+        return 2
+    if args.temperature < 0 or not 0 <= args.top_p <= 1 or args.top_k < 0:
+        print("temperature/top-k must be nonnegative and top-p must be in [0, 1]",
+              file=sys.stderr)
+        return 2
+    path = Path(args.checkpoint).expanduser().resolve()
+    try:
+        info = detect(args.device, args.precision)
+        model, manifest = _load_chat_checkpoint(path, info.device)
+    except (OSError, ValueError, RuntimeError, KeyError) as exc:
+        print(f"chat: {exc}", file=sys.stderr)
+        return 2
+
+    trained_loops = (manifest.get("train_config") or {}).get("n_loops")
+    loops = args.n_loops if args.n_loops is not None else trained_loops
+    session = ChatSession(
+        model, system=args.system, temperature=args.temperature, top_p=args.top_p,
+        top_k=args.top_k, max_new_tokens=args.max_new_tokens, n_loops=loops,
+        seed=args.seed,
+    )
+    _chat_status(model, manifest, path, info)
+
+    def reply_to(message: str) -> bool:
+        try:
+            with inference_autocast(info):
+                reply = session.send(message)
+        except ValueError as exc:
+            print(f"chat: {exc}", file=sys.stderr)
+            return False
+        print(f"iridium> {_terminal_text(reply)}")
+        return True
+
+    if args.prompt is not None:
+        return 0 if reply_to(args.prompt) else 2
+
+    print("Type /help for commands; /exit or Ctrl-D to leave.")
+    while True:
+        try:
+            message = input("you> ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not message.strip():
+            continue
+        if message.strip() in ("/exit", "/quit"):
+            return 0
+        if message.strip() == "/reset":
+            session.reset()
+            print("Conversation reset.")
+            continue
+        if message.strip() == "/help":
+            print("/reset clears the conversation; /exit quits.")
+            continue
+        reply_to(message)
+
+
 def cmd_evaluate(args) -> int:
     from .evaluation.harness import evaluate
     from .training.datasets import build_corpus
@@ -209,6 +357,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-new-tokens", type=int, default=16)
     p.add_argument("--temperature", type=float, default=0.0)
     p.set_defaults(func=cmd_generate)
+
+    p = sub.add_parser("chat", help="chat with the bundled small checkpoint or your own")
+    p.add_argument("--checkpoint", default=str(_DEFAULT_CHAT_CHECKPOINT))
+    p.add_argument("--prompt", help="send one prompt and exit; omit for interactive chat")
+    p.add_argument("--device", default="auto", help="auto, cpu, cuda[:N], rocm, or mps")
+    p.add_argument("--precision", default="auto", choices=("auto", "fp32", "bf16", "fp16"))
+    p.add_argument("--max-new-tokens", type=int, default=96)
+    p.add_argument("--temperature", type=float, default=0.8)
+    p.add_argument("--top-p", type=float, default=0.92)
+    p.add_argument("--top-k", type=int, default=0)
+    p.add_argument("--n-loops", type=int, help="default: loop count recorded by the checkpoint")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--system", default=None, help="optional system message")
+    p.set_defaults(func=cmd_chat)
 
     p = sub.add_parser("evaluate", help="graded accuracy on held-out splits")
     p.add_argument("checkpoint")

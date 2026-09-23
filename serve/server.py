@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 import traceback
@@ -30,11 +31,17 @@ from urllib.parse import parse_qs, urlparse
 
 import torch
 
+# Allow ``python serve/server.py`` from a checkout without requiring PYTHONPATH.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from iridium.codecs.spans import Sample, quantity_span, text_span
 from iridium.config import IridiumConfig, get_config
 from iridium.model.iridium1 import Iridium1
 from iridium.runtime import backend as backend_module
-from iridium.runtime.device import detect as detect_device, device_of
+from iridium.runtime.chat import STOP_IDS, Turn, conversation_sample, fit_to_budget
+from iridium.runtime.device import (detect as detect_device, device_of,
+                                    inference_autocast)
 from iridium.runtime.generate import generate
 
 ROOT = Path(__file__).resolve().parent
@@ -43,6 +50,7 @@ REPO = ROOT.parent
 
 MAX_PROMPT = 2000
 MAX_NEW_TOKENS = 64
+MAX_HISTORY_TURNS = 20
 
 _lock = threading.Lock()
 _models: dict[str, dict] = {}
@@ -55,16 +63,13 @@ _models: dict[str, dict] = {}
 # The shipped checkpoint is stored fp16 (66 MB) so it fits under GitHub's
 # 100 MB per-file limit; it is cast back to fp32 on load. A local full-precision
 # run is preferred when present.
-CHECKPOINT_CANDIDATES = [
-    os.environ.get("IRIDIUM_CHECKPOINT", ""),
-    "runs/phase1/phase1-final.pt",
-    "serve/weights/nano-phase1-fp16.pt",
-]
-CHECKPOINT = next(
-    (c for c in CHECKPOINT_CANDIDATES if c and (REPO / c).exists()),
+CHECKPOINT_OVERRIDE = os.environ.get("IRIDIUM_CHECKPOINT", "")
+CHECKPOINT = CHECKPOINT_OVERRIDE or next(
+    (c for c in ("runs/phase1/phase1-final.pt", "serve/weights/nano-phase1-fp16.pt")
+     if (REPO / c).exists()),
     "serve/weights/nano-phase1-fp16.pt",
 )
-ENABLE_1B = os.environ.get("IRIDIUM_ENABLE_1B", "1") not in ("0", "false", "")
+ENABLE_1B = os.environ.get("IRIDIUM_ENABLE_1B", "0") not in ("0", "false", "")
 
 CATALOG = {
     "nano-trained": {
@@ -158,7 +163,9 @@ def load(name: str) -> dict:
     started = time.time()
     ckpt = spec["checkpoint"]
     if ckpt and (REPO / ckpt).exists():
-        blob = torch.load(REPO / ckpt, map_location="cpu", weights_only=False)
+        # Load tensors and plain metadata without unpickling checkpoint code.
+        with torch.serialization.safe_globals([torch.torch_version.TorchVersion]):
+            blob = torch.load(REPO / ckpt, map_location="cpu", weights_only=True)
         manifest = blob["manifest"]
         model = Iridium1(IridiumConfig.from_dict(manifest["model_config"]))
         # Named, per-key compatibility rather than strict=True (which has refused
@@ -166,15 +173,27 @@ def load(name: str) -> dict:
         # (which would also accept a missing attention projection). See
         # iridium/runtime/checkpoint_compat.py.
         from iridium.runtime.checkpoint_compat import load_compatible
-        compat = load_compatible(model, {k: v.float() for k, v in blob["state_dict"].items()})
+        # Checkpoints may be stored fp16 to fit in a release artifact.  Expand
+        # only real floating tensors on CPU: casting every tensor with .float()
+        # corrupts complex tensors and changes non-floating state unnecessarily.
+        state_dict = {
+            k: (v.to(dtype=torch.float32) if v.is_floating_point() else v)
+            for k, v in blob["state_dict"].items()
+        }
+        compat = load_compatible(model, state_dict)
         source = f"checkpoint {ckpt} ({compat.summary()})"
+        compatibility_caveat = "" if compat.exact else f" {compat.summary()}."
+    elif ckpt is not None:
+        raise FileNotFoundError(f"Required model checkpoint does not exist: {REPO / ckpt}")
     else:
         torch.manual_seed(0)
         model = Iridium1(get_config(spec["rung"]))
         manifest = {}
         source = "random initialisation"
+        compatibility_caveat = ""
     model.eval()
-    info = detect_device(os.environ.get("IRIDIUM_DEVICE"))
+    info = detect_device(os.environ.get("IRIDIUM_DEVICE"),
+                         os.environ.get("IRIDIUM_INFERENCE_DTYPE"))
     model = model.to(info.device)
     cfg = model.cfg
     entry = {
@@ -183,13 +202,16 @@ def load(name: str) -> dict:
         "cfg": cfg,
         "source": source,
         "label": describe_label(cfg, spec, manifest),
-        "caveat": describe_caveat(spec, manifest),
+        "caveat": describe_caveat(spec, manifest) + compatibility_caveat,
         "load_seconds": time.time() - started,
         "parameters": sum(p.numel() for p in model.parameters()),
+        "trained": bool((manifest.get("train_config") or {}).get("steps")),
         "specializations": list(cfg.stacks.specializations),
         "device": info.describe(),
+        "device_info": info,
+        "inference_dtype": info.precision,
         **{k: v for k, v in spec.items()
-           if k not in ("checkpoint", "label", "caveat")},
+           if k not in ("checkpoint", "label", "caveat", "trained")},
     }
     _models[name] = entry
     print(f"[iridium] loaded {name}: {entry['parameters']:,} params from {source} "
@@ -390,19 +412,50 @@ def run_query(prompt: str, model_name: str, loops: int) -> dict:
     }
 
 
+def parse_chat_history(value) -> list[Turn]:
+    """Validate client-provided prior turns; the current prompt is sent separately."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > MAX_HISTORY_TURNS:
+        raise ValueError(f"history must be a list of at most {MAX_HISTORY_TURNS} turns")
+    if len(value) % 2:
+        raise ValueError("history must contain complete user/assistant pairs")
+    turns = []
+    for index, item in enumerate(value):
+        role = "user" if index % 2 == 0 else "assistant"
+        if not isinstance(item, dict) or item.get("role") != role:
+            raise ValueError("history must alternate user and assistant turns")
+        content = item.get("text")
+        if not isinstance(content, str) or len(content) > MAX_PROMPT:
+            raise ValueError(f"history text must contain at most {MAX_PROMPT} characters")
+        turns.append(Turn(item["role"], content))
+    return turns
+
+
 @torch.no_grad()
 def run_chat(prompt: str, model_name: str, max_new_tokens: int,
-             temperature: float, loops: int) -> dict:
+             temperature: float, loops: int,
+             history: list[Turn] | None = None) -> dict:
     entry = load(model_name)
     model, cfg = entry["model"], entry["cfg"]
     loops = max(1, min(int(loops), cfg.router.max_loops))
     max_new_tokens = max(1, min(int(max_new_tokens), MAX_NEW_TOKENS))
 
-    sample = Sample([text_span(prompt[:MAX_PROMPT], offset=16)])
+    turns = [*(history or []), Turn("user", prompt[:MAX_PROMPT])]
+    context_budget = cfg.max_seq_len - max_new_tokens - 2
+    context = fit_to_budget(turns, context_budget)
+    while context and context[0].role == "assistant":
+        context = context[1:]
+    sample = conversation_sample(context, supervise_assistant=False,
+                                 open_for_reply=True)
+    if len(sample) + max_new_tokens > cfg.max_seq_len:
+        raise ValueError("current message exceeds the model context; shorten it")
     t0 = time.time()
-    out = generate(model, sample, max_new_tokens=max_new_tokens,
-                   temperature=float(temperature), n_loops=loops,
-                   seed=int(time.time() * 1000) % (1 << 30))
+    with inference_autocast(entry["device_info"]):
+        out = generate(model, sample, max_new_tokens=max_new_tokens,
+                       temperature=float(temperature), top_p=0.92, n_loops=loops,
+                       text_only=True, stop_ids=STOP_IDS,
+                       seed=int(time.time() * 1000) % (1 << 30))
     gen_seconds = time.time() - t0
 
     # A second, non-sampling pass over the prompt to read the routing telemetry.
@@ -534,9 +587,15 @@ class Handler(BaseHTTPRequestHandler):
         prompt = str(payload.get("prompt", "")).strip()
         if not prompt:
             return self._json(400, {"error": "prompt is required"})
+        if len(prompt) > MAX_PROMPT:
+            return self._json(400, {"error": f"prompt exceeds {MAX_PROMPT} characters"})
         name = payload.get("model", "nano-trained")
         if name not in CATALOG or (name == "test1b-untrained" and not ENABLE_1B):
             return self._json(400, {"error": f"unknown model {name!r}"})
+        try:
+            history = parse_chat_history(payload.get("history")) if route == "/api/chat" else []
+        except ValueError as exc:
+            return self._json(400, {"error": str(exc)})
         try:
             with _lock:
                 if route == "/api/ask":
@@ -548,8 +607,11 @@ class Handler(BaseHTTPRequestHandler):
                     payload.get("max_new_tokens", 24),
                     payload.get("temperature", 0.8),
                     payload.get("loops", 1),
+                    history,
                 )
             return self._json(200, result)
+        except ValueError as exc:
+            return self._json(400, {"error": str(exc)})
         except Exception as exc:                       # pragma: no cover
             traceback.print_exc()
             return self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
@@ -559,7 +621,8 @@ def main() -> int:
     threads = int(os.environ.get("IRIDIUM_THREADS", "0")) or (os.cpu_count() or 2)
     torch.set_num_threads(threads)
     port = int(os.environ.get("PORT", "8080"))
-    info = detect_device(os.environ.get("IRIDIUM_DEVICE"))
+    info = detect_device(os.environ.get("IRIDIUM_DEVICE"),
+                         os.environ.get("IRIDIUM_INFERENCE_DTYPE"))
     print(f"[iridium] torch {torch.__version__}, {info.describe()}, "
           f"{threads} threads, port {port}", flush=True)
     if info.backend == "rocm":
@@ -568,10 +631,7 @@ def main() -> int:
         print(f"[iridium] ROCm: torch.compile {'ok' if compiled['available'] else 'unavailable'} "
               f"({compiled['detail']}), matmul precision: {caps['matmul_precision']}", flush=True)
     if os.environ.get("IRIDIUM_PRELOAD", "1") not in ("0", "false", ""):
-        try:
-            load("nano-trained")
-        except Exception:                              # pragma: no cover
-            traceback.print_exc()
+        load("nano-trained")
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"[iridium] listening on 0.0.0.0:{port}", flush=True)
     server.serve_forever()

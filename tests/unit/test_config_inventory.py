@@ -5,6 +5,8 @@ if the same formulae are exact where they *can* be checked, so these tests
 build the real torch modules at the small rungs and demand a delta of zero.
 """
 
+from dataclasses import replace
+
 import pytest
 import torch
 
@@ -12,7 +14,7 @@ from iridium.codecs.bank import CodecBank
 from iridium.config import LADDER, ConfigError, CoreConfig, SuperstackConfig, get_config
 from iridium.model.iridium1 import Iridium1
 from iridium.model.rope import RotaryEmbedding
-from iridium.model.superstack import SuperstackBank
+from iridium.model.superstack import SuperstackBank, SuperstackLayer
 
 SMALL = ("tiny", "nano")
 
@@ -43,6 +45,21 @@ def test_superstack_bank_matches_formula(rung):
     cfg = get_config(rung)
     bank = SuperstackBank(cfg, RotaryEmbedding(cfg.core.d_head))
     assert sum(p.numel() for p in bank.parameters()) == cfg.stacks.params
+
+
+@pytest.mark.parametrize("dims, shape", [(1, (6,)), (2, (2, 3)), (3, (2, 2, 2))])
+def test_spectral_rank_matches_config_and_parameter_formula(dims, shape):
+    base = get_config("tiny").stacks
+    cfg = replace(base, spectral_dims=dims)
+    layer = SuperstackLayer(cfg, RotaryEmbedding(cfg.d_head), bridge=False, spectral=True)
+    assert layer.spectral.spectral.dims == dims
+    assert sum(p.numel() for p in layer.spectral.parameters()) == cfg.params_per_spectral
+
+    x = torch.randn(1, 1 + torch.tensor(shape).prod().item(), cfg.d_model)
+    with torch.no_grad():
+        out = layer.spectral(x, [(0, 1, shape)])
+    assert out.shape == x.shape
+    assert torch.isfinite(out).all()
 
 
 @pytest.mark.parametrize("rung", SMALL)

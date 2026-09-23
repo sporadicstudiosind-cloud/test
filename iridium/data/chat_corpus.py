@@ -213,25 +213,28 @@ def chat_items(
 ):
     """Conversations as training items, supervised on the assistant only."""
     from ..runtime.chat import conversation_sample, fit_to_budget
+    from ..training.datasets import allocate_mixture
     from ..training.tasks import Item
-    from .text_corpus import in_split
+    from .text_corpus import SPLIT_SHARES, in_split
 
     mix = mix or DEFAULT_CHAT_MIX
-    total = sum(mix.values())
+    quotas = allocate_mixture(n_items, mix)
     items = []
-    for i, (key, weight) in enumerate(sorted(mix.items())):
-        quota = int(round(n_items * weight / total))
+    for i, (key, quota) in enumerate(sorted(quotas.items())):
         if quota <= 0:
             continue
         got = 0
-        # Generous: the split filter rejects most of what it sees for the
-        # smaller splits, and a conversation is cheap to skip.
-        budget = quota * 8 + 32
+        # The held-out splits receive only 10% of conversations. A fixed 8x
+        # allowance underfills even a modest evaluation request there.
+        lo, hi = SPLIT_SHARES.get(split, SPLIT_SHARES["train"])
+        budget = int(np.ceil(2 * quota * 100 / (hi - lo))) + 32
         for turns in CONVERSATION_LOADERS[key](limit=budget, seed=seed + i):
             joined = "\n".join(t.text for t in turns)
             if not in_split(joined, split):
                 continue
             turns = fit_to_budget(turns, max_bytes)
+            while turns and turns[0].role != "user":
+                turns = turns[1:]
             if len(turns) < 2 or turns[-1].role != "assistant":
                 continue
             items.append(Item(

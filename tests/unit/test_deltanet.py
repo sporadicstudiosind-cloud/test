@@ -176,7 +176,9 @@ def test_padding_rows_are_zero_and_do_not_leak():
 
     assert torch.equal(out[1, 4:], torch.zeros_like(out[1, 4:]))
     # Padding in sample 1 must not perturb sample 0's independent computation.
-    assert torch.equal(out[0], isolated[0])
+    # Different batch sizes can select different CPU convolution kernels and
+    # change the last few floating-point bits without cross-sample leakage.
+    torch.testing.assert_close(out[0], isolated[0], rtol=1e-5, atol=2e-7)
 
 
 @pytest.mark.parametrize("t", [512, 4096])

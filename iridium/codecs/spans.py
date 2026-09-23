@@ -128,17 +128,16 @@ class Span:
                     f"grid {self.grid} implies {n} tokens, span has {len(self)}"
                 )
         if self.atomic is None:
-            self.atomic = self.grid is not None and self.observed
-        if self.atomic and not self.observed:
+            self.atomic = self.grid is not None and self.observed and not self.supervised
+        if self.atomic and (not self.observed or self.supervised):
             # Span-coherent routing pools the router logits over the whole
             # span, which reads positions later than the token being routed.
-            # That is admissible only when every token of the span is already
-            # in the context. A span the model is *emitting* has no such
-            # guarantee, and routing it as a unit would be a causality
-            # violation dressed up as an optimization.
+            # This is safe only for an unsupervised observed input. Target
+            # patches are present under teacher forcing but are unavailable
+            # when the model emits them one by one.
             raise ValueError(
-                "atomic routing requires observed=True: pooling router logits "
-                "over a span that is still being generated is not causal"
+                "atomic routing requires observed=True and supervised=False: "
+                "pooling over an output target span is not causal"
             )
 
     def __len__(self) -> int:
@@ -252,7 +251,8 @@ def collate(
                         f"codec expects {dim}"
                     )
                 continuous[span.modality][i, sl] = payload
-                if span.modality == "field" and span.grid is not None and n == len(span):
+                if (span.modality == "field" and span.grid is not None
+                        and n == len(span) and span.observed and not span.supervised):
                     grids.append((i, cursor, tuple(span.grid)))
             elif span.modality == "action":
                 discrete[i, sl] = span.payload[:n, 0].astype(np.int64)

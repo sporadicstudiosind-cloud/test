@@ -7,7 +7,7 @@ it claims. A router that reads the future trains a policy that cannot be run.
 import pytest
 import torch
 
-from iridium.codecs.spans import Span
+from iridium.codecs.spans import Sample, Span, collate
 from iridium.config import get_config
 from iridium.model.router import (
     MacroRouter,
@@ -131,6 +131,26 @@ def test_span_pooling_requires_observed():
              observed=False, atomic=True)
 
 
+def test_supervised_grid_cannot_become_an_atomic_or_spectral_input():
+    import numpy as np
+
+    dims = get_config("tiny").codecs.continuous_dims()
+    payload = np.zeros((4, dims["field"]), dtype=np.float32)
+    target = Span("field", payload, grid=(2, 2), supervised=True)
+    assert target.atomic is False
+    batch = collate([Sample([target])], dims)
+    assert not (batch.span_id >= 0).any()
+    assert batch.grids == []
+
+    observed = Span("field", payload, grid=(2, 2), supervised=False)
+    context = collate([Sample([observed])], dims)
+    assert observed.atomic is True
+    assert (context.span_id >= 0).all()
+    assert context.grids == [(0, 0, (2, 2))]
+    with pytest.raises(ValueError, match="supervised=False"):
+        Span("field", payload, grid=(2, 2), supervised=True, atomic=True)
+
+
 def test_stopping_distribution_sums_to_one():
     lam = torch.rand(5, 9, dtype=torch.double)
     p = stopping_distribution(lam)
@@ -154,4 +174,16 @@ def test_torch_stopping_matches_the_numpy_contract():
 def test_geometric_prior_is_normalised():
     prior = geometric_prior(6, 0.3, dtype=torch.double)
     assert float(prior.sum()) == pytest.approx(1.0)
-    assert bool((prior[:-1] >= prior[1:]).all())
+    assert prior[0].item() == pytest.approx(0.3)
+    assert prior[-1].item() == pytest.approx(0.7 ** 5)
+
+
+def test_torch_geometric_prior_matches_numpy_stopping_contract():
+    from iridium.model.halting import geometric_prior as numpy_prior
+
+    for n_steps in (1, 2, 5):
+        for p_stop in (0.1, 0.4, 1.0):
+            got = geometric_prior(n_steps, p_stop, dtype=torch.double).numpy()
+            assert got == pytest.approx(numpy_prior(n_steps, p_stop))
+    with pytest.raises(ValueError, match="positive"):
+        geometric_prior(0, 0.4)

@@ -37,8 +37,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ..codecs.bank import TensorBatch
-from ..runtime.device import device_of, continuous_dims
+from ..codecs.bank import TensorBatch, continuous_dims
+from ..runtime.device import device_of
 from ..codecs.spans import MODALITY_INDEX, Sample, Span, collate
 from ..evaluation.harness import evaluate, prompt_only
 from ..runtime.generate import generate

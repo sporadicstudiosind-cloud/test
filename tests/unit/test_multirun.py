@@ -13,6 +13,7 @@ is to not lie about that either.
 
 from __future__ import annotations
 
+import multiprocessing
 import tempfile
 import threading
 import time
@@ -178,7 +179,8 @@ def test_run_processes_supervises_a_failing_child_without_killing_others():
         ]
         result = run_processes(
             runs, device="cpu", log_dir=Path(d), stagger=0.02,
-            mp_context="fork",  # fast + safe: CPU-only test, no CUDA context involved
+            mp_context=("fork" if "fork" in multiprocessing.get_all_start_methods()
+                        else "spawn"),
         )
         by_label = {o.label: o for o in result.outcomes}
         assert by_label["good_a"].ok is True
