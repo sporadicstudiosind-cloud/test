@@ -401,7 +401,15 @@ class Trainer:
             raise FloatingPointError("non-finite gradient; optimizer update cancelled")
         previous_scale = self.scaler.get_scale()
         try:
-            self.scaler.step(self.optimizer)
+            if torch.device(self.device).type == "xla":
+                # XLA tensors are lazy: optimizer_step applies the update *and*
+                # marks the graph boundary that executes the queued work. A plain
+                # optimizer.step() would keep growing one enormous graph. The
+                # GradScaler is disabled off fp16, so there is nothing to unscale.
+                import torch_xla.core.xla_model as xm
+                xm.optimizer_step(self.optimizer, barrier=True)
+            else:
+                self.scaler.step(self.optimizer)
         except torch.cuda.OutOfMemoryError as exc:
             raise RuntimeError("OOM during optimizer update; restart from last checkpoint with "
                                "a smaller model/optimizer. Retrying could double-update weights.") from exc
@@ -488,7 +496,8 @@ class Trainer:
         self.completed_steps = blob["completed_steps"]
         self.history = blob.get("history", [])
         torch.set_rng_state(blob["torch_rng"].cpu())
-        self.generator.set_state(blob["generator_rng"].cpu())
+        if self.generator is not None and blob.get("generator_rng") is not None:
+            self.generator.set_state(blob["generator_rng"].cpu())
         self.loader.rng.bit_generator.state = blob["loader_rng"]
         if blob.get("cuda_rng") is not None and torch.cuda.is_available():
             torch.cuda.set_rng_state_all([v.cpu() for v in blob["cuda_rng"]])
@@ -521,7 +530,13 @@ class Trainer:
             return None
         self.out_dir.mkdir(parents=True, exist_ok=True)
         path = self.out_dir / f"{self.cfg.label}-{tag}.pt"
-        torch.save(
+        save = torch.save
+        if torch.device(self.device).type == "xla":
+            # xm.save moves lazy XLA tensors to the host before writing;
+            # torch.save cannot serialise XLA device storage.
+            import torch_xla.core.xla_model as xm
+            save = lambda obj, f: xm.save(obj, f, master_only=True)  # noqa: E731
+        save(
             {
                 "state_dict": self.model.state_dict(),
                 "manifest": self.manifest(extra),
@@ -532,7 +547,7 @@ class Trainer:
                 "loss_balancer": self.balancer.state_dict(),
                 "completed_steps": self.completed_steps,
                 "torch_rng": torch.get_rng_state(),
-                "generator_rng": self.generator.get_state(),
+                "generator_rng": self.generator.get_state() if self.generator is not None else None,
                 "loader_rng": self.loader.rng.bit_generator.state,
                 "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             },

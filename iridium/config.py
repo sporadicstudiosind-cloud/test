@@ -1345,6 +1345,48 @@ def _ladder() -> dict[str, IridiumConfig]:
     )
 
     # -- small: a real cluster job. ---------------------------------------
+    # -- 8b: the full routed architecture at research scale. --------------
+    # Ported from an unmergeable PR (stale base), with one correction: that
+    # version gave a byte-level codec a 65,536-entry vocabulary, i.e. ~65k
+    # embedding rows no byte could ever reach. Here the same table is a real
+    # subword vocabulary (65,520 tokens + the 16 reserved control ids), so
+    # every row trains. Costed, not trained: full BF16 Adam state is ~120 GiB
+    # before activations, which needs sharding this repository does not
+    # implement (docs/training-8b.md).
+    rungs["8b"] = IridiumConfig(
+        name="iridium-1-8b",
+        core=CoreConfig(
+            d_model=1536, n_layers=24, n_query_heads=12, n_kv_heads=4,
+            d_head=128, d_ff=4096,
+        ),
+        stacks=SuperstackConfig(
+            n_stacks=10,
+            n_layers=28,
+            d_model=1536,
+            n_query_heads=12,
+            n_kv_heads=4,
+            d_head=128,
+            d_ff=4096,
+            cross_stride=8,
+            spectral_stride=8,
+            spectral_modes=16,
+            spectral_channels=96,
+            spectral_stacks=(0,),
+            min_depth=4,
+            specializations=SPECIALIZATIONS_32[:10],
+        ),
+        router=RouterConfig(top_k=2, max_loops=3),
+        codecs=CodecConfig(vocab_size=65_520 + TEXT_ID_OFFSET),
+        max_seq_len=32_768,
+        qk_norm=True,
+        text_vocab_size=65_520,
+        notes=(
+            "8.07 B full routed-architecture rung. Full BF16 Adam state is about "
+            "120 GiB before activations and requires sharding across multiple "
+            "accelerators; costed, not trained."
+        ),
+    )
+
     rungs["small"] = IridiumConfig(
         name="iridium-1-small",
         core=CoreConfig(

@@ -71,7 +71,7 @@ def test_codec_bank_matches_formula(rung):
 
 
 def test_ladder_is_monotonic():
-    order = ["tiny", "nano", "micro", "small", "base", "extreme"]
+    order = ["tiny", "nano", "micro", "8b", "small", "base", "extreme"]
     sizes = [LADDER[k].n_params for k in order]
     assert sizes == sorted(sizes), "the ladder must grow monotonically"
 
@@ -217,3 +217,15 @@ def test_modern_rung_is_costed_exactly_without_allocating_it():
     assert sum(p.numel() for p in model.parameters()) == cfg.n_params
     assert cfg.text_vocab_size and cfg.codecs.vocab_size >= cfg.text_vocab_size + 16
     assert set(cfg.core.layer_kinds()) == {"deltanet", "mla"}
+
+
+
+def test_8b_rung_is_costed_for_distributed_training_with_a_live_vocabulary():
+    cfg = get_config("8b")
+    assert 8.0e9 < cfg.n_params < 8.2e9
+    assert cfg.stacks.n_stacks == 10 and cfg.router.top_k == 2
+    # Every embedding row is a real token: no dead byte-codec rows.
+    assert cfg.codecs.vocab_size == cfg.text_vocab_size + 16
+    # BF16 weights + grads + FP32 master and two moments, before activations:
+    # a single free-tier device must never be presented as sufficient.
+    assert cfg.training_state_bytes() / 2**30 > 120

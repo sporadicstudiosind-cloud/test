@@ -151,18 +151,31 @@ def inference_autocast(info: DeviceInfo) -> ContextManager:
     return torch.autocast(device_type=torch.device(info.device).type, dtype=info.dtype)
 
 
-def generator_for(device: str | torch.device, seed: int) -> torch.Generator:
+def generator_for(device: str | torch.device, seed: int) -> Optional[torch.Generator]:
     """A generator on the *same* device as the tensors it will seed.
 
     ``torch.randn(..., device="cuda", generator=torch.Generator())`` raises,
     and the flow-matching head samples on the target's device. This is the
     single most common way a working CPU training script dies the moment it
     touches a GPU.
+
+    On XLA (TPU) this returns ``None``: torch_xla draws from its own runtime
+    RNG, and a CPU generator cannot seed an XLA allocation. Every sampling call
+    in this codebase accepts ``generator=None``; the runtime is seeded with
+    ``torch.manual_seed`` / ``xm.set_rng_state`` instead, so a TPU run is
+    reproducible per seed but its noise stream is not the same one a CUDA run
+    with the same seed would draw.
     """
     dev = torch.device(device)
     if dev.type == "cuda":
         return torch.Generator(device=dev).manual_seed(seed)
+    if dev.type == "xla":
+        return None
     return torch.Generator().manual_seed(seed)
+
+
+def is_xla(device) -> bool:
+    return torch.device(device).type == "xla"
 
 
 def device_of(module: torch.nn.Module) -> torch.device:

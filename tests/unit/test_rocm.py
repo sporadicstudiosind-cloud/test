@@ -265,3 +265,11 @@ def test_checkpoint_round_trip_coerces_dtype(tmp_path):
 def test_report_is_valid_json():
     import json
     json.loads(backend.report())
+
+
+def test_xla_devices_get_no_cpu_generator():
+    """A CPU generator cannot seed an XLA allocation; the runtime RNG is used."""
+    from iridium.runtime.device import generator_for, is_xla
+
+    assert generator_for("xla", 0) is None and is_xla("xla:0")
+    assert generator_for("cpu", 0) is not None and not is_xla("cpu")
