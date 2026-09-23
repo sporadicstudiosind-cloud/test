@@ -1,3 +1,7 @@
+> **Superseded (kept for history).** This describes a pre-1.0 revision. For
+> current instructions see [the docs index](README.md) and
+> [free-tier training](free-tier-training.md).
+
 # Kaggle training revision: AMP and two T4s
 
 No training, inference, or tests were run by the author for this revision.

@@ -1,3 +1,7 @@
+> **Superseded (kept for history).** This describes a pre-1.0 revision. For
+> current instructions see [the docs index](README.md) and
+> [free-tier training](free-tier-training.md).
+
 # Paired media and tool supervision
 
 Place a JSONL manifest next to the files it names. Each row requires `id`,

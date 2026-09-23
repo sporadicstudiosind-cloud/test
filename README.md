@@ -1,146 +1,141 @@
-> Kaggle AMP and dual-T4 update: see [Kaggle training guide](docs/KAGGLE_TRAINING.md).
-> All notebooks include additional small/medium presets, explicit native precision
-> selection, and optional specialist model parallelism. Runtime validation remains
-> outstanding; no tests or training were run by the author.
+# Iridium 1.0
 
-> **Research-loop revision:** [SELF_IMPROVEMENT.md](docs/SELF_IMPROVEMENT.md) describes
-> the new bounded candidate-training/evaluation/promotion loop and optional notebook
-> section. Includes token-specific pondering losses, learned specialist integration
-> and refinement-loop identity. Research is OFF by default; this revision is untested.
+**A routed omnimodal model family you can train on free compute.** It is
+built to talk and reason first, to use tools second, and then — in that
+order — to handle images, audio, video and geometry, physics and STEM, and
+camera-posed 3D worlds.
 
-> **September 17 implementation update:** Start with [UPDATE_NOTES](docs/UPDATE_NOTES.md)
-> and [MULTIMODAL_DATA](docs/MULTIMODAL_DATA.md). All four notebooks now share the
-> Kaggle optimizer workaround, AMP/accumulation and paired media/tool training path.
-> This revision was **not tested or trained**, at the user's request. Historical
-> measurements/checkpoints below do not validate the new code or its media abilities.
-> No newly trained weights are supplied. Upload this source before cloning from a notebook.
-
-# Iridium-1
-
-**Small chat:** `python -m iridium chat` loads the bundled nano checkpoint.
-See [small chat and GPU instructions](docs/SMALL_CHAT.md) for interactive chat,
-the web interface, and a bounded chat fine-tuning command. The bundled weights
-were trained on synthetic tasks, not conversations; chat quality is unverified.
-
-**One dense multimodal foundation model** that perceives, reasons, generates, simulates and
-acts across text, code, mathematics, images, video, speech, sound, structured measurements,
-geometry and physical fields — served as one persistent instance that allocates its own
-computation across concurrent work.
-
-One **64-layer control core** that every token passes through, dispatching to a bank of
-deep **superstacks** and deciding for itself how much depth and how many passes a token
-gets. No external neural models: solvers, renderers, proof checkers, compilers and software
-APIs are permitted programs, and every learned component belongs to one versioned
-Iridium-1 checkpoint.
-
-> **Supersedes the dense-only requirement.** The earlier specification forbade any router
-> (IR 02). The current design is explicitly routed: a control core plus conditional
-> superstacks. `docs/verification.md` F-11 to F-13 record what that buys and what it costs,
-> and `test_capacity_dropping_is_refused_as_non_causal` marks the one form of routing that
-> is still refused — because ranking tokens against each other inside a chunk is not
-> executable at sampling time.
-
-> **Status: a working implementation of the routed architecture at small scale, plus a
-> costed ladder up to 9 T parameters.** The control core, macro-router, superstack bank,
-> omnimodal codecs, physics solvers, agentic environment, sandbox, persistent runtime,
-> quantizer and parallelism planner are built and covered by CPU tests. Nothing here
-> demonstrates a general system: the trained rung is 34 M parameters on a synthetic corpus.
-> [`docs/build.md`](docs/build.md) says what to run,
-> [`docs/verification.md`](docs/verification.md) lists the twenty findings against the
-> source plan, and [`docs/capability-register.md`](docs/capability-register.md) states, per
-> capability, whether it is specified, implemented, trained, evaluated or unsupported —
-> read it before quoting anything here as a result.
+> **Status: verified in theory, not trained.** Every preset below builds, its
+> parameter count matches the accounting formula exactly, and the invariants
+> in the ~1,100-test suite hold for it (cached decoding equals the full
+> forward pass, growth preserves the function, gradients are finite). **No
+> preset has been trained at its recipe yet**, so nothing here is a claim
+> about how well a trained Iridium talks, calls tools or sees. The only
+> bundled weights are a pre-1.0 34 M checkpoint trained on synthetic tasks.
+>
+> **Private.** All rights reserved. Not licensed for redistribution.
 
 ---
 
-## Start here
-
-| Document | What it is |
-|---|---|
-| [`docs/build.md`](docs/build.md) | **What was built, how to run it, what it does and does not establish** |
-| [`docs/verification.md`](docs/verification.md) | Every claim in the source plan that was checked, and the result |
-| [`docs/architecture.md`](docs/architecture.md) | The canonical architecture. Everything normative. |
-| [`docs/requirements-traceability.md`](docs/requirements-traceability.md) | The original request → requirement → specification → test |
-| [`docs/decisions.md`](docs/decisions.md) | Every correction made, with the test that holds it |
-| [`docs/capability-register.md`](docs/capability-register.md) | Honest status per capability |
-| [`docs/first-slice.md`](docs/first-slice.md) | Measured results from the trained slice |
-| [`docs/backlog.md`](docs/backlog.md) | M0–M11 with acceptance evidence, and the next milestone |
-| [`docs/evidence.md`](docs/evidence.md) | Sources, with what each does *not* establish |
-| [`docs/scenarios.md`](docs/scenarios.md) | Capability targets A–G beyond the waterfall |
-| [`docs/history/orrery/`](docs/history/orrery/) | The superseded ORRERY specification, preserved unaltered |
-| [`notebooks/`](notebooks/) | **Train it yourself on free hardware** — Colab, Kaggle or any Jupyter host, at any rung from 50 M to 1 T |
-
-## Run it
+## Train one
 
 ```bash
-pip install numpy torch pytest jsonschema
-python3 -m pytest                                # CPU correctness suite
-python3 -m iridium chat                          # small experimental chat
-python3 -m iridium ladder                        # tiny -> nano -> ... -> 9 T
-python3 -m iridium report nano --verify          # accounting, checked against the modules
-python3 -m iridium plan base --gpus 1024         # 4-D parallelism and its cost model
-python3 -m iridium waterfall --q 3 --factor 2    # the originating question, answered
-python3 -m iridium.training.phase1_pretrain --rung nano --steps 1800
-python3 -m iridium.config_builder                # the 50 M -> 1 T preset ladder
+pip install -e ".[data]"                     # torch, numpy, pyyaml, jsonschema, datasets
+python -m iridium presets                    # what can be trained, and how long it takes
+python -m iridium train --preset chat-34m --dry-run
+python -m iridium train --preset chat-34m
+python -m iridium chat --checkpoint runs/chat-34m/final.pt
 ```
 
-[`docs/build.md`](docs/build.md) has the rest, and
-[`notebooks/README.md`](notebooks/README.md) runs the whole thing — design, fit
-check, licensed data, train, grade, chat — on free hardware.
+Or open a notebook in [`notebooks/`](notebooks/) on Colab or Kaggle; it runs
+the same commands, with checkpoints per round so a dropped session costs one
+round, not the run.
+
+| preset | for | params | tokens | Colab T4 | Kaggle P100 | TPU v5e-1 |
+|---|---|---|---|---|---|---|
+| `chat-34m` | talking (start here) | 36 M | 328 M | ~4 h | ~4 h | ~0.2 h |
+| `chat-100m` | talking + reasoning | 108 M | 655 M | ~21 h | ~18 h | ~0.9 h |
+| `tools-100m` | tool calling | 108 M | 655 M | ~21 h | ~18 h | ~0.9 h |
+| `omni-100m` | omnimodal | 112 M | 655 M | ~21 h | ~18 h | ~0.9 h |
+| `stem-100m` | physics / STEM | 108 M | 492 M | ~16 h | ~14 h | ~0.6 h |
+| `world-100m` | world model | 112 M | 328 M | ~11 h | ~9 h | ~0.4 h |
+| `modern-744m` | every option at scale | 744 M | 26 B | costed only | | |
+
+Hours are **optimistic arithmetic** (3 × forward FLOPs, 30% of published
+peak), not measurements. The token budgets are below compute-optimal for
+these sizes on purpose — that is what fits in free quota — so expect a small
+model that writes plausible prose, not an assistant.
+[`docs/free-tier-training.md`](docs/free-tier-training.md) has the tiers,
+quotas, the reasoning behind the numbers, and what Groq / NVIDIA NIM style
+hosted APIs can do here (generate and grade data, subject to each model's
+licence; not train).
+
+## What the architecture is
+
+```
+input spans ─► typed codecs (text, image, audio, video, camera, geometry, fields…)
+            ─► control core, stage I          every token, every layer
+            ─► macro-router (top-k)           picks superstacks per token
+            ─► superstacks                    deep specialist stacks, cross-attending the core
+            ─► control core, stage II
+            ─► heads                          text, flow-matching media, typed System-1 head
+            ↺  ponder loop                    the core decides how many passes a token gets
+```
+
+On top of that skeleton, each piece is a config switch with exact parameter
+and cache accounting, all **off by default** and documented with its
+evidence and cost in [`docs/architecture-options.md`](docs/architecture-options.md):
+
+- **Attention mix per layer** — global, sliding-window, MLA (latent KV) and
+  Gated DeltaNet (linear, constant-size state), in the core and the stacks.
+  The `modern` rung uses this to fit a 1M-token cache.
+- **Residuals and norms** — mHC hyper-connection streams, DyT / Derf,
+  parallel blocks, function-preserving block growth, low-rank dynamic weights.
+- **Embeddings** — per-layer embeddings, hashed n-gram embeddings.
+- **Positions** — M-RoPE grid positions for media and cameras; YaRN extension.
+- **Speed** — realtime streaming by exiting early inside the control core,
+  with lossless self-speculative decoding; typed System-1 routing for cheap
+  tokens.
+- **Tools** — a call format on reserved control tokens and schema-constrained
+  decoding ([`docs/tools.md`](docs/tools.md)).
+- **World model** — a camera modality, differentiable 3D Gaussian splats,
+  persistent world state and action-driven rollout
+  ([`docs/world-model.md`](docs/world-model.md)).
+- **Hardware** — CUDA, ROCm, XLA/TPU; several runs on one GPU.
+
+## Other commands
+
+```bash
+python -m pytest                                 # CPU suite
+python -m iridium ladder                         # every rung, 34 M to 8 B and beyond
+python -m iridium report modern --verify         # accounting checked against the modules
+python -m iridium plan base --gpus 1024          # 4-D parallelism and its cost model
+python -m iridium evaluate --help                # graded accuracy on held-out splits
+python -m iridium chat                           # the bundled pre-1.0 checkpoint
+```
 
 ## Layout
 
 ```
-docs/          canonical architecture, decisions, evidence, backlog, history
-schemas/       event, action, result manifest, coupling interface (JSON Schema, enforced)
 iridium/
-  contracts/   units, typed frames, events + exact array store, metric reconciliation
+  presets.py   the 1.0 presets and free-tier estimates
   config.py    the scaling ladder; executable parameter and memory accounting
-  model/       control core, macro-router, superstacks, spectral ops, heads
-  codecs/      typed spans and the unified omnimodal embedding bank
-  physics/     spectral Navier-Stokes, shallow water, operators, dual-system verifier
-  agency/      typed action space, deterministic scene editor, Blender emission
-  runtime/     sandbox, per-stream registry, focus scheduler, persistent service
-  training/    four phases, verifiable tasks, continual-learning flywheel
-  quant/       MXFP4 and FP8, measured
-  parallel/    4-D partitioning and the communication cost model
-  evaluation/  graded accuracy, routing mutual information
+  model/       control core, router, superstacks, attention variants, heads
+  codecs/      typed spans and the omnimodal embedding bank
+  training/    trainer, run_preset, data mixtures, tokenizer, budget audit
+  data/        licensed text and tool corpora
+  runtime/     device backends, streaming, tools, constrained decoding, serving
+  world/       cameras, splats, world state, rollout
+  physics/     spectral solvers and verifiers used for exactly-graded data
+  agency/ quant/ parallel/ evaluation/ contracts/ generation/ memory/
+notebooks/     Colab, Kaggle, Jupyter and TPU notebooks
+docs/          see docs/README.md
 tests/         unit / integration / scientific
-experiments/   runnable experiments and their recorded results
-configs/       prototype, pilot, flagship
 ```
 
-## Three ideas the design turns on
+## Principles carried over from before 1.0
 
-**Exact arrays beneath lossy learned representations.** Compressed latents are for reasoning;
-the authoritative numbers stay in typed binary storage and survive round-trip bit-exactly. A
-hidden vector is never the only record of a scientific result.
+**Evidence is earned, not labelled.** "Verified in theory", "trained" and
+"evaluated" are different claims; this README makes only the first.
+[`docs/capability-register.md`](docs/capability-register.md) tracks the rest
+per capability.
 
-**Conservation by construction, not by hope.** A learned correction applied per cell can
-invent mass. The same correction applied to *oriented shared faces* cannot, because each face
-enters two cells with opposite sign and the interior telescopes. Both are demonstrated in
-`tests/scientific/test_conservation.py`, and the trained slice reproduces it with a learned
-correction at 9.5e-09 relative drift while its unconstrained control drifts 1.8%.
+**Exact arrays beneath learned representations.** Scientific numbers stay in
+typed storage and round-trip bit-exactly; a hidden vector is never the only
+record of a result.
 
-**Evidence is earned, not labelled.** Illustrative, learned estimate, numerically verified and
-empirically validated are four different claims. The result manifest schema refuses a
-`numerically_verified` artifact without a verification record, and every numeral in a report
-must resolve to an exact metric table — a check whose regression fixture is a real
-contradiction that human review missed.
+**Conservation by construction.** A learned correction applied to oriented
+shared faces cannot invent mass; the early trained slice held 9.5e-09 relative
+drift where its unconstrained control drifted 1.8%
+([`docs/first-slice.md`](docs/first-slice.md)). The same slice also collapsed
+out of distribution, which is why solvers remain in the loop.
 
-## What this deliberately does not claim
+## What this does not claim
 
-- That it scales. One trained slice at 0.8 M parameters says nothing about the ~992 B
-  flagship configuration.
-- That native physics works in general. The trained flux head does beat a first-order upwind
-  solver in distribution (0.056 vs 0.113 NRMSE) — but it **collapses out of distribution**
-  (1.48, barely better than persistence, while the solver degrades only to 0.21). Both numbers
-  are in [`docs/first-slice.md`](docs/first-slice.md); the second is why escalation exists.
-- That attention can flow between concurrent users. That one reading of "one instance" is
-  rejected as a cross-tenant read; everything else about persistence is kept.
-- That "understands everything" has been decomposed into anything finite. It has no
-  acceptance test, so the backlog replaces it with expanding measured competence.
+- That any preset produces a good model. None has been trained yet.
+- That it scales. Rungs past 100 M are costed, not tested by training.
+- That the synthetic families transfer to real-world skill.
+- That the hour estimates hold on your session. They are lower bounds.
 
-Prior errors — including three arithmetic and scope errors made in this project's own earlier
-analysis — are recorded in [`docs/decisions.md`](docs/decisions.md) D25–D28 rather than
-quietly fixed.
+See [`CHANGELOG.md`](CHANGELOG.md) for what 1.0 changed and
+[`docs/README.md`](docs/README.md) for everything else.

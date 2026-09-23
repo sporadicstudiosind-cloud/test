@@ -14,7 +14,7 @@ tokenizer size, schedule, optimizer, step and batch budget -- so
 ``python -m iridium train --preset chat-34m`` is the whole instruction.
 
 The budget column is sized for **free compute**: Colab's free T4, Kaggle's
-30 GPU-hours a week (P100 or 2xT4), and the free TPU v5e-1. Hosted inference
+30 GPU-hours a week (P100 or 2xT4), and Colab's free TPU v5e-1. Hosted inference
 tiers (Groq, NVIDIA NIM and the like) serve models; they cannot train one.
 Their use here is generating and grading data, and each hosted model's own
 licence decides whether its outputs may train another model.
@@ -54,8 +54,8 @@ FREE_TIERS: dict[str, dict] = {
                     "quota": "30 GPU-h/week, 12 h sessions"},
     "kaggle_2xt4": {"label": "Kaggle 2xT4",         "peak": 16.2e12, "memory_gb": 30, "precision": "fp32",
                     "quota": "30 GPU-h/week; needs the multi-GPU placement path"},
-    "tpu_v5e1":   {"label": "Colab/Kaggle TPU v5e-1", "peak": 197e12, "memory_gb": 16, "precision": "bf16",
-                   "quota": "free-tier availability varies; XLA path"},
+    "tpu_v5e1":   {"label": "Colab free TPU v5e-1", "peak": 197e12, "memory_gb": 16, "precision": "bf16",
+                   "quota": "availability varies; XLA path (Kaggle's is v5e-8, 20 h/week)"},
 }
 ASSUMED_UTILISATION = 0.30
 
@@ -199,7 +199,7 @@ def preset_table() -> str:
     head = (f"{'preset':<13} {'pri':>3} {'params':>12} {'tokens':>8}  "
             f"{'T4 h':>6} {'P100 h':>7} {'v5e h':>6}  status")
     lines = [head, "-" * len(head)]
-    for p in sorted(PRESETS.values(), key=lambda p: (p.priority or 99, p.name)):
+    for p in sorted(PRESETS.values(), key=lambda p: (p.priority or 99, p.config.n_params, p.name)):
         hours = [estimate_hours(p, t) for t in ("colab_t4", "kaggle_p100", "tpu_v5e1")]
         lines.append(
             f"{p.name:<13} {p.priority or '-':>3} {p.config.n_params:>12,} "

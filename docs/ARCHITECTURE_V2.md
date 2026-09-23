@@ -1,3 +1,7 @@
+> **Superseded (kept for history).** This describes a pre-1.0 revision. For
+> current instructions see [the docs index](README.md) and
+> [free-tier training](free-tier-training.md).
+
 # Iridium controller and context revision
 
 Implementation status: source changes only. No tests, model imports, inference,

@@ -1,3 +1,7 @@
+> **Superseded (kept for history).** This describes a pre-1.0 revision. For
+> current instructions see [the docs index](README.md) and
+> [free-tier training](free-tier-training.md).
+
 # Kaggle AMP and dual-GPU follow-up
 
 See `KAGGLE_TRAINING.md`. Halting products now use explicit FP32 inputs and dtype;
