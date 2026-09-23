@@ -58,8 +58,8 @@ the full budget audit.
 python -m iridium presets                       # the table above
 python -m iridium train --preset chat-34m --dry-run
 python -m iridium train --preset chat-34m       # rounds of fresh data, a checkpoint per round
-python -m iridium train --preset chat-34m --resume runs/chat-34m/round2.pt
-python -m iridium train --preset tools-100m --init runs/chat-100m/final.pt
+python -m iridium train --preset chat-34m --resume runs/chat-34m/chat-34m-round2.pt
+python -m iridium train --preset tools-100m --init runs/chat-100m/chat-100m-final.pt
 ```
 
 A run is split into **rounds**. Each round streams a fresh slice of the text

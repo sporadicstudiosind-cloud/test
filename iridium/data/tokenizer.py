@@ -330,16 +330,23 @@ class BytePairTokenizer:
         rebuilt by :meth:`load`, rather than duplicated on disk where it
         could drift out of sync with the merges that actually produced it.
         """
-        data = {
+        Path(path).write_text(json.dumps(self.to_dict()))
+
+    def to_dict(self) -> dict:
+        """The persisted form (see :meth:`save`): plain lists, so it can ride
+        inside a checkpoint manifest that is loaded with ``weights_only``."""
+        return {
             "version": 1,
             "special_tokens": list(self.special_tokens.keys()),
             "merges": [list(p) for p in self._merge_order],
         }
-        Path(path).write_text(json.dumps(data))
 
     @classmethod
     def load(cls, path: str | Path) -> "BytePairTokenizer":
-        data = json.loads(Path(path).read_text())
+        return cls.from_dict(json.loads(Path(path).read_text()))
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BytePairTokenizer":
         tok = cls()
         specials = data.get("special_tokens", [])
         tok.special_tokens = {s: N_BYTES + i for i, s in enumerate(specials)}

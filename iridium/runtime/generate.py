@@ -90,6 +90,7 @@ def generate(
     text_only: bool = False,
     force_modality: Optional[str] = None,
     min_p: float = 0.0,
+    tokenizer=None,
 ) -> Generated:
     """Greedy (``temperature=0``) or sampled continuation of ``sample``.
 
@@ -169,13 +170,13 @@ def generate(
         hidden = out.hidden
         position += 1
 
-    body = bytearray()
-    for token, name in zip(result.ids, result.modalities):
-        if name == "text":
-            v = token - text_offset
-            if 0 <= v < 256:
-                body.append(v)
-    result.text = body.decode("utf-8", errors="replace")
+    text_ids = [token - text_offset for token, name in zip(result.ids, result.modalities)
+                if name == "text" and token >= text_offset]
+    if tokenizer is not None:
+        # Decode all ids at once so a character split across tokens survives.
+        result.text = tokenizer.decode(text_ids)
+    else:
+        result.text = bytes(v for v in text_ids if v < 256).decode("utf-8", errors="replace")
     return result
 
 

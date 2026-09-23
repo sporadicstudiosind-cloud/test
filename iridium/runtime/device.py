@@ -35,7 +35,7 @@ import torch
 @dataclass(frozen=True)
 class DeviceInfo:
     device: str
-    backend: str            # "rocm" | "cuda" | "cpu" | "mps"
+    backend: str            # "rocm" | "cuda" | "cpu" | "mps" | "xla"
     name: str
     bf16: bool
     total_memory_gb: float
@@ -71,6 +71,8 @@ def detect(prefer: Optional[str] = None, precision: Optional[str] = None) -> Dev
         preferred = "auto"
     if preferred in ("rocm", "hip"):
         preferred = "cuda"
+    if preferred in ("tpu", "xla") or preferred.startswith("xla:"):
+        return _xla(precision)
     if preferred == "cpu":
         if precision not in (None, "auto", "fp32", "float32"):
             raise RuntimeError("CPU inference supports fp32 only")
@@ -111,7 +113,7 @@ def detect(prefer: Optional[str] = None, precision: Optional[str] = None) -> Dev
         return DeviceInfo(device_name, "cuda", name, bf16, memory,
                           f"CUDA {torch.version.cuda}, sm_{major}{props.minor}", selected)
     if preferred not in ("auto", "mps"):
-        raise RuntimeError(f"Unsupported IRIDIUM_DEVICE={prefer!r}; use auto, cpu, cuda[:N], rocm, or mps")
+        raise RuntimeError(f"Unsupported IRIDIUM_DEVICE={prefer!r}; use auto, cpu, cuda[:N], rocm, mps, or xla")
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         # MPS has no bf16 autocast and no complex FFT; the spectral blocks fall
         # back to CPU there, which is slower than just staying on CPU.
@@ -172,6 +174,22 @@ def generator_for(device: str | torch.device, seed: int) -> Optional[torch.Gener
     if dev.type == "xla":
         return None
     return torch.Generator().manual_seed(seed)
+
+
+def _xla(precision: Optional[str]) -> DeviceInfo:
+    """A TPU through torch_xla. Only ever explicit: ``auto`` never picks XLA,
+    because an XLA device silently recompiles on every new shape and a run
+    that did not ask for that should not get it."""
+    try:
+        import torch_xla.core.xla_model as xm
+    except ImportError as exc:
+        raise RuntimeError("IRIDIUM_DEVICE=xla needs torch_xla (pip install torch_xla); "
+                           "it is preinstalled on Colab/Kaggle TPU runtimes") from exc
+    device = str(xm.xla_device())
+    chosen = "bf16" if precision in (None, "auto", "bf16", "bfloat16") else precision
+    if chosen not in ("bf16", "fp32"):
+        raise RuntimeError("XLA supports bf16 or fp32")
+    return DeviceInfo(device, "xla", "TPU (torch_xla)", True, 0.0, "", precision=chosen)
 
 
 def is_xla(device) -> bool:

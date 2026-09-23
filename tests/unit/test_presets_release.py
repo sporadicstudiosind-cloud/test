@@ -82,3 +82,36 @@ def test_round_based_training_streams_fresh_corpora_and_checkpoints(tmp_path, mo
     assert (out / "chat-34m-round0.pt").exists() and (out / "chat-34m-round1.pt").exists()
     meta = json.loads((out / "preset.json").read_text())
     assert meta["steps"] == 4 and meta["rounds"] == 2
+
+
+def test_a_trained_preset_checkpoint_chats_through_its_own_tokenizer(tmp_path, monkeypatch):
+    """train --preset -> chat --checkpoint must round-trip the vocabulary.
+
+    The checkpoint carries the tokenizer's merges; the chat loader (which
+    refuses arbitrary pickles) must accept a trainer checkpoint and rebuild
+    the exact tokenizer from it.
+    """
+    from iridium import cli
+    from iridium.codecs.spans import Sample, text_span
+    from iridium.data.tokenizer import BytePairTokenizer
+    from iridium.config import get_config
+    from iridium.presets import _with_vocab
+    from iridium.runtime.generate import generate
+    from iridium.training import tokenizer_bridge
+
+    text = ["Tools answer questions; models call tools when facts are needed. "
+            "A calculator adds numbers, a search engine finds pages."] * 30
+    tok = BytePairTokenizer().train(text, 290)
+    monkeypatch.setattr(tokenizer_bridge, "tokenizer_for_config", lambda cfg: tok)
+    cfg = _with_vocab(get_config("tiny"), tok.vocab_size)
+    preset = dataclasses.replace(
+        get_preset("chat-34m"), config=cfg, mixture={"false_premise": 1.0},
+        steps=2, batch_size=2, window=128, rounds=1)
+    final = run_preset.train_preset(preset, device="cpu", out=str(tmp_path))
+
+    model, manifest = cli._load_chat_checkpoint(final, "cpu")
+    again = tokenizer_bridge.tokenizer_from_manifest(manifest)
+    assert again is not None and again.encode(text[0]) == tok.encode(text[0])
+    out = generate(model, Sample([text_span("A calculator", offset=16, tokenizer=again)]),
+                   max_new_tokens=3, text_only=True, tokenizer=again)
+    assert isinstance(out.text, str)

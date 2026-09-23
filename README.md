@@ -24,7 +24,7 @@ pip install -e ".[data]"                     # torch, numpy, pyyaml, jsonschema,
 python -m iridium presets                    # what can be trained, and how long it takes
 python -m iridium train --preset chat-34m --dry-run
 python -m iridium train --preset chat-34m
-python -m iridium chat --checkpoint runs/chat-34m/final.pt
+python -m iridium chat --checkpoint runs/chat-34m/chat-34m-final.pt
 ```
 
 Or open a notebook in [`notebooks/`](notebooks/) on Colab or Kaggle; it runs

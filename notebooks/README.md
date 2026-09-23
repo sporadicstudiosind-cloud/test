@@ -1,157 +1,167 @@
-# Iridium-1 Studio
+# Iridium 1.0 Studio notebooks
 
-Four notebooks. One of them is the old single-rung trainer; the other three are
-the same studio built for three different free services, generated from one
-source (`build_notebooks.py`) so they cannot drift apart.
+Five notebooks. Three are the same studio workflow generated from one source
+(`build_notebooks.py`) for three different free services, so they cannot drift
+apart; one is a short redirect for the old fixed-preset Colab notebook; one is
+a separate TPU builder. Edit `build_notebooks.py`, never a `.ipynb` file
+directly -- `tests/unit/test_notebooks.py` fails the build the moment a
+generated notebook no longer matches what the script would produce.
 
-| notebook | service | open |
-|---|---|---|
-| `iridium_studio.ipynb` | Google Colab | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sporadicstudiosind-cloud/test/blob/claude/gallant-faraday-lhycva/notebooks/iridium_studio.ipynb) |
-| `iridium_studio_kaggle.ipynb` | Kaggle Notebooks | [![Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/sporadicstudiosind-cloud/test/blob/claude/gallant-faraday-lhycva/notebooks/iridium_studio_kaggle.ipynb) |
-| `iridium_studio_jupyter.ipynb` | any Jupyter host — Lightning AI, SageMaker Studio Lab, Paperspace, RunPod, or your own box | open it |
-| `train_iridium_colab.ipynb` | Colab, the earlier fixed-rung trainer | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sporadicstudiosind-cloud/test/blob/claude/gallant-faraday-lhycva/notebooks/train_iridium_colab.ipynb) |
+| notebook | service | default preset | open |
+|---|---|---|---|
+| `iridium_studio.ipynb` | Google Colab (free T4) | `chat-34m` | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sporadicstudiosind-cloud/test/blob/claude/gallant-faraday-lhycva/notebooks/iridium_studio.ipynb) |
+| `iridium_studio_kaggle.ipynb` | Kaggle Notebooks (P100 or 2xT4) | `chat-100m` | [![Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/sporadicstudiosind-cloud/test/blob/claude/gallant-faraday-lhycva/notebooks/iridium_studio_kaggle.ipynb) |
+| `iridium_studio_jupyter.ipynb` | any Jupyter host -- Lightning AI, SageMaker Studio Lab, Paperspace, RunPod, your own box | `chat-100m` | open it |
+| `train_iridium_colab.ipynb` | Colab | -- | redirects to `iridium_studio.ipynb` (kept so the old badge/link still works) |
+| `train_iridium_tpu_colab.ipynb` | Colab/Kaggle free TPU v5e-1 | `chat-100m`, with geometry overrides | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sporadicstudiosind-cloud/test/blob/claude/gallant-faraday-lhycva/notebooks/train_iridium_tpu_colab.ipynb) |
 
-Run all. Ten sections: detect the hardware, design a model, check it fits, stream
-licensed data, verify the architecture, train, grade, inspect the routing, save,
-chat.
+## What every studio notebook actually does
 
-## The ladder
+Detect hardware -> pick a preset -> `dry_run` (build the model on the meta
+device, verify its parameter count against the formula, print the
+data-budget audit and free-tier time estimate) -> train with `train_preset`
+in rounds of fresh data, saving a checkpoint every round -> chat with the
+result via `ChatSession` (or `python -m iridium chat --checkpoint`) ->
+optionally stage a second preset (`tools-100m`) initialised from the chat
+checkpoint.
 
-Any of these is one dropdown away, and every count below is the formula's, not a
-nameplate — `tests/unit/test_presets.py` recomputes the transformer body from
-retyped arithmetic and demands the two agree to the parameter.
+**The model is untrained until you run the training cell.** Nothing in `Run
+All` up to that point produces anything but random weights and a cost report.
 
-| preset | parameters | core | superstacks | d_model | active/token |
-|---|---:|---:|---|---:|---:|
-| `50m` | 49,713,034 | 6L | 2 × 9L | 384 | 31.1 M |
-| `100m` | 99,841,306 | 6L | 4 × 8L | 512 | 55.9 M |
-| `500m` | 495,705,494 | 10L | 2 × 15L | 1024 | 301.0 M |
-| `1b` | 1,007,202,723 | 12L | 3 × 14L | 1280 | 728.4 M |
-| `8b` | 7,894,763,402 | 24L | 4 × 36L | 2048 | 4.46 G |
-| `16b` | 15,889,000,377 | 28L | 5 × 38L | 2560 | 7.49 G |
-| `24b` | 23,894,349,882 | 32L | 4 × 48L | 3072 | 13.5 G |
-| `100b` | 100,151,262,631 | 48L | 5 × 60L | 5120 | 47.8 G |
-| `200b` | 199,732,231,081 | 56L | 5 × 86L | 6144 | 92.9 G |
-| `1t` | 998,290,891,190 | 64L | 8 × 103L | 10240 | 301.8 G |
+**What a free session buys you** is not a guess: section 3 of every studio
+notebook prints `iridium.presets.preset_table()` and the `dry_run` cost/audit
+report before training starts, both computed by `iridium.presets.estimate_hours`
+and `iridium.training.budget.audit` from the config's own FLOP formula --
+arithmetic, not a measurement, and optimistic (30% of published peak assumed;
+see the warning in `iridium/presets.py`).
 
-**Describing a geometry and being able to train it are different things.** Every
-rung above is a real configuration whose cost the notebook computes exactly.
-Section 3 tells you, from the memory your device actually reports, whether it
-trains there, and names a cheaper optimizer strategy when the answer is no. On a
-free 16 GB card, with a quarter of it reserved for activations: `50m`, `100m`
-and `500m` train under plain AdamW fp32; `1b` needs 8-bit moments or Adafactor;
-`8b` and above need sharding across devices, whatever the strategy.
+**Network and `datasets` are required** for the text/chat/tokenizer path:
+`iridium.training.datasets.build_corpus` streams real text over the network,
+and a preset's subword tokenizer is trained from that same stream the first
+time it runs (`iridium.training.tokenizer_bridge`). No network, or no
+`datasets` package, and `train_preset` refuses to fall back to a silently
+mismatched byte-level vocabulary -- it raises, rather than training something
+that looks fine and serves nonsense.
 
-Set `PRESET = 'custom'` and every knob is yours: `D_MODEL`, `CORE_LAYERS`,
-`N_SUPERSTACKS`, `SUPERSTACK_LAYERS`, `D_HEAD`, `N_KV_HEADS`, `TOP_K`,
-`MAX_LOOPS`, `MIN_DEPTH`, `CROSS_STRIDE`, `SPECTRAL_STACKS`, `VOCAB_SIZE`,
-`MAX_SEQ_LEN`.
+## The private-repo clone
 
-Two constraints the builder enforces rather than trusting you to remember:
+The repository is private until Iridium 1.0 ships. Section 1 of every
+notebook reads a GitHub token from the host's own secret store and never
+prints or writes it to disk:
 
-- **`TOP_K` is clamped to `N_SUPERSTACKS - 1`.** Routing to every bank is not
-  routing — the gate becomes decorative, the balance loss is satisfied by
-  construction, and what you have is a dense ensemble wearing a router.
-- **`VOCAB_SIZE` defaults to 384.** The text codec is byte-level: it emits raw
-  UTF-8 bytes shifted past the control ids, so 256 values plus control room is
-  the entire reachable vocabulary. A 32,000-row embedding is not extra capacity,
-  it is rows that never receive a gradient and a softmax over classes the data
-  cannot produce. This ladder previously carried tokenizer-sized vocabularies;
-  at the `1t` rung that was 1.3 B dead parameters, and they now buy depth.
+- **Colab**: the key icon in the left sidebar -> Secrets -> add a secret named
+  `GITHUB_TOKEN` (a fine-grained personal access token scoped to read this
+  repo) -> toggle notebook access on for it.
+- **Kaggle**: Add-ons -> Secrets -> add `GITHUB_TOKEN` the same way -> attach
+  it to the notebook.
+- **Plain Jupyter**: set the `GITHUB_TOKEN` environment variable before
+  starting Jupyter, or just launch the notebook from inside an already-cloned
+  checkout (the clone cell detects that and skips cloning).
 
-## The data
+Without a token the cell prints the instructions above and falls back to an
+unauthenticated clone, which only succeeds once the repository is public. The
+notebooks clone `sporadicstudiosind-cloud/test` at branch
+`claude/gallant-faraday-lhycva` -- the release branch until it merges. Update
+that constant in `build_notebooks.py` (`RELEASE_BRANCH`) once it does, and
+regenerate.
 
-Real text, streamed, with its licence recorded and carried into the run
-manifest — because a model that cannot say what it was trained on cannot honour
-a share-alike obligation.
+## The presets
 
-| source | licence | what it obliges |
-|---|---|---|
-| Project Gutenberg (`manu/project_gutenberg`, `en`) | public domain (US) | nothing on the works; the header PG prepends carries its own terms and is stripped |
-| Wikipedia (`wikimedia/wikipedia`, `20231101.en`) | CC BY-SA 4.0 | attribution **and share-alike on derivatives** |
-| FineWeb-Edu (`HuggingFaceFW/fineweb-edu`, `sample-10BT`) | ODC-By 1.0 | attribution to the dataset |
+Every preset is a complete recipe -- model config, data mixture, tokenizer
+size, schedule, optimizer, step and batch budget -- ordered by Iridium 1.0's
+own priorities: talking and reasoning first, then tool use, then
+omnimodality, then physics/STEM, then world model.
 
-Recording provenance is the auditable part. It does not make the corpora clean:
-public-domain books are old and carry the assumptions of their period, an
-encyclopedia has documented systemic gaps in coverage and authorship, and a web
-crawl filtered for "educational" is still a web crawl.
+```
+preset        pri       params   tokens    T4 h  P100 h  v5e h  status
+----------------------------------------------------------------------
+chat-34m        1   36,038,426     328M     4.1     3.6    0.2  verified in theory
+chat-100m       1  108,304,153     655M    21.1    18.4    0.9  verified in theory
+tools-100m      2  108,304,153     655M    21.1    18.4    0.9  verified in theory
+omni-100m       3  111,586,585     655M    21.1    18.4    0.9  verified in theory
+stem-100m       4  108,304,153     492M    15.8    13.8    0.6  verified in theory
+world-100m      5  111,597,342     328M    10.5     9.2    0.4  verified in theory; no camera-posed training data yet
+modern-744m     -  743,752,454   26214M  7055.7  6145.3  290.1  verified in theory
+(hours assume 30% of published peak; optimistic)
+```
 
-Three details that were wrong in the obvious implementation and are worth
-knowing if you change the mixture:
+Regenerate this table yourself with `python -m iridium presets` -- it is
+computed from `iridium/presets.py`, not transcribed, so it will drift from
+this file before it drifts from the code. **`verified in theory`** means the
+configuration builds, its parameter count matches the formula, and the
+invariant test suite holds for it. It does not mean the preset has been
+trained or that training it produces a good model -- nothing at these recipes
+has been trained yet.
 
-- A shuffle buffer is counted in **rows** and paid for in **bytes**. A Gutenberg
-  row is a whole book; a thousand-row buffer downloads a gigabyte before
-  yielding a single document. Each source sets its own.
-- Taking every consecutive window of a document does **not** respect the mixture
-  weights. One book is four thousand windows, so "40% Gutenberg" delivers four
-  thousand items from one author before touching anything else. Windows are
-  capped per document and spread across it.
-- Three live HTTP streams interleaved is what stalls behind a proxy or a
-  container's connection limits, with no error to read. Sources are drained one
-  at a time and shuffled afterwards.
-- **Seeding the splits differently does not separate them.** A streaming shuffle
-  permutes within a buffer while traversing the file in order, so every split
-  still sees the same early documents — measured at 10% of an 80-document test
-  set drawn from training documents. Split membership is instead a hash of the
-  document's own bytes, which makes it a property of the document: the same book
-  lands in the same split under any seed, on any machine, a month later.
-  Otherwise bits per byte measures memorisation and reports it as
-  generalisation.
+`modern-744m` and `8b` are costed, not free-tier trainable (see the `T4 h` /
+`P100 h` / `v5e h` columns above); they exist so the cost is visible, not as
+something to run in these notebooks.
 
-`realised_mixture()` reports what the items actually contain, so you can check
-the mixture rather than trust it. Set `USE_REAL_TEXT = False` for synthetic
-families only — no network, and every answer exactly checkable.
+## Resuming after a session ends
 
-## The grading
+`train_preset` saves a checkpoint every round: `runs/<preset>/<preset>-round0.pt`,
+`<preset>-round1.pt`, ..., and a final `<preset>-final.pt`. A free session can end without
+warning, so:
 
-Free-running generation scored against **independent computation** — Manning's
-law in closed form, the spectral solver, the scene environment's own goal
-predicate — each reported beside the baseline a model earns by ignoring its
-input entirely, and again on an extrapolation split drawn from outside the
-training band. A number without its baseline says nothing: `false_premise` is
-roughly balanced between true and false claims, so a model that answers "true"
-every time scores about 0.52, and an accuracy of 0.5 is worth exactly nothing.
+- **Colab**: mount Drive in section 4 (the notebook does this itself if you
+  let it) and checkpoints land under `/content/drive/MyDrive/iridium-runs`,
+  which survives a runtime reset.
+- **Kaggle**: checkpoints land under `/kaggle/working`, which persists only if
+  you *Save Version* (commit the notebook) before the session ends -- an
+  interactive-only session that is never committed loses them.
+- **Jupyter**: checkpoints land under `runs/` on whatever storage that host
+  gives you; point `OUT_DIR` at your own persistent volume if the default
+  location does not survive a restart.
 
-Section 8 asks the question the balance loss cannot: **did the bank specialise,
-or merely balance?** It reports `I(family; stack)` in nats against the maximum
-`ln(n_stacks)`. Balanced dispatch with near-zero mutual information means the
-router is spreading load without learning what the stacks are for — which is a
-real finding, not a failure to hide.
+To continue: set `RESUME_FROM` in the training cell to the last `roundN.pt`
+you have and rerun the notebook (cloning and installing are idempotent).
+`train_preset` restores the optimizer, step count and learning-rate schedule
+-- the schedule spans the whole run -- but starts a new data shuffle, so a
+resumed run is not bit-for-bit replay of the interrupted round.
 
-## Before you pick a free T4
+## Chatting with a checkpoint
 
-A free Colab T4 is Turing and **has no bf16**. For a routed model that matters
-more than usual: the gating softmax that selects a superstack and the attention
-logits both sit exactly where fp16's exponent overflows, and when they do the
-router collapses onto one stack and the failure reads as a bad hyperparameter
-rather than a numerics bug. The notebooks run **fp32 on a T4** and bf16 only on
-Ampere or newer.
+Inside the notebook, `ChatSession` from `iridium.runtime.chat` holds a
+conversation across turns. Outside it, the same checkpoint works from a
+terminal:
 
-## TPUs
+```bash
+python -m iridium chat --checkpoint runs/chat-34m/chat-34m-final.pt --device auto
+```
 
-`torch_xla` compiles static shapes. This router dispatches a **variable number
-of tokens** to each superstack every step, which forces a recompile per shape or
-padding to a fixed capacity. So on a TPU VM the notebook defaults to the **host
-CPU** — on a Colab v5e-1 that is 48 GB of RAM, genuinely useful for the larger
-presets, just slow. `FORCE_XLA = True` drives the accelerator anyway. This is a
-real consequence of dynamic routing on XLA, not a missing feature.
+## Tool use (`tools-100m`)
 
-## AMD
+The optional second stage in each studio notebook trains `tools-100m`,
+initialised (`--init`) from the chat checkpoint rather than from scratch. It
+depends on `iridium.runtime.tools`, which is being built alongside these
+notebooks by a separate track of work. The cell checks
+`importlib.util.find_spec('iridium.runtime.tools')` first and prints a plain
+message instead of failing partway through a training run if that module has
+not landed in your checkout yet.
 
-ROCm needs no code changes — HIP is reached through the `torch.cuda` API. You
-need the right wheel and the device nodes; see [`../docs/gpu.md`](../docs/gpu.md).
+## The TPU notebook
 
-## Service notes
+`train_iridium_tpu_colab.ipynb` targets the free Colab/Kaggle **TPU v5e-1**
+runtime instead of a GPU. It starts from a preset, then exposes the raw
+geometry -- `CORE_LAYERS`, `SUPERSTACK_LAYERS`, `SUPERSTACK_COUNT` -- as
+overrides, because the TPU host's extra memory is exactly the room to try a
+deeper or wider variant of a preset before it has earned a name. It calls the
+same `train_preset`/`Trainer` the other notebooks call with `device='xla'`
+and does not reimplement any XLA training mechanics itself -- that support
+(`xm.optimizer_step`, `xm.save`, a `None` RNG generator on XLA) lives in the
+library (`iridium/runtime/device.py`, `iridium/training/trainer.py`), not in
+this notebook.
 
-- **Colab** — port forwarding via `eval_js`, so the chat UI opens in the
-  notebook. Free tier is a T4 with a session limit.
-- **Kaggle** — 30 GPU-hours a week, the best free quota here; P100 16 GB or
-  2× T4. Turn **Settings → Internet → On** or nothing streams. No public port
-  forwarding, so chat goes through the `ask()` function rather than the UI.
-- **Lightning AI / SageMaker Studio Lab / Paperspace / RunPod** — the Jupyter
-  notebook. Studio Lab and Lightning forward ports from their sidebar.
-- **Hugging Face Jobs and ZeroGPU** both require a Pro subscription for GPU, so
-  they are not a free option.
+This router dispatches a *variable* number of tokens to each superstack per
+step, which forces `torch_xla` to recompile per shape (or pad to a fixed
+capacity) -- a real consequence of dynamic routing on a compiled accelerator,
+not a bug in this notebook. Training is gated behind an explicit
+`CONFIRM_TRAIN = True` after the dry-run cell, because a free TPU session is
+quota you cannot get back.
+
+This notebook was ported from an open PR (`codex/create-colab-with-48gb-ram`)
+whose base had gone stale against this branch; its content was rebuilt here
+against the current `presets`/`run_preset` API rather than merged directly.
 
 ## Regenerating
 
@@ -159,5 +169,12 @@ need the right wheel and the device nodes; see [`../docs/gpu.md`](../docs/gpu.md
 python notebooks/build_notebooks.py
 ```
 
-Edit `build_notebooks.py`, never the `.ipynb` files — all three are generated
-from it, and a hand-edit to one is a divergence waiting to be overwritten.
+`tests/unit/test_notebooks.py` checks (statically, no network or GPU needed):
+every notebook is valid nbformat JSON; every code cell compiles as Python
+after stripping magics/shell lines; every `iridium` import resolves against
+the current package; every preset name and CLI subcommand referenced actually
+exists; and that `build_notebooks.py` reproduces every generated `.ipynb`
+byte-for-byte, so a hand-edit or a stale copy is caught immediately.
+`tests/unit/test_notebook_names.py` additionally checks that no cell in a
+studio notebook uses a name (like `DEVICE`) before an earlier, always-run cell
+defines it.

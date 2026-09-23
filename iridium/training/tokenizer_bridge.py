@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-__all__ = ["tokenizer_for_config", "tokenizer_manifest"]
+__all__ = ["tokenizer_for_config", "tokenizer_manifest", "tokenizer_from_manifest"]
 
 
 def tokenizer_for_config(cfg, cache_dir: Optional[str | Path] = None, seed: int = 0,
@@ -62,9 +62,39 @@ def tokenizer_manifest(tokenizer, cfg=None) -> dict:
         return {"kind": "byte", "vocab_size": 256, "requested": requested,
                 "fell_back": bool(requested)}
     size = int(getattr(tokenizer, "vocab_size", 0) or len(getattr(tokenizer, "vocab", ()) or ()))
-    return {
+    manifest = {
         "kind": "bpe",
         "vocab_size": size,
         "requested": requested,
         "fell_back": bool(requested) and size < requested,
     }
+    if hasattr(tokenizer, "to_dict"):
+        # The merges themselves, not a cache path: a checkpoint must carry the
+        # exact vocabulary it was trained with, because retraining the
+        # tokenizer later (new data, new library) yields a different one.
+        manifest["state"] = tokenizer.to_dict()
+    return manifest
+
+
+def tokenizer_from_manifest(manifest) -> Optional[object]:
+    """Rebuild the tokenizer a checkpoint was trained with, or ``None``.
+
+    Accepts a checkpoint manifest (looks under ``"tokenizer"``) or the
+    tokenizer manifest itself. ``None`` means byte level: either the run was
+    byte level, or it predates tokenizers being stored — and a subword config
+    without a stored tokenizer is refused, since guessing is the silent
+    mismatch this module exists to prevent.
+    """
+    if not isinstance(manifest, dict):
+        return None
+    tok = manifest.get("tokenizer", manifest)
+    if isinstance(tok, dict) and isinstance(tok.get("state"), dict):
+        from ..data.tokenizer import BytePairTokenizer
+        return BytePairTokenizer.from_dict(tok["state"])
+    config = manifest.get("model_config") or {}
+    if config.get("text_vocab_size"):
+        raise ValueError(
+            "checkpoint was trained with a subword vocabulary "
+            f"({config['text_vocab_size']} ids) but does not store its tokenizer; "
+            "re-save it with the tokenizer, or it will be read as bytes")
+    return None

@@ -1,426 +1,635 @@
-"""Generate all four notebooks; this script only writes JSON, never trains/tests."""
-from pathlib import Path
+"""Generate every notebook in this directory; this script only writes JSON,
+it never trains or tests anything itself.
+
+One source, several targets. The three studio notebooks (Colab, Kaggle, any
+Jupyter host) share the same flow -- clone, detect hardware, pick a preset,
+dry-run, train in rounds, chat, optionally stage tool-use -- and differ only
+in how each host authenticates, persists checkpoints and reports hardware.
+Writing that flow once here is the point: a fix or a wording change applies to
+all three the next time this script runs, instead of drifting across four
+hand-edited files.
+
+``train_iridium_colab.ipynb`` is a short redirect: the old fixed single-preset
+Colab notebook is gone as a separate workflow, folded into the Colab studio
+notebook, and this file just says so and links to it (the badge keeps working
+because the file still exists at the same path).
+
+``train_iridium_tpu_colab.ipynb`` is a separate flow, not a studio variant: it
+targets the free Colab/Kaggle TPU v5e-1, exposes the raw geometry knobs
+(core layers, superstack layers, superstack count) instead of a fixed preset
+ladder, and gates training behind an explicit confirmation because a TPU
+session is quota you cannot get back.
+
+Regenerate with::
+
+    python notebooks/build_notebooks.py
+
+Edit this file, never the ``.ipynb`` files directly --
+``tests/unit/test_notebooks.py`` fails the build if a generated notebook no
+longer matches what this script would produce.
+"""
+from __future__ import annotations
+
 import json
 import textwrap
+from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-TARGETS = {
-    'kaggle': 'iridium_studio_kaggle.ipynb',
-    'colab': 'iridium_studio.ipynb',
-    'jupyter': 'iridium_studio_jupyter.ipynb',
-    'colab_legacy': 'train_iridium_colab.ipynb',
-}
 
-def cell(kind, text):
-    out = {'cell_type': kind, 'metadata': {}, 'source': textwrap.dedent(text).strip().splitlines(True)}
-    if kind == 'code':
+REPO_OWNER = "sporadicstudiosind-cloud"
+REPO_NAME = "test"
+RELEASE_BRANCH = "claude/gallant-faraday-lhycva"
+
+GENERATED_STUDIO = {
+    "colab": "iridium_studio.ipynb",
+    "kaggle": "iridium_studio_kaggle.ipynb",
+    "jupyter": "iridium_studio_jupyter.ipynb",
+}
+GENERATED_OTHER = {
+    "colab_redirect": "train_iridium_colab.ipynb",
+    "tpu": "train_iridium_tpu_colab.ipynb",
+}
+TARGETS = {**GENERATED_STUDIO, **GENERATED_OTHER}
+
+COLAB_BADGE = (
+    "[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)]"
+    "(https://colab.research.google.com/github/{owner}/{repo}/blob/{branch}/notebooks/{name})"
+).format(owner=REPO_OWNER, repo=REPO_NAME, branch=RELEASE_BRANCH, name="{name}")
+
+KAGGLE_BADGE = (
+    "[![Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)]"
+    "(https://kaggle.com/kernels/welcome?src=https://github.com/{owner}/{repo}"
+    "/blob/{branch}/notebooks/{{name}})"
+).format(owner=REPO_OWNER, repo=REPO_NAME, branch=RELEASE_BRANCH)
+
+
+def cell(kind: str, text: str) -> dict:
+    out = {"cell_type": kind, "metadata": {}, "source": textwrap.dedent(text).strip("\n").splitlines(True)}
+    if kind == "code":
         out.update(execution_count=None, outputs=[])
     return out
 
-def notebooks(target):
-    cells = []
-    def md(s): cells.append(cell('markdown', s))
-    def code(s): cells.append(cell('code', s))
-    md(f'''# Iridium Studio — {target.replace('_legacy', '')}
-    Shared core → sparse routed superstacks → refinement → native modality heads.
 
-    **Start a fresh kernel/session after the old `torch._dynamo` failure.**
-    This revision defaults to eager AdamW without torch.optim/Dynamo imports,
-    fp32 master weights plus automatic GPU mixed precision, conservative batches,
-    and resumable optimizer checkpoints. It does not upgrade your installed torch.
+class Builder:
+    """Accumulates cells; ``md``/``code`` mirror the old script's helpers."""
 
-    Upload this revision to GitHub before using the clone cell, or attach its ZIP
-    and set `PROJECT_ZIP`. Kaggle: enable Internet for GitHub/pip/text datasets and
-    select GPU T4 x2 to enable specialist model parallelism across both memory banks.
-    Transfers cost time; GPU memories remain separate and are budgeted separately.
+    def __init__(self) -> None:
+        self.cells: list[dict] = []
 
-    No tests or training were run to validate this revision. The notebook is
-    prepared for your run; hardware/runtime/data availability still determine success.
-    There are no automatic tests, evaluations, servers or interactive loops in Run All.
-    Training only runs when you execute its cell.
-    ''')
-    md('## 1. Load the updated source')
-    code(f'''
-    import os, sys, subprocess, zipfile
+    def md(self, text: str) -> None:
+        self.cells.append(cell("markdown", text))
+
+    def code(self, text: str) -> None:
+        self.cells.append(cell("code", text))
+
+
+# --------------------------------------------------------------------------
+# Shared building blocks
+# --------------------------------------------------------------------------
+
+def honesty_banner(b: Builder, title: str, default_preset: str) -> None:
+    b.md(f"""
+    # {title}
+
+    **The model is untrained until you run the training cell below.** Loading
+    this notebook, or running the setup cells, produces random weights and
+    nothing else. A checkpoint means something only after a training run has
+    actually completed.
+
+    **What a free session buys you** is printed by the dry-run cell (section
+    3) before anything trains: it prints `iridium.presets.preset_table()` and
+    `iridium.training.run_preset.dry_run()`'s cost/audit report, both computed
+    from `estimate_hours` and `iridium.training.budget.audit` -- not measured,
+    arithmetic, and optimistic (see the warning in `iridium/presets.py`). Read
+    those numbers before starting a long run; they tell you honestly whether
+    the chosen preset's step budget fits in the quota you have.
+
+    **Network is required.** The text/chat data path
+    (`iridium.training.datasets.build_corpus`) streams real text from the
+    Hugging Face `datasets` library, and the preset's subword tokenizer is
+    trained from that same stream the first time it runs. No network (or no
+    `datasets` package) means `train_preset` refuses to fall back to a
+    silently mismatched byte-level vocabulary and raises instead -- see
+    `iridium/training/run_preset.py`.
+
+    Default preset here: `{default_preset}`. Change `PRESET` in section 2 to
+    train a different one; `python -m iridium presets` (or the table this
+    notebook prints) lists every option and what each needs.
+    """)
+
+
+def private_clone_cell(target: str) -> str:
+    """The token-read + clone cell, one per host style.
+
+    The token is read from the host's own secret store, passed to git once through
+    an environment-scoped auth header, and never printed, put in a URL, or
+    written to disk. A public checkout (no
+    token, no existing local repo) gets a plain instruction instead of an
+    opaque git failure. Each branch is written out in full (rather than
+    spliced together from indented fragments) so the generated source has one
+    consistent indentation level throughout.
+    """
+    if target == "colab":
+        read_token_block = (
+            "token = None\n"
+            "try:\n"
+            "    from google.colab import userdata\n"
+            "    token = userdata.get('GITHUB_TOKEN')\n"
+            "except Exception:\n"
+            "    token = None\n"
+        )
+        missing_token_hint = (
+            "In Colab: the key icon in the left sidebar, Secrets, add "
+            "GITHUB_TOKEN with a fine-grained PAT that can read this "
+            "repository, then toggle notebook access on."
+        )
+    elif target == "kaggle":
+        read_token_block = (
+            "token = None\n"
+            "try:\n"
+            "    from kaggle_secrets import UserSecretsClient\n"
+            "    token = UserSecretsClient().get_secret('GITHUB_TOKEN')\n"
+            "except Exception:\n"
+            "    token = None\n"
+        )
+        missing_token_hint = (
+            "In Kaggle: Add-ons, Secrets, add GITHUB_TOKEN with a "
+            "fine-grained PAT that can read this repository, then attach it "
+            "to this notebook."
+        )
+    else:
+        read_token_block = "token = os.environ.get('GITHUB_TOKEN')\n"
+        missing_token_hint = (
+            "Set the GITHUB_TOKEN environment variable to a fine-grained PAT "
+            "that can read this repository before starting Jupyter, or clone "
+            "the repository yourself and launch this notebook from inside it."
+        )
+
+    header = f'''
+    # This repository is private until Iridium 1.0 ships. This cell never
+    # hard-codes or prints a token: it reads one from the host's own secret
+    # store (or an env var on a plain Jupyter host) and hands it to git only
+    # through an environment-scoped header, so it never lands in .git/config.
+    import os, sys, subprocess
     from pathlib import Path
-    PROJECT_ZIP = ''  # e.g. /kaggle/input/iridium-update/iridium-update.zip
-    REPO_URL = 'https://github.com/sporadicstudiosind-cloud/test.git'
-    BRANCH = 'claude/gallant-faraday-lhycva'
-    BASE = Path('/kaggle/working') if '{target}' == 'kaggle' else Path.cwd()
-    ROOT = BASE / 'iridium-updated-v3'  # fresh checkout avoids silently reusing stale source
-    if 'iridium' in sys.modules:
-        raise RuntimeError('Restart the kernel before changing source revisions')
-    if not ROOT.exists():
-        if PROJECT_ZIP:
-            staging = BASE / 'iridium-upload'
-            staging.mkdir(exist_ok=True)
-            with zipfile.ZipFile(PROJECT_ZIP) as archive:
-                for member in archive.infolist():
-                    if not (staging / member.filename).resolve().is_relative_to(staging.resolve()):
-                        raise ValueError('unsafe archive path')
-                archive.extractall(staging)
-            candidates = list(staging.rglob('iridium/training/eager_adamw.py'))
-            if len(candidates) != 1:
-                raise RuntimeError('ZIP must contain exactly one updated repository')
-            ROOT = candidates[0].parents[2]
+    '''
+    footer = f'''
+    REPO_OWNER = {REPO_OWNER!r}
+    REPO_NAME = {REPO_NAME!r}
+    RELEASE_BRANCH = {RELEASE_BRANCH!r}
+    ROOT = Path.cwd()
+
+    if (ROOT / 'iridium' / 'presets.py').is_file():
+        print('Already inside a checkout of the repository:', ROOT)
+    else:
+        ROOT = Path.cwd() / REPO_NAME
+        if ROOT.is_dir():
+            print('Reusing existing checkout at', ROOT)
+        elif token:
+            # The token travels in an environment-scoped git config header:
+            # never in the URL (git would store it in .git/config) and never in
+            # the argv (a failed subprocess prints its argv).
+            import base64
+            basic = base64.b64encode(f'x-access-token:{{token}}'.encode()).decode()
+            env = dict(os.environ, GIT_CONFIG_COUNT='1',
+                       GIT_CONFIG_KEY_0='http.https://github.com/.extraheader',
+                       GIT_CONFIG_VALUE_0=f'AUTHORIZATION: basic {{basic}}',
+                       GIT_TERMINAL_PROMPT='0')
+            done = subprocess.run(['git', 'clone', '--depth', '1', '--branch', RELEASE_BRANCH,
+                                   f'https://github.com/{{REPO_OWNER}}/{{REPO_NAME}}.git',
+                                   str(ROOT)], env=env, capture_output=True, text=True)
+            del env, basic
+            if done.returncode != 0:
+                raise RuntimeError('git clone failed (exit %d). Check the token can read '
+                                   'the repository and the branch exists.' % done.returncode)
+            print('Cloned', REPO_OWNER + '/' + REPO_NAME, '@', RELEASE_BRANCH, 'to', ROOT)
         else:
-            subprocess.run(['git', 'clone', '--depth', '1', '--branch', BRANCH, REPO_URL, str(ROOT)], check=True)
-    if not (ROOT / 'iridium/training/eager_adamw.py').is_file():
-        raise RuntimeError('Old checkout. Upload the update, then use a fresh ROOT directory')
-    if not (ROOT / 'iridium/runtime/placement.py').is_file():
-        raise RuntimeError('Stale checkout: use a fresh ROOT and the latest branch or ZIP')
+            print('No GITHUB_TOKEN found. {missing_token_hint}')
+            print('Trying an unauthenticated clone (works only if the repo is public)...')
+            subprocess.run(['git', 'clone', '--depth', '1', '--branch', RELEASE_BRANCH,
+                           f'https://github.com/{{REPO_OWNER}}/{{REPO_NAME}}.git', str(ROOT)],
+                          check=True)
     os.chdir(ROOT)
-    sys.path.insert(0, str(ROOT))
-    # Preserve the host CUDA/PyTorch installation. Optional BNB is NOT installed by default.
-    subprocess.run([sys.executable, '-m', 'pip', 'install', '-q',
-                    'numpy>=1.24,<3', 'pyyaml>=6,<7', 'psutil>=5,<8',
-                    'Pillow>=10,<13', 'datasets>=3,<5'], check=True)
-    print('source:', ROOT)
-    import hashlib
-    SOURCE_DIGEST = hashlib.sha256(b''.join(p.relative_to(ROOT).as_posix().encode() + p.read_bytes()
-                                          for p in sorted((ROOT / 'iridium').rglob('*.py')))).hexdigest()
-    print('source SHA256:', SOURCE_DIGEST)
-    ''')
-    md('''## Controller and memory revision
-    Each cycle runs the full general core. It chooses core recurrence or subject
-    dispatch; returned specialist states are integrated by the next full core cycle.
-    Emission selects a completed core state. Fixed unrolling maintains causal caches.
-    Consumer presets have shallower cores and deeper specialist stacks.
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    print('working directory:', Path.cwd())
+    '''
+    return textwrap.dedent(header).strip("\n") + "\n" + read_token_block + textwrap.dedent(footer).rstrip("\n")
 
-    A small neural compressor and learned read gate are trained inside the model.
-    Normal decoding uses exact local KV. `LongContextSession` bounds KV, retaining
-    lossy learned memory across windows, with a 1,048,576-token ingestion budget.
-    This is NOT a demonstrated million-token recall capability. Native image tiling
-    preserves source pixels; training those capabilities requires matching examples.
-    See `docs/ARCHITECTURE_V2.md` for mechanisms, tradeoffs and unvalidated boundaries.
-    ''')
-    md('''## Kaggle precision and two-GPU revision
-    T4/P100 select FP16 with a gradient scaler; BF16 requires native hardware support.
-    Halting cumulative products and KL calculations use FP32, avoiding a mixed-dtype
-    backward path. Logging detaches tensors before scalar conversion.
 
-    `GPU_MODE='auto'` partitions specialist stacks across up to two visible GPUs.
-    The core, codecs and router stay on GPU 0. Weights, gradients and eager AdamW
-    moments for each stack live on its assigned GPU. This is model parallelism,
-    not replicated data parallelism; it increases capacity but can be slower.
-    Per-device plans and actual live-memory logs show both cards separately.
-    The largest individual component still has to fit on one card.
+def install_cell(target: str) -> str:
+    # The ``data`` extra brings ``datasets``, which every preset needs to
+    # stream text and train its tokenizer. torch is already on every host.
+    return '''
+    !pip install -q -e ".[data]"
+    '''.rstrip()
 
-    Restart the Kaggle session before running this revision. Do not reuse imported
-    modules or a partially failed training model. This revision remains unexecuted
-    by its author, per your instruction not to run tests or training.
-    ''')
-    md('## 2. Hardware and training settings')
-    code(f'''
-    import json, math, torch, psutil
-    from dataclasses import replace
-    from iridium.config_builder import intelligence_preset
-    from iridium.runtime.memory import plan_training
-    from iridium.runtime.placement import layout, native_bf16
-    print('Python:', sys.version.split()[0], 'torch:', torch.__version__, 'torch path:', torch.__file__)
-    DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    if '{target}' == 'kaggle' and DEVICE == 'cpu':
-        raise RuntimeError('Enable a Kaggle GPU accelerator and restart the session')
+
+def hardware_and_preset_cell(target: str, default_preset: str) -> str:
+    return f'''
+    import torch
+    from iridium.runtime.device import detect
+    from iridium.presets import PRESETS, FREE_TIERS, get_preset, preset_table
+
+    info = detect()
+    DEVICE = info.device
+    print(info.describe())
     if torch.cuda.is_available():
-        print('GPU:', torch.cuda.get_device_name(0), 'available GPUs:', torch.cuda.device_count())
-    GPU_MODE = 'auto'  # auto: use both visible GPUs; single: GPU 0 only
-    if GPU_MODE not in ('auto', 'single'):
-        raise ValueError('GPU_MODE must be auto or single')
-    DEVICES = tuple(f'cuda:{{i}}' for i in range(min(2, torch.cuda.device_count()))) if DEVICE.startswith('cuda') and GPU_MODE == 'auto' else (DEVICE,)
-    for dev in DEVICES:
-        if dev.startswith('cuda'):
-            print(dev, torch.cuda.get_device_name(dev), 'free/total GB:',
-                  tuple(round(v/1e9, 2) for v in torch.cuda.mem_get_info(dev)))
-    PRESET = 'consumer_tiny'
-    SIZES = ('micro', 'mini', 'consumer_tiny', 'small', 'consumer', 'small_plus',
-             'medium', 'medium_plus', 'workstation')
-    print('preset / parameters (M) / core layers / stacks x depth')
-    for size in SIZES:
-        geometry = intelligence_preset(size)
-        print(size, round(geometry.n_params/1e6, 2), geometry.core.n_layers,
-              str(geometry.stacks.n_stacks) + ' x ' + str(geometry.stacks.n_layers))
-    MAX_SEQ_LEN = 1024
-    MICRO_BATCH = 1
-    EFFECTIVE_BATCH = 16
-    STEPS = 3000
-    LR = 3e-4
-    N_LOOPS = 3           # full core -> optional stacks -> core integration; bounded at 8
-    OPTIMIZER = 'eager_adamw'  # native adamw/adafactor/sgd and explicit BNB options remain available
-    PRECISION = 'auto'    # T4/P100: fp16+scaler; capable GPUs: bf16; CPU: fp32
-    CHECKPOINT_EVERY = 50
-    SEED = 0
-    RESUME = ''          # trusted full training checkpoint .pt; increase STEPS to continue
-    cfg = replace(intelligence_preset(PRESET), max_seq_len=MAX_SEQ_LEN)
-    if not 1 <= N_LOOPS <= cfg.router.max_loops:
-        raise ValueError('N_LOOPS exceeds configured budget')
-    placement = layout(cfg, DEVICES)
-    print('stack placement:', placement['stack_devices'])
-    plans = []
-    for dev in DEVICES:
-        available = torch.cuda.mem_get_info(dev)[0] if dev.startswith('cuda') else psutil.virtual_memory().available
-        local_stacks = placement['stack_devices'].count(dev)
-        local_layers = cfg.stacks.n_layers * local_stacks + (cfg.core.n_layers if dev == DEVICE else 2)
-        local_plan = plan_training(placement['parameters_per_device'][dev], MICRO_BATCH,
-                        MAX_SEQ_LEN, max(1, local_layers), cfg.core.n_query_heads,
-                        available, optimizer_kind=OPTIMIZER, headroom=.35,
-                        d_model=cfg.core.d_model, d_ff=max(cfg.core.d_ff, cfg.stacks.d_ff),
-                        n_loops=N_LOOPS)
-        print(dev, local_plan.render())
-        plans.append(local_plan)
-    print(cfg.report().render())
-    if not all(p.fits for p in plans):
-        raise RuntimeError('A device exceeds the conservative budget. Reduce PRESET/MAX_SEQ_LEN; VRAM cannot be pooled.')
-    MICRO_BATCH = min(p.micro_batch for p in plans)
-    if PRECISION == 'auto':
-        PRECISION = ('bf16' if native_bf16(DEVICES) else 'fp16') if DEVICE.startswith('cuda') else 'fp32'
-    print('Selected precision:', PRECISION, 'devices:', DEVICES)
-    ACCUMULATE = math.ceil(EFFECTIVE_BATCH / MICRO_BATCH)
-    print('micro batch:', MICRO_BATCH, 'accumulation:', ACCUMULATE,
-          'effective batch:', MICRO_BATCH * ACCUMULATE)
-    ''')
-    md('''## 3. Training data
-    Real text/chat, subject examples and paired speech need Internet. Custom media uses JSONL (see
-    `docs/MULTIMODAL_DATA.md`). Text-only data does not train speech, image, video,
-    geometry or tool-use competence. `MEDIA_MANIFEST` supports interleaved media,
-    assistant outputs, and tool observations; no external AI model is used.
-    Start with short speech segments/64px media. Split by source recording, not
-    neighboring clips. Dataset attribution is recorded in the checkpoint.
-    ''')
-    code('''
-    from iridium.training.datasets import build_corpus, Corpus, describe
-    from iridium.data.multimodal import load_manifest
-    from iridium.data.text_corpus import DEFAULT_MIX, licence_notice
-    from iridium.data.chat_corpus import chat_licence_notice
-    from iridium.codecs.media import FORMAT
-    from iridium.data.subject_corpus import real_subject_corpus
-    from iridium.data.speech_corpus import prepare_librispeech
-    DOWNLOAD_SPEECH = True  # real paired native ASR + speech examples; requires ffmpeg/Internet
-    SUBJECT_STEPS = 100
-    USE_REAL_TEXT = True
-    N_TRAIN_ITEMS = 8000
-    MEDIA_MANIFEST = ''  # /kaggle/input/my-media/train.jsonl
-    MEDIA_ITEMS = 2000
-    TRAIN_MODE = 'mixed'  # mixed | media_only
-    if TRAIN_MODE not in ('mixed', 'media_only'):
-        raise ValueError('unknown TRAIN_MODE')
-    if TRAIN_MODE == 'media_only' and not MEDIA_MANIFEST:
-        raise ValueError('media_only requires MEDIA_MANIFEST')
-    if TRAIN_MODE == 'media_only':
-        train = Corpus([], 'train')
-    else:
-        mixture = {'channel_depth': .08, 'channel_intervention': .06,
-                   'field_rollout': .04, 'scene_goal': .06, 'false_premise': .06}
-        if USE_REAL_TEXT:
-            mixture.update(chat=.45, text_lm=.25)
-        train = build_corpus(N_TRAIN_ITEMS, seed=SEED, split='train', mixture=mixture,
-                             text_window=min(256, MAX_SEQ_LEN-8))
-        # Reject overlong conversations rather than truncate away the assistant target.
-        before = len(train.items)
-        train.items = [it for it in train.items if 1 < len(it.sample) <= MAX_SEQ_LEN]
-        print('removed overlong examples:', before - len(train.items))
-    if MEDIA_MANIFEST:
-        media = load_manifest(MEDIA_MANIFEST, cfg.codecs, split='train',
-                              max_items=MEDIA_ITEMS, max_tokens=MAX_SEQ_LEN)
-        train.items.extend(media.items)
-    else:
-        print('No custom image/video/tool manifest attached. DOWNLOAD_SPEECH separately controls real speech pairs.')
-    SUBJECT_PROVENANCE = []
-    if TRAIN_MODE == 'mixed':
-        subjects, SUBJECT_PROVENANCE = real_subject_corpus(cfg.stacks.specializations,
-                                                          per_subject=256, max_tokens=MAX_SEQ_LEN)
-        train.items.extend(subjects.items)
-    SPEECH_MANIFEST = ''
-    if DOWNLOAD_SPEECH:
-        speech_subject = ('audio_speech_music' if 'audio_speech_music' in cfg.stacks.specializations
-                          else 'language_reasoning_intent')
-        SPEECH_MANIFEST = str(prepare_librispeech(ROOT / 'data/native-speech', cfg.codecs,
-                              count=128, max_tokens=MAX_SEQ_LEN, subject=speech_subject))
-        speech = load_manifest(SPEECH_MANIFEST, cfg.codecs, max_items=256, max_tokens=MAX_SEQ_LEN)
-        train.items.extend(speech.items)
-    if not train.items:
-        raise ValueError('No usable training examples')
-    print(describe(train))
-    DATA_INFO = {'media_format': FORMAT, 'source_sha256': SOURCE_DIGEST,
-                 'subject_datasets': SUBJECT_PROVENANCE, 'speech_manifest': SPEECH_MANIFEST,
-                 'speech_manifest_sha256': hashlib.sha256(Path(SPEECH_MANIFEST).read_bytes()).hexdigest() if SPEECH_MANIFEST else '',
-                 'media_manifest_sha256': hashlib.sha256(Path(MEDIA_MANIFEST).read_bytes()).hexdigest() if MEDIA_MANIFEST else '', 'families': train.counts(),
-                 'media_manifest': MEDIA_MANIFEST,
-                 'text_licences': licence_notice(DEFAULT_MIX) if USE_REAL_TEXT and TRAIN_MODE == 'mixed' else '',
-                 'chat_licences': chat_licence_notice() if USE_REAL_TEXT and TRAIN_MODE == 'mixed' else '',
-                 'media_examples': sum(it.sample.meta.get('format') == FORMAT for it in train.items),
-                 'media_sources': sorted({(it.sample.meta.get('source',''), it.sample.meta.get('license',''))
-                                          for it in train.items if it.sample.meta.get('format') == FORMAT})}
-    ''')
-    md('''## 4. Train and save
-    Execute this cell when ready. Keep model weights in fp32; autocast selects
-    operation precision. Forward/backward OOM retries discard the whole partial
-    update and lower the micro-batch. An optimizer-update OOM stops because an
-    interrupted update may have changed some weights. Resume from a checkpoint.
-    Checkpoints include optimizer, scaler, step and RNG state; resume starts a
-    new data shuffle and is not bit-for-bit replay. Gradient checkpointing stays
-    disabled because this architecture's earlier implementation had parity problems.
-    ''')
-    code('''
-    from iridium.model.iridium1 import Iridium1
-    from iridium.training.trainer import Trainer, TrainConfig
-    from iridium.training.losses import LossWeights
-    from iridium.runtime.memory import free_memory
-    # Release previous notebook references before allocating a replacement model.
-    model = trainer = chat = media_tools = agent = None
-    free_memory(verbose=False)
-    torch.manual_seed(SEED)
-    model = Iridium1(cfg)  # Trainer places components directly; no whole-model GPU-0 allocation
-    settings = TrainConfig(steps=STEPS, batch_size=MICRO_BATCH, accumulate=ACCUMULATE,
-                           lr=LR, n_loops=N_LOOPS, optimizer=OPTIMIZER, precision=PRECISION, devices=DEVICES,
-                           max_length=MAX_SEQ_LEN, seed=SEED, log_every=25,
-                           checkpoint_every=CHECKPOINT_EVERY, label=f'studio-{PRESET}')
-    if not RESUME and SUBJECT_STEPS > 0:
-        from iridium.training.subject_curriculum import specialize
-        warmup = Trainer(model, train, replace(settings, steps=max(1, STEPS//3), label='general-warmup'),
-                         LossWeights(), out_dir=ROOT / 'runs/general-warmup', device=DEVICE)
-        warmup.data_info = DATA_INFO
-        warmup.train()
-        warmup.save('final')
-        del warmup
-        free_memory(verbose=False)
-        DATA_INFO['specialization'] = specialize(model, train, settings, SUBJECT_STEPS,
-                                                 ROOT / 'runs/subjects', device=DEVICE)
-        free_memory(verbose=False)
-    # Joint phase unfreezes the shared model. Each phase has a fresh optimizer.
-    trainer = Trainer(model, train, settings, LossWeights(),
-                      out_dir=ROOT / 'runs/studio', device=DEVICE)
-    trainer.data_info = DATA_INFO
-    if RESUME:
-        trainer.resume(RESUME)
-    trainer.train()
-    path = trainer.save('final')
-    print('Full training checkpoint:', path)
-    ''')
-    md('''Training includes a general warmup, labelled specialization and joint refinement.
-    Real train-split GSM8K/MBPP/ARC data supplies subject routing targets; real LibriSpeech
-    pairs supply native speech targets. Downloads pin and record dataset revisions.
-    These starter subsets are not sufficient for broad expert or fluent multimodal skills.
-    `SUBJECT_STEPS=0` skips warmup/specialization. Resuming skips those phases too.
-    ''')
-    md('''## 5. Export and optional use
-    These cells define helpers only. Call them yourself after training. The
-    inference export omits optimizer state and retains fp32 weights to avoid
-    mismatched input/parameter dtypes. A trained checkpoint is required for
-    meaningful text, native speech recognition, native media generation and
-    agent planning; success is not inferred from a falling training loss.
-    ''')
-    code('''
-    model.eval()
-    export = ROOT / 'iridium-inference.pt'
-    torch.save({'state_dict': {k: v.detach().cpu() for k, v in model.state_dict().items()},
-                'manifest': trainer.manifest()}, export)
+        print('GPU:', torch.cuda.get_device_name(0))
+
+    # {"Colab free tier: a T4 by default." if target == "colab" else
+       "Kaggle: P100 or 2xT4 depending on what you selected in Settings." if target == "kaggle" else
+       "Any Jupyter host: pick the preset that matches what you actually have."}
+    PRESET = {default_preset!r}
+    preset = get_preset(PRESET)
+    print()
+    print(preset_table())
+    '''
+
+
+def dry_run_cell() -> str:
+    return '''
+    from iridium.training.run_preset import dry_run
+
+    dry_run_result = dry_run(preset)
+    if not dry_run_result['match']:
+        raise RuntimeError(
+            f"parameter count mismatch: built {dry_run_result['parameters_built']:,}, "
+            f"formula says {dry_run_result['parameters_formula']:,}. Do not train "
+            "until this reconciles -- report it rather than proceeding."
+        )
+    '''
+
+
+def persistence_cell(target: str) -> str:
+    if target == "colab":
+        return '''
+        # Round checkpoints survive a disconnected Colab session only if they
+        # land on Drive. Mounting is optional; without it OUT_DIR is local to
+        # the VM and is deleted when the runtime recycles.
+        from pathlib import Path
+        try:
+            from google.colab import drive
+            drive.mount('/content/drive')
+            OUT_DIR = Path('/content/drive/MyDrive/iridium-runs')
+        except Exception:
+            print('Drive not mounted; checkpoints will not survive a runtime restart.')
+            OUT_DIR = Path('runs')
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        print('checkpoints ->', OUT_DIR)
+        '''
+    if target == "kaggle":
+        return '''
+        # /kaggle/working is preserved as this notebook's Output when you
+        # commit the notebook (Save Version); it is not preserved for an
+        # interactive-only session that is never committed.
+        from pathlib import Path
+        OUT_DIR = Path('/kaggle/working/iridium-runs')
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        print('checkpoints ->', OUT_DIR, '(persists once you Save Version)')
+        '''
+    return '''
+    # Plain Jupyter: checkpoints land under the working directory. Point this
+    # at whatever storage on this host actually survives a restart.
+    from pathlib import Path
+    OUT_DIR = Path('runs')
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    print('checkpoints ->', OUT_DIR.resolve())
+    '''
+
+
+def train_cell() -> str:
+    return '''
+    from iridium.training.run_preset import train_preset
+
+    STEPS = None        # None: use the preset's own step budget
+    ROUNDS = None        # None: use the preset's own round count
+    RESUME_FROM = ''      # e.g. str(OUT_DIR / preset.name / f'{preset.name}-round2.pt') after a restart
+
+    checkpoint = train_preset(
+        preset, steps=STEPS, rounds=ROUNDS, device=DEVICE, out=str(OUT_DIR),
+        resume=(RESUME_FROM or None), seed=0,
+    )
+    print('final checkpoint:', checkpoint)
+    '''
+
+
+def resume_markdown(target: str) -> str:
+    where = {
+        "colab": "under `OUT_DIR` on Drive, so it is there after a disconnect",
+        "kaggle": "under `/kaggle/working`, so it is there only if you Saved a "
+                  "Version before the session ended",
+        "jupyter": "under `OUT_DIR` on this host's own disk",
+    }[target]
+    return f"""
+    ## 5. Resuming after a session ends
+
+    Every round from section 4 is a checkpoint: `train_preset` saves
+    `OUT_DIR/<preset>/<preset>-round0.pt`, `-round1.pt`, ... and a final `<preset>-final.pt`. A
+    free session can end mid-run without warning, and each round's file is
+    {where}.
+
+    To continue: set `RESUME_FROM` in the training cell above to the last
+    `roundN.pt` you have, re-run this notebook from the top (cloning and
+    installing are idempotent), and re-run the training cell. `train_preset`
+    restores the optimizer, step count and learning-rate schedule -- the
+    schedule spans the whole run, so a resumed run is not a fresh one with the
+    clock reset. It does start a new data shuffle; resuming is not bit-for-bit
+    replay of the interrupted round.
+    """
+
+
+def chat_cell() -> str:
+    return '''
+    from iridium.training.trainer import load_checkpoint
     from iridium.runtime.chat import ChatSession
+
+    model, manifest = load_checkpoint(str(checkpoint), device=DEVICE)
     chat = ChatSession(model)
-    def ask(message):
-        return chat.send(message)
-    print('Inference checkpoint:', export)
-    # ask('Hello!')
-    ''')
-    code('''
-    from iridium.agency.media_agent import MediaTools, MediaAgent
-    from iridium.runtime.media_generation import generate_media
-    media_tools = MediaTools(model, ROOT / 'media_outputs')
-    agent = MediaAgent(model, ROOT / 'agent_outputs')
-    # Native transcription + real editing: source seconds 10..20 become clip-relative 0..10.
-    # result = media_tools.clip_with_subtitles('/kaggle/input/my-video/source.mp4', 10, 20)
-    # Or ask the trained model to choose the sequence of tools:
-    # result = agent.run('Extract seconds 10 to 20, transcribe, and subtitle the clip.',
-    #                    ['/kaggle/input/my-video/source.mp4'])
-    # Native output from Iridium's own trained flow heads:
-    # generate_media(model, 'A red cube', 'image', ROOT / 'cube.png', size=64)
-    # FFmpeg and ffprobe must be installed for audio/video I/O.
-    ''')
-    md('''## Reading the result
-    The agent returns a real artifact path or an error; it does not claim success
-    for a plan alone. Transcription captions use chunk timestamps, not word-level
-    alignment. MP4 subtitles are selectable embedded tracks plus a separate SRT.
-    See `docs/UPDATE_NOTES.md` for the Kaggle diagnosis, changes, limits and manual
-    acceptance checklist. Larger sizes, reliable general intelligence, photorealistic
-    synthesis and arbitrary application control are not established by this notebook.
-    ''')
-    md('''## 6. Optional bounded self-improvement campaign
-    This is OFF by default. When you explicitly enable it, the trained current
-    version proposes JSON experiments; fresh subprocesses train candidates one
-    at a time. A fixed evaluator compares them on selection data and a separate
-    promotion audit. A failing candidate never replaces the current version.
+    print(chat.send('Hello! What are you, and what can you actually do right now?'))
+    '''
 
-    Prepare three disjoint source splits: `train`, `selection`, `audit`, in
-    JSONL manifests using the media schema. Add `family` (speech, captions, tools,
-    etc.) and at least 16 held-out items per family/modality. No model-written
-    Python is executed: code patches are saved for review. This Kaggle backend
-    is configuration search, not a security sandbox for arbitrary code.
-    ''')
-    code('''
-    RUN_RESEARCH = False
-    RESEARCH_TRAIN = ''
-    RESEARCH_SELECTION = ''
-    RESEARCH_AUDIT = ''
-    # None asks the current model. Weak initial models may fail to emit valid JSON.
-    # Or explicitly supply candidates-1 human recipes, e.g.:
-    # Controller models must keep gated_bank=False (the core performs integration).
-    # PROPOSALS = [{'lr': 1e-4}, {'lr': 2e-4, 'n_loops': 2}]
-    PROPOSALS = None
-    if RUN_RESEARCH:
-        if not all((RESEARCH_TRAIN, RESEARCH_SELECTION, RESEARCH_AUDIT)):
-            raise ValueError('Attach all three manifests before enabling research')
-        from iridium.research.controller import ResearchLoop
-        from iridium.research.policy import ResearchPolicy
-        import datetime
-        initial_checkpoint = str(path)  # full trained checkpoint saved in section 4
-        # Release notebook GPU ownership so each worker has the device to itself.
-        model = trainer = chat = media_tools = agent = None
-        free_memory(verbose=False)
-        policy = ResearchPolicy(rounds=2, candidates=3, train_steps=100,
-                                max_parameters=max(150_000_000, int(cfg.n_params * 1.01)))
-        campaign = ROOT / 'research_runs' / datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
-        research = ResearchLoop(campaign, RESEARCH_TRAIN, RESEARCH_SELECTION,
-                                RESEARCH_AUDIT, policy=policy, device=DEVICE)
-        research.initialize(initial_checkpoint)
-        result = research.run(proposals=PROPOSALS)
-        print(result)
-        # Version directories contain safe tensor weights.pt + model.json.
-        # Reload the accepted model explicitly; the live model is never rewritten.
-        from iridium.research.worker import load_version
-        model, research_descriptor = load_version(result['current'], DEVICE)
-        chat = ChatSession(model, n_loops=research_descriptor['n_loops'])
+
+def chat_cli_markdown() -> str:
+    return """
+    The same checkpoint works from a terminal, outside this notebook:
+
+    ```bash
+    python -m iridium chat --checkpoint {checkpoint} --device auto
+    ```
+
+    (`python -m iridium chat` also defaults to the bundled small demo
+    checkpoint if you omit `--checkpoint`; that one is a fixed-recipe
+    fine-tune, not the model this notebook trained.)
+    """.replace("{checkpoint}", "$OUT_DIR/<preset>/<preset>-final.pt")
+
+
+def tools_stage_cell() -> str:
+    return '''
+    import importlib.util
+
+    TOOLS_PRESET = 'tools-100m'
+
+    if importlib.util.find_spec('iridium.runtime.tools') is None:
+        print(
+            'iridium.runtime.tools is not importable in this checkout yet -- '
+            'tool use is still landing. Re-clone once it has merged and rerun '
+            'this cell; skipping the tools stage for now.'
+        )
+        tools_checkpoint = None
     else:
-        print('Research disabled. No candidate training or evaluation was started.')
-    ''')
-    md('''## Bounded long context and high-resolution inputs
-    Definitions only. Call after training. Use one session per document/user; original
-    files or SourceArchive remain necessary for exact recovery after compression.
-    ''')
-    code('''
-    from iridium.runtime.long_context import LongContextSession
-    from iridium.runtime.source_archive import SourceArchive
-    from iridium.codecs.high_resolution import stream_image, stream_video
-    from iridium.runtime.chat import Turn, conversation_sample
-    def new_long_session():
-        model.eval()
-        return LongContextSession(model, n_loops=N_LOOPS, window=MAX_SEQ_LEN)
-    def ask_long(session, prompt, max_new_tokens=128):
-        sample = conversation_sample([Turn('user', prompt)], False, True)
-        return session.continue_text(sample, max_new_tokens)
-    # session = new_long_session()
-    # stream_image(session, '/path/to/large-image.png')
-    # print(ask_long(session, 'Read the small labels and explain this diagram.'))
-    # print(session.storage_report())
-    ''')
-    return cells
+        tools_preset = get_preset(TOOLS_PRESET)
+        tools_checkpoint = train_preset(
+            tools_preset, device=DEVICE, out=str(OUT_DIR), init=str(checkpoint), seed=0,
+        )
+        print('tools checkpoint:', tools_checkpoint)
+    '''
 
-def main():
-    for target, name in TARGETS.items():
-        nb = {'cells': notebooks(target), 'metadata': {
-            'kernelspec': {'display_name': 'Python 3', 'name': 'python3'},
-            'language_info': {'name': 'python'}, 'accelerator': 'GPU'},
-            'nbformat': 4, 'nbformat_minor': 0}
-        (HERE / name).write_text(json.dumps(nb, ensure_ascii=False, indent=1), encoding='utf-8')
-        print('Wrote', name)
 
-if __name__ == '__main__':
+def build_studio(target: str, title: str, default_preset: str) -> list[dict]:
+    b = Builder()
+    honesty_banner(b, title, default_preset)
+
+    b.md("## 1. Get the source (private repo)\n\nNever prints or stores the token; see `notebooks/README.md` for how to add one.")
+    b.code(private_clone_cell(target))
+
+    b.md("## 2. Install and detect hardware")
+    b.code(install_cell(target))
+    b.code(hardware_and_preset_cell(target, default_preset))
+
+    b.md("""
+    ## 3. Dry run -- build, cost, audit, before anything trains
+
+    No network, no training: builds the model on the meta device, checks the
+    instantiated parameter count against `IridiumConfig`'s own formula, and
+    prints the data-budget audit (`iridium.training.budget.audit`) plus the
+    free-tier time estimates for every tier in `FREE_TIERS`. Read this before
+    committing a free session to a long run.
+    """)
+    b.code(dry_run_cell())
+
+    b.md("## 4. Train in rounds\n\nCheckpoint persistence for this host:")
+    b.code(persistence_cell(target))
+    b.md("""
+    Training streams real text (and, depending on the preset, chat/tool/media
+    data) over the network in rounds of fresh data -- see the module docstring
+    in `iridium/training/run_preset.py` for why rounds exist. Each round saves
+    a checkpoint; the loop below trains the whole preset unless you lower
+    `STEPS`/`ROUNDS` for a shorter first try.
+    """)
+    b.code(train_cell())
+    b.md(resume_markdown(target))
+
+    b.md("## 6. Chat with the result")
+    b.code(chat_cell())
+    b.md(chat_cli_markdown())
+
+    b.md("""
+    ## 7. Optional: stage 2, add tool use (`tools-100m`)
+
+    Initialises from the chat checkpoint you just trained (`--init`) rather
+    than from scratch. This stage depends on `iridium.runtime.tools`, which is
+    being built alongside this notebook; the cell below checks for it and
+    tells you plainly if it is not there yet rather than failing deep inside a
+    training run.
+    """)
+    b.code(tools_stage_cell())
+    return b.cells
+
+
+def build_colab_redirect() -> list[dict]:
+    b = Builder()
+    b.md(f"""
+    # Iridium 1.0 -- start here: `iridium_studio.ipynb`
+
+    {COLAB_BADGE.format(name='iridium_studio.ipynb')}
+
+    This notebook (the old fixed single-preset Colab trainer) has been folded
+    into **`iridium_studio.ipynb`**, in this same `notebooks/` directory. That
+    notebook does everything this one used to -- detect the T4, pick a preset,
+    dry-run it, train in rounds, chat with the result -- and adds the private-
+    repo clone step, resume-after-disconnect instructions, and the optional
+    tool-use second stage.
+
+    Open `iridium_studio.ipynb` instead of this file; nothing below trains
+    anything.
+    """)
+    b.code('''
+    print(
+        "This notebook is a redirect. Open iridium_studio.ipynb in this same "
+        "notebooks/ directory instead -- it replaces this one."
+    )
+    ''')
+    return b.cells
+
+
+def build_tpu() -> list[dict]:
+    """The ported TPU v5e-1 builder: preset + geometry overrides + a gate.
+
+    Rebuilt from the description in the task brief -- the source PR's branch
+    (``codex/create-colab-with-48gb-ram``) is not fetchable from here (only a
+    local ``git show`` against an already-fetched ref is allowed, and that ref
+    is not present in this checkout's remotes). Nothing below re-implements
+    XLA training mechanics: it calls the same ``train_preset``/``Trainer`` the
+    other notebooks call, with ``device='xla'``, and lets the library's own
+    XLA support (``xm.optimizer_step``, ``xm.save``, a ``None`` generator on
+    XLA -- see ``iridium/runtime/device.py:generator_for``) do the actual work.
+    """
+    b = Builder()
+    b.md(f"""
+    # Iridium 1.0 -- TPU v5e-1 builder (Colab/Kaggle)
+
+    {COLAB_BADGE.format(name='train_iridium_tpu_colab.ipynb')}
+
+    **The model is untrained until you run the training cell, and that cell is
+    gated behind an explicit confirmation below** -- a free TPU session is
+    quota you cannot get back, and this notebook would rather make you say so
+    than start on autopilot.
+
+    This targets the free **TPU v5e-1** runtime (`torch_xla`), not a GPU. It
+    starts from a preset like the other studio notebooks, then exposes the raw
+    geometry -- core layers, superstack layers, superstack count -- as
+    overrides, because a TPU's extra memory (48 GB host RAM on a Colab v5e-1)
+    is exactly the room to try a deeper or wider variant of a preset before it
+    has a name.
+
+    Needs network and the `datasets` package for the same reason as the other
+    notebooks: the text/chat/tokenizer path streams real data and trains a
+    subword tokenizer from it.
+    """)
+
+    b.md("## 1. Get the source (private repo)")
+    b.code(private_clone_cell("colab"))
+
+    b.md("## 2. Install (adds torch_xla for the TPU runtime)")
+    b.code('''
+    !pip install -q -e . 2>/dev/null || pip install -q torch numpy datasets pyyaml psutil
+    !pip install -q torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html
+    ''')
+
+    b.md("## 3. Detect the TPU and pick a starting preset")
+    b.code('''
+    import torch
+    from iridium.presets import PRESETS, FREE_TIERS, get_preset, preset_table
+    from iridium.runtime.device import detect
+
+    try:
+        import torch_xla.core.xla_model as xm
+        DEVICE = str(xm.xla_device())
+        print('XLA device:', DEVICE)
+    except Exception as exc:
+        print('torch_xla is not usable here (', exc, '); falling back to CPU/GPU detection.')
+        DEVICE = detect().device
+
+    PRESET = 'chat-100m'  # a TPU v5e-1's 16 GB and 48 GB host RAM affords more than chat-34m
+    preset = get_preset(PRESET)
+    print()
+    print(preset_table())
+    ''')
+
+    b.md("""
+    ## 4. Geometry overrides
+
+    Leave any override at `None` to keep the preset's own value. These change
+    `preset.config.core`/`preset.config.stacks` directly; the dry-run cell
+    below re-derives the parameter count from the *overridden* shapes, so a
+    mismatch here is caught before training, not after.
+    """)
+    b.code('''
+    from dataclasses import replace
+
+    CORE_LAYERS = None         # int, overrides preset.config.core.n_layers
+    SUPERSTACK_LAYERS = None    # int, overrides preset.config.stacks.n_layers
+    SUPERSTACK_COUNT = None     # int, overrides preset.config.stacks.n_stacks
+
+    cfg = preset.config
+    new_core = cfg.core if CORE_LAYERS is None else replace(cfg.core, n_layers=CORE_LAYERS)
+    new_stacks = cfg.stacks
+    if SUPERSTACK_LAYERS is not None:
+        new_stacks = replace(new_stacks, n_layers=SUPERSTACK_LAYERS)
+    if SUPERSTACK_COUNT is not None:
+        new_stacks = replace(new_stacks, n_stacks=SUPERSTACK_COUNT)
+    cfg = replace(cfg, core=new_core, stacks=new_stacks)
+    preset = replace(preset, config=cfg)
+    print(preset.config.report().render())
+    ''')
+
+    b.md("## 5. Dry run -- build, cost, audit")
+    b.code(dry_run_cell())
+
+    b.md("""
+    ## 6. Confirm and train
+
+    `torch_xla` compiles static shapes; this architecture's router dispatches
+    a *variable* number of tokens per superstack per step, which forces a
+    recompile per shape (or padding to a fixed capacity) on a real TPU core.
+    That is a real consequence of dynamic routing on XLA, not a missing
+    feature here -- expect the first several steps to be slow while XLA traces
+    shapes, and expect a shape change (a new batch composition) to trigger
+    another trace.
+
+    Set `CONFIRM_TRAIN = True` once the dry run above looks right. This is the
+    gate: nothing above this cell spends TPU quota.
+    """)
+    b.code('''
+    from pathlib import Path
+    from iridium.training.run_preset import train_preset
+
+    CONFIRM_TRAIN = False
+    OUT_DIR = Path('/content/drive/MyDrive/iridium-runs') if Path('/content/drive').is_dir() else Path('runs')
+    RESUME_FROM = ''
+
+    if not CONFIRM_TRAIN:
+        print('CONFIRM_TRAIN is False; not training. Set it to True and rerun this cell.')
+        checkpoint = None
+    else:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        checkpoint = train_preset(
+            preset, device=DEVICE, out=str(OUT_DIR), resume=(RESUME_FROM or None), seed=0,
+        )
+        print('final checkpoint:', checkpoint)
+    ''')
+
+    b.md("## 7. Chat with the result")
+    b.code('''
+    from iridium.training.trainer import load_checkpoint
+    from iridium.runtime.chat import ChatSession
+
+    if checkpoint is None:
+        print('No checkpoint yet -- confirm and train in section 6 first.')
+    else:
+        model, manifest = load_checkpoint(str(checkpoint), device='cpu')
+        chat = ChatSession(model)
+        print(chat.send('Hello! What are you, and what can you actually do right now?'))
+    ''')
+    return b.cells
+
+
+def main() -> None:
+    for target, name in GENERATED_STUDIO.items():
+        title_prefix = {"colab": "Google Colab", "kaggle": "Kaggle", "jupyter": "Jupyter"}[target]
+        default_preset = {"colab": "chat-34m", "kaggle": "chat-100m", "jupyter": "chat-100m"}[target]
+        cells = build_studio(target, f"Iridium 1.0 Studio -- {title_prefix}", default_preset)
+        write(name, cells)
+
+    write(GENERATED_OTHER["colab_redirect"], build_colab_redirect())
+    write(GENERATED_OTHER["tpu"], build_tpu())
+
+
+def write(name: str, cells: list[dict]) -> None:
+    nb = {
+        "cells": cells,
+        "metadata": {
+            "kernelspec": {"display_name": "Python 3", "name": "python3"},
+            "language_info": {"name": "python"},
+            "accelerator": "GPU" if "tpu" not in name else "TPU",
+        },
+        "nbformat": 4,
+        "nbformat_minor": 0,
+    }
+    (HERE / name).write_text(json.dumps(nb, ensure_ascii=False, indent=1), encoding="utf-8")
+    print("Wrote", name)
+
+
+if __name__ == "__main__":
     main()

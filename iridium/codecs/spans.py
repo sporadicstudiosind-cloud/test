@@ -300,8 +300,21 @@ def _rope_positions(span: "Span", start: int, n: int) -> np.ndarray:
 # -- convenience constructors ------------------------------------------------
 
 
-def text_span(text: str | bytes, supervised: bool = True, offset: int = 0) -> Span:
-    """Byte-level text. ``offset`` reserves low ids for control tokens."""
+def text_span(text: str | bytes, supervised: bool = True, offset: int = 0,
+              tokenizer=None) -> Span:
+    """Text as ids. ``offset`` reserves low ids for control tokens.
+
+    Byte-level by default. Pass the run's subword ``tokenizer`` (anything with
+    ``encode(str) -> list[int]``) and the same text is encoded with it instead:
+    a model trained on one vocabulary and prompted in another does not fail,
+    it reads fluent nonsense, so every span a subword model sees must go
+    through the tokenizer it was trained with.
+    """
+    if tokenizer is not None:
+        if isinstance(text, bytes):
+            text = text.decode("utf-8", "surrogateescape")
+        ids = np.asarray(tokenizer.encode(text), dtype=np.int64)
+        return Span("text", ids + offset, supervised=supervised)
     raw = text.encode("utf-8") if isinstance(text, str) else text
     return Span("text", np.frombuffer(raw, dtype=np.uint8).astype(np.int64) + offset,
                 supervised=supervised)

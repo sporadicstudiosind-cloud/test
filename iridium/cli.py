@@ -128,11 +128,13 @@ def cmd_serve(args) -> int:
 def cmd_generate(args) -> int:
     from .codecs.spans import Sample, text_span
     from .runtime.generate import generate
+    from .training.tokenizer_bridge import tokenizer_from_manifest
     from .training.trainer import load_checkpoint
-    model, _ = load_checkpoint(args.checkpoint)
-    sample = Sample([text_span(args.prompt, offset=16)])
+    model, manifest = load_checkpoint(args.checkpoint)
+    tokenizer = tokenizer_from_manifest(manifest)
+    sample = Sample([text_span(args.prompt, offset=16, tokenizer=tokenizer)])
     out = generate(model, sample, max_new_tokens=args.max_new_tokens,
-                   temperature=args.temperature)
+                   temperature=args.temperature, tokenizer=tokenizer)
     print(json.dumps({
         "prompt": args.prompt, "output": out.text, "stopped": out.stopped,
         "mean_focus": out.mean_focus,
