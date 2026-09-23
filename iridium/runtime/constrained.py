@@ -321,6 +321,17 @@ def _parse_string(buf: bytes, i: int, enum: Optional[Sequence[str]] = None,
         if i >= n:
             return "incomplete", i, None
         c = buf[i]
+        if max_length is not None and len(content) >= max_length and c != 0x22:
+            # Already at the length cap: the *only* byte that can still be
+            # valid here is the closing quote, checked next. A backslash
+            # would otherwise be accepted as "incomplete" (a bare backslash
+            # always is, pending its escape partner) without regard to the
+            # cap already being full, which is exactly the gap this module's
+            # own regression test found: a maxLength-bounded field that had
+            # already reached its cap still accepted one more escape
+            # sequence because the cap was only ever checked *after* a
+            # content byte was appended, never before deciding to start one.
+            return "invalid", i, None
         if c == 0x22:
             i += 1
             if enc is not None:
@@ -450,7 +461,21 @@ def _parse_object(schema: Schema, buf: bytes, i: int, depth: int = 0):
         # keys lets the same one property be re-typed forever, which is a
         # separate infinite loop with an otherwise-valid-looking key every
         # time.
-        key_enum = [p for p in props if p not in obj] if not open_ else None
+        key_order = schema.get("_key_order")
+        if key_order is not None:
+            # A strict-order object (only ``ToolCallValidator`` sets this):
+            # the *only* legal next key is the one at this position in
+            # ``key_order`` -- see that class's docstring on why "name" must
+            # come first for its ``"arguments"`` schema-switch to work at
+            # all. Enforcing it here, as a one-candidate "enum", is what
+            # turns "the encoder always does this" into "the decoder cannot
+            # produce anything else", closing the gap an earlier version
+            # left open (arguments-first was merely *under*-validated, not
+            # rejected, which let an untrained model wander into an
+            # effectively unbounded ``"any"``-typed arguments placeholder).
+            key_enum = [key_order[len(obj)]] if len(obj) < len(key_order) else []
+        else:
+            key_enum = [p for p in props if p not in obj] if not open_ else None
         kstatus, kpos, kval = _parse_string(buf, i, key_enum)
         if kstatus != "complete":
             return kstatus, i, None
@@ -644,17 +669,22 @@ class ToolCallValidator(SchemaPrefixValidator):
     shape, via ``_resolve_property_schema``'s support for a callable property
     entry — not exposed as a general schema feature.
 
-    **This requires ``"name"`` to be serialized before ``"arguments"``.**
-    JSON key order is not normally meaningful, but
-    :func:`iridium.runtime.tools.format_tool_call` always emits ``name``
-    first, and a decoder built against its own encoder's convention does not
-    need to solve the harder, order-independent version of this problem. A
-    call with ``"arguments"`` first parses against an unconstrained
-    (``"any"``-typed) placeholder for ``"arguments"`` until ``"name"`` is
-    seen — so it is never silently *miss-validated*, only *under*-validated
-    until the name arrives — and the wrapper's own ``"required"`` check still
-    ensures both keys are present and ``"name"`` is one of the registry's
-    tools before the whole call can be called complete.
+    **This requires (and, unlike the generic engine, actually enforces)
+    ``"name"`` before ``"arguments"``.** JSON key order is not normally
+    meaningful, but :func:`iridium.runtime.tools.format_tool_call` always
+    emits ``name`` first, and a decoder built against its own encoder's
+    convention does not need to solve the harder, order-independent version
+    of this problem. This schema sets the engine's ``"_key_order"`` extension
+    (see ``_parse_object``) to make ``"arguments"`` a syntactically invalid
+    first key, not merely one that parses against an unconstrained
+    placeholder until ``"name"`` arrives — an earlier version of this class
+    did the latter, and paired with an untrained model's arbitrary logits it
+    is exactly how :func:`generate_constrained_json` found its way into
+    an unbounded, un-schema'd ``"any"``-typed structure with no natural
+    stopping point (this module's own regression test caught it). Rejecting
+    the wrong order outright, rather than tolerating and under-validating it,
+    is what keeps every reachable state of a call decode bounded by some
+    tool's actual argument schema.
     """
 
     def __init__(self, registry) -> None:
@@ -676,6 +706,7 @@ class ToolCallValidator(SchemaPrefixValidator):
                 "arguments": arguments_schema,
             },
             "required": ["name", "arguments"],
+            "_key_order": ["name", "arguments"],
         }
         self.registry = registry
         super().__init__(schema)
@@ -786,7 +817,13 @@ def generate_constrained_json(
         token_id = best_byte + text_offset
         ids.append(token_id)
         if validator.is_valid_instance(bytes(buf)):
-            return ConstrainedResult(text=bytes(buf).decode("utf-8"), ids=ids)
+            # errors="replace", not strict: this engine's own string parsing
+            # (see _parse_string) already tolerates a content byte sequence
+            # that is not well-formed UTF-8 -- see the module docstring's
+            # caveat on why -- so the final decode must match that tolerance
+            # rather than raising here, which would turn a documented,
+            # deliberate leniency into an undocumented crash.
+            return ConstrainedResult(text=bytes(buf).decode("utf-8", errors="replace"), ids=ids)
         step = _single_token_batch(batch, slot, token_id, position)
         out = model(step, n_loops=n_loops, cache=cache)
         hidden = out.hidden
