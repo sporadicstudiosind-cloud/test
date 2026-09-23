@@ -106,7 +106,7 @@ OPTIMIZER_STATE_BYTES = {
 }
 
 
-def decay_groups(named_parameters, weight_decay: float = 0.01):
+def decay_groups(params_or_module, weight_decay: float = 0.01):
     """Split parameters into the ones weight decay is correct for, and the rest.
 
     Decay is a prior that a *matrix* should be small, and it is only that. Every
@@ -115,33 +115,46 @@ def decay_groups(named_parameters, weight_decay: float = 0.01):
     * **RMSNorm gains** multiply the residual stream. Shrinking a gain is a
       global scale on everything downstream, so decay here is not regularisation
       but a slow, invisible attenuation of the network.
-    * **Embedding rows** are updated only when their token appears. Decay
-      applies every step regardless, so a rare token's vector is pulled toward
-      zero far more often than it is pulled anywhere useful — precisely the
-      tokens that can least afford it. (With a tied text head the same tensor is
-      also the output projection, which makes this worse, not better.)
-    * **Biases and scalar gates** — the halting heads, the ponder and depth
+    * **Embedding tables** are updated only where a token appears, but decay
+      applies every step regardless, so embedding norms shrink over training.
+      OLMo 2 (arXiv 2501.00656, section 3) measured exactly this -- decayed
+      embeddings drift small, early-layer gradients grow, and loss spikes
+      follow -- and removed decay from embeddings. (With a tied text head the
+      same tensor is also the output projection, so it is excluded too.)
+    * **Biases and scalar gates** -- the halting heads, the ponder and depth
       priors, the bank gate, the focus gain. These encode a *calibrated* value.
       Decaying a halting bias of -2.0 toward zero is decaying the model's
       stopping prior toward "always stop", which shows up as a collapsed ponder
       loop and looks like an architecture problem rather than an optimizer one.
-    * **RoPE tables and other buffers** are not parameters at all and must never
-      appear here; they are excluded by ``requires_grad``.
 
-    The rule used, which is the one GPT-3, Chinchilla and Llama all converged
-    on: decay tensors of rank >= 2, exempt everything of rank < 2. Rank is used
-    rather than a name match because a name match silently stops working the
-    moment a module is renamed, and the failure is undetectable in a loss curve.
+    An embedding table is a 2-D tensor, so a pure rank rule decays it -- which
+    is what an earlier version of this function did while its own docstring
+    said embeddings were exempt. Pass the *module* and embeddings are found by
+    type (``nn.Embedding``), which survives renaming; the rank rule then
+    handles norms, biases and scalars. Passing ``named_parameters()`` still
+    works and falls back to rank plus a name check for embeddings.
 
     Returns two torch.optim-style group dicts, always both, even when one is
-    empty — an optimizer built from a stable group layout can load a checkpoint
+    empty -- an optimizer built from a stable group layout can load a checkpoint
     written by another run of the same model.
     """
+    embedding_ids: set[int] = set()
+    if isinstance(params_or_module, torch.nn.Module):
+        for module in params_or_module.modules():
+            if isinstance(module, torch.nn.Embedding):
+                embedding_ids.add(id(module.weight))
+        named = params_or_module.named_parameters()
+    else:
+        named = params_or_module
     decay, no_decay = [], []
-    for name, param in named_parameters:
-        if not param.requires_grad:
+    seen: set[int] = set()
+    for name, param in named:
+        if not param.requires_grad or id(param) in seen:
             continue
-        (decay if param.ndim >= 2 else no_decay).append(param)
+        seen.add(id(param))
+        is_embedding = id(param) in embedding_ids or (
+            not embedding_ids and ("embedding" in name or name.endswith(".table.weight")))
+        (no_decay if is_embedding or param.ndim < 2 else decay).append(param)
     return [
         {"params": decay, "weight_decay": float(weight_decay), "group": "decay"},
         {"params": no_decay, "weight_decay": 0.0, "group": "no_decay"},

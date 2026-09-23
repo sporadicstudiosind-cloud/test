@@ -40,12 +40,11 @@ class ControlCore(nn.Module):
         # MLA rotates only an ``mla_rope_dim``-wide slice, so it needs a table
         # of that width; handing it the core's ``d_head`` table would rotate
         # the wrong number of channels whenever the two differ.
-        mla_rope = (RotaryEmbedding(cfg.mla_rope_dim, cfg.rope_theta)
-                    if "mla" in cfg.layer_kinds() and cfg.mla_rope_dim != cfg.d_head
-                    else rope)
+        from .core_blocks import block_rope
+        mla_rope = block_rope(cfg, rope)
         self.layers = nn.ModuleList(
-            build_core_block(cfg, mla_rope if kind == "mla" else rope, i)
-            for i, kind in enumerate(cfg.layer_kinds())
+            build_core_block(cfg, rope, i, mla_rope=mla_rope)
+            for i in range(cfg.n_layers)
         )
         if cfg.hyper_streams > 1:
             from .residual import HyperConnections, StreamCollapse

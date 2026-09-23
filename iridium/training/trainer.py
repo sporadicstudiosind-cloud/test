@@ -156,7 +156,7 @@ class Trainer:
         self._apply_freeze()
         from ..runtime.memory import build_optimizer, decay_groups
         if cfg.decay_groups:
-            groups = decay_groups(model.named_parameters(), cfg.weight_decay)
+            groups = decay_groups(model, cfg.weight_decay)
             self.decayed_params = sum(p.numel() for p in groups[0]["params"])
             self.undecayed_params = sum(p.numel() for p in groups[1]["params"])
             optimizer_params = groups

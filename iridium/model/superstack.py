@@ -128,17 +128,15 @@ class SuperstackLayer(nn.Module):
         bridge: bool,
         spectral: bool,
         eps: float = 1e-5,
+        index: int = 0,
+        mla_rope: Optional[RotaryEmbedding] = None,
     ) -> None:
         super().__init__()
-        self.block = TransformerBlock(
-            cfg.d_model,
-            cfg.n_query_heads,
-            cfg.n_kv_heads,
-            cfg.d_head,
-            cfg.d_ff,
-            rope,
-            eps,
-        )
+        from .core_blocks import build_block
+        # Same factory as the control core: the per-layer options on
+        # SuperstackConfig act on this self-attention block only. The bridge
+        # below stays GQA cross-attention whatever the options say.
+        self.block = build_block(cfg, rope, index, eps, mla_rope=mla_rope)
         self.bridge: Optional[BridgeCrossAttention] = None
         self.bridge_norm: Optional[RMSNorm] = None
         if bridge:
@@ -209,6 +207,8 @@ class Superstack(nn.Module):
             cfg.specializations[stack_index] if cfg.specializations else f"stack_{stack_index}"
         )
         has_spectral = cfg.has_spectral(stack_index)
+        from .core_blocks import block_rope
+        mla_rope = block_rope(cfg, rope)
         self.layers = nn.ModuleList(
             SuperstackLayer(
                 cfg,
@@ -220,6 +220,8 @@ class Superstack(nn.Module):
                     and i % cfg.spectral_stride == 0
                 ),
                 eps=eps,
+                index=i,
+                mla_rope=mla_rope,
             )
             for i in range(cfg.n_layers)
         )

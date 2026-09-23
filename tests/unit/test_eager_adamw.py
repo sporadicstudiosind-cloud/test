@@ -157,3 +157,23 @@ def test_build_optimizer_accepts_groups_and_a_flat_list():
     torch_grouped = build_optimizer(decay_groups(model.named_parameters(), 0.1),
                                     kind="adamw")
     assert [g["weight_decay"] for g in torch_grouped.param_groups] == [0.1, 0.0]
+
+
+def test_embedding_tables_are_not_decayed_even_though_they_are_two_dimensional():
+    """OLMo 2's finding. A rank rule alone decays them; a module walk does not."""
+    model = nn.Sequential(nn.Embedding(10, 4), nn.Linear(4, 4))
+    groups = decay_groups(model, weight_decay=0.1)
+    decayed = {id(p) for p in groups[0]["params"]}
+    assert id(model[0].weight) not in decayed
+    assert id(model[1].weight) in decayed
+
+
+def test_tied_parameters_are_grouped_once():
+    emb = nn.Embedding(10, 4)
+    head = nn.Linear(4, 10, bias=False)
+    head.weight = emb.weight
+    model = nn.ModuleDict({"emb": emb, "head": head})
+    groups = decay_groups(model)
+    flat = [p for g in groups for p in g["params"]]
+    assert len(flat) == len({id(p) for p in flat}) == 1
+    assert groups[1]["params"][0] is emb.weight

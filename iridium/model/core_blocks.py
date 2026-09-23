@@ -31,14 +31,14 @@ from typing import Optional
 
 import torch.nn as nn
 
-from ..config import CoreConfig
+from ..config import CoreConfig, SuperstackConfig
 from .layers import GroupedQueryAttention, SwiGLU, TransformerBlock
 from .rope import RotaryEmbedding
 
-__all__ = ["build_core_block", "output_projections"]
+__all__ = ["build_block", "build_core_block", "block_rope", "output_projections"]
 
 
-def _attention(cfg: CoreConfig, kind: str, rope: RotaryEmbedding) -> nn.Module:
+def _attention(cfg, kind: str, rope: RotaryEmbedding) -> nn.Module:
     if kind in ("global", "local"):
         window = cfg.local_window if kind == "local" else None
         return GroupedQueryAttention(cfg.d_model, cfg.n_query_heads, cfg.n_kv_heads,
@@ -55,32 +55,52 @@ def _attention(cfg: CoreConfig, kind: str, rope: RotaryEmbedding) -> nn.Module:
     raise ValueError(f"unknown layer kind {kind!r}")
 
 
-def _ffn(cfg: CoreConfig) -> nn.Module:
+def _ffn(cfg) -> nn.Module:
     if cfg.ffn_dynamic_rank:
         from .dynamic import DynamicSwiGLU
         return DynamicSwiGLU(cfg.d_model, cfg.d_ff, cfg.ffn_dynamic_rank)
     return SwiGLU(cfg.d_model, cfg.d_ff)
 
 
-def build_core_block(cfg: CoreConfig, rope: RotaryEmbedding, index: int) -> nn.Module:
-    """The block for core layer ``index``. The all-defaults config yields the
-    exact ``TransformerBlock`` the core has always built, constructed in the
-    same order, so default initialisation draws the same random numbers.
+def block_rope(cfg, rope: RotaryEmbedding) -> RotaryEmbedding:
+    """The rotary table MLA layers need, given the stack's shared one.
+
+    MLA rotates only an ``mla_rope_dim``-wide slice; handing it a table of
+    another width rotates the wrong number of channels. Same theta as the
+    shared table, so positions mean the same thing in every layer.
     """
+    if "mla" in cfg.layer_kinds() and cfg.mla_rope_dim != rope.d_head:
+        return RotaryEmbedding(cfg.mla_rope_dim, getattr(rope, "theta", 500_000.0))
+    return rope
+
+
+def build_block(cfg, rope: RotaryEmbedding, index: int, eps: Optional[float] = None,
+                mla_rope: Optional[RotaryEmbedding] = None) -> nn.Module:
+    """The block for layer ``index`` of a core or superstack config.
+
+    Both :class:`~iridium.config.CoreConfig` and
+    :class:`~iridium.config.SuperstackConfig` carry the same per-layer
+    options, so one factory serves both. The all-defaults config yields the
+    exact ``TransformerBlock`` these stacks have always built, constructed in
+    the same order, so default initialisation draws the same random numbers.
+    """
+    eps = getattr(cfg, "norm_eps", 1e-5) if eps is None else eps
     kind = cfg.layer_kinds()[index]
+    if kind == "mla":
+        rope = mla_rope if mla_rope is not None else block_rope(cfg, rope)
     default_parts = kind == "global" and not cfg.ffn_dynamic_rank
     if cfg.block_kind == "parallel":
         from .blocks import ParallelBlock
         block = ParallelBlock(cfg.d_model, cfg.n_query_heads, cfg.n_kv_heads,
-                              cfg.d_head, cfg.d_ff, rope, cfg.norm_eps,
+                              cfg.d_head, cfg.d_ff, rope, eps,
                               norm_kind=cfg.norm_kind)
     else:
         block = TransformerBlock(cfg.d_model, cfg.n_query_heads, cfg.n_kv_heads,
-                                 cfg.d_head, cfg.d_ff, rope, cfg.norm_eps)
+                                 cfg.d_head, cfg.d_ff, rope, eps)
         if cfg.norm_kind != "rms":
             from .norms import make_norm
-            block.norm_attn = make_norm(cfg.norm_kind, cfg.d_model, cfg.norm_eps)
-            block.norm_ffn = make_norm(cfg.norm_kind, cfg.d_model, cfg.norm_eps)
+            block.norm_attn = make_norm(cfg.norm_kind, cfg.d_model, eps)
+            block.norm_ffn = make_norm(cfg.norm_kind, cfg.d_model, eps)
     if not default_parts:
         # Replacing the default parts after construction, rather than
         # threading every option through two block constructors, keeps the
@@ -89,6 +109,12 @@ def build_core_block(cfg: CoreConfig, rope: RotaryEmbedding, index: int) -> nn.M
         block.attn = _attention(cfg, kind, rope)
         block.ffn = _ffn(cfg)
     return block
+
+
+def build_core_block(cfg: CoreConfig, rope: RotaryEmbedding, index: int,
+                     mla_rope: Optional[RotaryEmbedding] = None) -> nn.Module:
+    """Core layer ``index``; see :func:`build_block`."""
+    return build_block(cfg, rope, index, mla_rope=mla_rope)
 
 
 def output_projections(block: nn.Module) -> list[nn.Linear]:

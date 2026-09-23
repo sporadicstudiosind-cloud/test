@@ -286,9 +286,28 @@ class GroupedQueryAttention(nn.Module):
             if prev is not None:
                 k = torch.cat([prev[0], k], dim=2)
                 v = torch.cat([prev[1], v], dim=2)
-            cache[cache_key] = (k, v)
+            if self.window is not None:
+                # A sliding window is a memory saving only if the cache forgets.
+                # Every later query needs at most the ``window - 1`` keys before
+                # it, and anything older is masked out -- contributing exactly
+                # zero to the softmax -- so dropping it cannot change a result.
+                # Keeping it (as an earlier version did) paid full-attention
+                # memory for local-attention layers, which is the one cost a
+                # window exists to cut. ``tests/unit/test_core_blocks.py``
+                # checks the bytes actually cached against the config formula.
+                # Start index clamped at 0: while the cache is still shorter than
+                # the window, ``len - keep`` is negative, and a negative slice
+                # start counts from the end -- silently dropping keys the next
+                # query needs. (That was the first version of this line.)
+                start = max(k.shape[2] - max(self.window - 1, 0), 0)
+                cache[cache_key] = (k[:, :, start:], v[:, :, start:])
+            else:
+                cache[cache_key] = (k, v)
 
         if self.window is not None:
+            # The caller's mask spans the whole history; the keys held here are
+            # its most recent ``k.shape[2]`` columns.
+            keep = keep[..., keep.shape[-1] - k.shape[2]:]
             window_mask = sliding_window_keep(q.shape[2], k.shape[2], self.window, q.device)
             keep = keep & window_mask
 

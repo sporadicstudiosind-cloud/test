@@ -67,6 +67,140 @@ class ConfigError(ValueError):
 # --------------------------------------------------------------------------
 
 
+LAYER_KINDS = ("global", "local", "mla", "deltanet")
+
+
+def _validate_block_options(c, label: str) -> None:
+    """Checks shared by the core and the superstacks, which accept the same
+    per-layer options. One implementation so the two cannot disagree about
+    what a legal configuration is."""
+    kinds = set(c.layer_pattern) or {"global"}
+    unknown = kinds - set(LAYER_KINDS)
+    if unknown:
+        raise ConfigError(f"{label}: unknown layer kinds {sorted(unknown)}")
+    if kinds & {"global", "local"} and c.d_model != c.n_query_heads * c.d_head:
+        # Only a GQA layer needs its heads to tile d_model exactly. MLA's
+        # per-head content width is independent of d_model, which is what lets
+        # it run many heads without making each one narrow.
+        raise ConfigError(
+            f"{label} d_model {c.d_model} != n_query_heads {c.n_query_heads} "
+            f"* d_head {c.d_head}"
+        )
+    if c.n_query_heads % c.n_kv_heads:
+        raise ConfigError("n_query_heads must be a multiple of n_kv_heads")
+    if c.norm_kind not in ("rms", "dyt", "derf"):
+        raise ConfigError(f"norm_kind must be rms, dyt or derf, got {c.norm_kind!r}")
+    if c.block_kind not in ("sequential", "parallel"):
+        raise ConfigError(f"block_kind must be sequential or parallel, got {c.block_kind!r}")
+    if min(c.local_window, c.mla_kv_rank, c.deltanet_conv) < 1:
+        raise ConfigError("window, ranks and conv width must be positive")
+    if c.mla_rope_dim % 2 or c.mla_q_rank < 0 or c.ffn_dynamic_rank < 0:
+        raise ConfigError("mla_rope_dim must be even; ranks must be nonnegative")
+
+
+class _BlockAccounting:
+    """Per-layer parameter and cache arithmetic for a stack of blocks.
+
+    Mixed into :class:`CoreConfig` and :class:`SuperstackConfig`, which carry
+    the same per-layer option fields. Every formula restates a module's own
+    ``param_count`` as arithmetic, because this file may not import torch;
+    ``tests/unit/test_core_blocks.py`` asserts each against the instantiated
+    module, so a restated formula cannot drift.
+    """
+
+    def layer_kinds(self) -> tuple[str, ...]:
+        """The attention kind of every layer, in order (pattern repeats)."""
+        pattern = self.layer_pattern or ("global",)
+        return tuple(pattern[i % len(pattern)] for i in range(self.n_layers))
+
+    def attention_params(self, kind: str) -> int:
+        d, h, dh = self.d_model, self.n_query_heads, self.d_head
+        if kind in ("global", "local"):
+            return 2 * d * d + 2 * d * self.d_kv
+        if kind == "mla":
+            kvr, qr, rr = self.mla_kv_rank, self.mla_q_rank, self.mla_rope_dim
+            q = (d * qr + qr + qr * h * dh + qr * h * rr) if qr else (d * h * dh + d * h * rr)
+            return q + (d * kvr + kvr + 2 * kvr * h * dh) + d * rr + h * dh * d
+        if kind == "deltanet":
+            return _deltanet_params(d, h, dh, self.deltanet_conv)
+        raise ConfigError(f"unknown layer kind {kind!r}")
+
+    def ffn_params(self) -> int:
+        d, f, r = self.d_model, self.d_ff, self.ffn_dynamic_rank
+        if not r:
+            return 3 * d * f
+        dyn = lambda i, o: i * o + i * r + r * o + i * r + r      # noqa: E731
+        return 2 * dyn(d, f) + dyn(f, d)
+
+    def norm_params(self) -> int:
+        """Per block: two norms sequentially, one shared norm in parallel form."""
+        one = {"rms": self.d_model, "dyt": 2 * self.d_model + 1,
+               "derf": 2 * self.d_model + 2}[self.norm_kind]
+        return one if self.block_kind == "parallel" else 2 * one
+
+    def layer_params(self, kind: str) -> int:
+        return self.attention_params(kind) + self.ffn_params() + self.norm_params()
+
+    @property
+    def params_per_layer(self) -> int:
+        """A ``"global"`` layer. Kept for callers that cost a homogeneous stack;
+        use :meth:`layers_params` for a mixed one."""
+        return self.layer_params("global")
+
+    def layers_params(self, depth: int | None = None) -> int:
+        """The first ``depth`` layers (all of them by default). Prefix sums
+        matter for superstacks, whose active depth varies per token."""
+        kinds = self.layer_kinds()
+        return sum(self.layer_params(k) for k in kinds[: len(kinds) if depth is None else depth])
+
+    # -- cache ------------------------------------------------------------
+
+    def layer_kv_bytes_per_token(self, kind: str, bytes_per_element: int = 2) -> int:
+        """Per-token cache growth of one layer.
+
+        GQA (global or local) stores K and V per KV head. MLA stores its
+        latent plus one shared rotary key, independent of head count. Gated
+        DeltaNet stores nothing per token -- its cost is a fixed state, see
+        :meth:`layer_state_bytes`. A local layer grows at the GQA rate but only
+        until it holds ``window - 1`` tokens; :meth:`cache_bytes` applies that cap.
+        """
+        if kind in ("global", "local"):
+            return 2 * self.d_kv * bytes_per_element
+        if kind == "mla":
+            return (self.mla_kv_rank + self.mla_rope_dim) * bytes_per_element
+        if kind == "deltanet":
+            return 0
+        raise ConfigError(f"unknown layer kind {kind!r}")
+
+    def layer_state_bytes(self, kind: str, bytes_per_element: int = 2) -> int:
+        """Fixed, sequence-length-independent state of one layer."""
+        if kind != "deltanet":
+            return 0
+        h, dh, c = self.n_query_heads, self.d_head, self.deltanet_conv
+        return (h * dh * dh + 3 * h * dh * (c - 1)) * bytes_per_element
+
+    def kv_bytes_per_token(self, bytes_per_element: int = 2) -> int:
+        """Cache growth per token across all layers (the long-run rate).
+
+        Before layer kinds existed this was ``2 * d_kv * n_layers`` -- still
+        its value for an all-global stack -- but that figure priced every
+        DeltaNet layer as if it cached K and V, which overstated a hybrid's
+        cache by the whole linear-attention share.
+        """
+        return sum(self.layer_kv_bytes_per_token(k, bytes_per_element)
+                   for k in self.layer_kinds())
+
+    def cache_bytes(self, tokens: int, bytes_per_element: int = 2) -> int:
+        """Total cache after ``tokens`` tokens: per-token entries (local layers
+        capped at their window) plus fixed recurrent state."""
+        total = 0
+        for kind in self.layer_kinds():
+            held = min(tokens, self.local_window - 1) if kind == "local" else tokens  # window - 1 keys kept
+            total += held * self.layer_kv_bytes_per_token(kind, bytes_per_element)
+            total += self.layer_state_bytes(kind, bytes_per_element)
+        return total
+
+
 def _deltanet_params(d: int, h: int, dh: int, conv: int) -> int:
     """Gated DeltaNet layer parameters; mirrors ``GatedDeltaNet.param_count``.
 
@@ -79,7 +213,7 @@ def _deltanet_params(d: int, h: int, dh: int, conv: int) -> int:
 
 
 @dataclass(frozen=True)
-class CoreConfig:
+class CoreConfig(_BlockAccounting):
     """The control stack: every token enters and leaves through these layers.
 
     ``n_layers`` is split into two stages at ``stage_split``. Stage I builds the
@@ -132,29 +266,9 @@ class CoreConfig:
     hyper_sinkhorn_iters: int = 20
 
     def __post_init__(self) -> None:
-        kinds = set(self.layer_pattern) or {"global"}
-        unknown = kinds - {"global", "local", "mla", "deltanet"}
-        if unknown:
-            raise ConfigError(f"unknown layer kinds {sorted(unknown)}")
-        if kinds & {"global", "local"} and self.d_model != self.n_query_heads * self.d_head:
-            # Only a GQA layer needs its heads to tile d_model exactly. MLA's
-            # per-head content width is independent of d_model, which is what
-            # lets it run many heads without making each one narrow.
-            raise ConfigError(
-                f"d_model {self.d_model} != n_query_heads {self.n_query_heads} "
-                f"* d_head {self.d_head}"
-            )
-        if self.n_query_heads % self.n_kv_heads:
-            raise ConfigError("n_query_heads must be a multiple of n_kv_heads")
-        if self.norm_kind not in ("rms", "dyt", "derf"):
-            raise ConfigError(f"norm_kind must be rms, dyt or derf, got {self.norm_kind!r}")
-        if self.block_kind not in ("sequential", "parallel"):
-            raise ConfigError(f"block_kind must be sequential or parallel, got {self.block_kind!r}")
-        if min(self.local_window, self.mla_kv_rank, self.hyper_streams,
-               self.hyper_sinkhorn_iters, self.deltanet_conv) < 1:
-            raise ConfigError("window, ranks, stream count and iteration counts must be positive")
-        if self.mla_rope_dim % 2 or self.mla_q_rank < 0 or self.ffn_dynamic_rank < 0:
-            raise ConfigError("mla_rope_dim must be even; ranks must be nonnegative")
+        _validate_block_options(self, "core")
+        if self.hyper_streams < 1 or self.hyper_sinkhorn_iters < 1:
+            raise ConfigError("hyper_streams and hyper_sinkhorn_iters must be positive")
         if self.n_layers < 2:
             raise ConfigError("the control core needs at least two layers")
         if self.split < 1 or self.split >= self.n_layers:
@@ -169,53 +283,6 @@ class CoreConfig:
     @property
     def d_kv(self) -> int:
         return self.n_kv_heads * self.d_head
-
-    def layer_kinds(self) -> tuple[str, ...]:
-        """The attention kind of every core layer, in order."""
-        pattern = self.layer_pattern or ("global",)
-        return tuple(pattern[i % len(pattern)] for i in range(self.n_layers))
-
-    def attention_params(self, kind: str) -> int:
-        """One layer's attention module. Each branch restates the module's own
-        ``param_count`` as arithmetic, because this file may not import torch;
-        ``tests/unit/test_core_blocks.py`` asserts every branch equals the
-        instantiated module, so a restated formula cannot drift."""
-        d, h, dh = self.d_model, self.n_query_heads, self.d_head
-        if kind in ("global", "local"):
-            return 2 * d * d + 2 * d * self.d_kv
-        if kind == "mla":
-            kvr, qr, rr = self.mla_kv_rank, self.mla_q_rank, self.mla_rope_dim
-            q = (d * qr + qr + qr * h * dh + qr * h * rr) if qr else (d * h * dh + d * h * rr)
-            return q + (d * kvr + kvr + 2 * kvr * h * dh) + d * rr + h * dh * d
-        if kind == "deltanet":
-            return _deltanet_params(d, h, dh, self.deltanet_conv)
-        raise ConfigError(f"unknown layer kind {kind!r}")
-
-    def ffn_params(self) -> int:
-        d, f, r = self.d_model, self.d_ff, self.ffn_dynamic_rank
-        if not r:
-            return 3 * d * f
-        dyn = lambda i, o: i * o + i * r + r * o + i * r + r      # noqa: E731
-        return 2 * dyn(d, f) + dyn(f, d)
-
-    def norm_params(self) -> int:
-        """Per block: two norms sequentially, one shared norm in parallel form."""
-        one = {"rms": self.d_model, "dyt": 2 * self.d_model + 1,
-               "derf": 2 * self.d_model + 2}[self.norm_kind]
-        return one if self.block_kind == "parallel" else 2 * one
-
-    def layer_params(self, kind: str) -> int:
-        return self.attention_params(kind) + self.ffn_params() + self.norm_params()
-
-    @property
-    def params_per_layer(self) -> int:
-        """A ``"global"`` layer. Kept for the callers that cost a homogeneous
-        core; use :meth:`layer_params` or :attr:`layers_params` for a mixed one."""
-        return self.layer_params("global")
-
-    @property
-    def layers_params(self) -> int:
-        return sum(self.layer_params(k) for k in self.layer_kinds())
 
     @property
     def hyper_params(self) -> int:
@@ -237,25 +304,17 @@ class CoreConfig:
         the loop halting head reads the stage-II output and so belongs here.
         """
         return (
-            self.layers_params
+            self.layers_params()
             + self.hyper_params
             + self.d_model          # output RMSNorm
             + self.d_model          # loop re-injection gate
             + self.d_model + 1      # loop halting head
         )
 
-    def kv_bytes_per_token(self, bytes_per_element: int = 2) -> int:
-        """Core cache: K and V, every layer, every recurrence slot.
-
-        Recurrence multiplicity is applied by the caller (see
-        :meth:`IridiumConfig.kv_bytes_per_token`) because it depends on the
-        ponder budget, not on the core geometry.
-        """
-        return 2 * self.d_kv * bytes_per_element * self.n_layers
 
 
 @dataclass(frozen=True)
-class SuperstackConfig:
+class SuperstackConfig(_BlockAccounting):
     """The domain banks. Deep, narrow-traffic, cross-attentive.
 
     A superstack is *not* a feed-forward expert. It is a deep transformer that
@@ -282,15 +341,25 @@ class SuperstackConfig:
     core_d_model: int = 0          # filled in by IridiumConfig
     io_projection: bool | None = None       # None -> only when widths differ
     specializations: tuple[str, ...] = ()
+    # -- per-layer options, same meaning as on CoreConfig; defaults rebuild the
+    # original stacks. These act on each stack's *self*-attention over its own
+    # routed, packed tokens (causal + padding masks, which every kind honours);
+    # the bridge cross-attention onto the core stays GQA, since no recurrent
+    # or latent layer can stand in for attending to another stream's states.
+    # This is where the long-context bill is: stack-local KV exceeds the whole
+    # core cache at every rung (docs/long-context.md).
+    layer_pattern: tuple[str, ...] = ()
+    local_window: int = 4096
+    mla_kv_rank: int = 512
+    mla_q_rank: int = 0
+    mla_rope_dim: int = 64
+    deltanet_conv: int = 4
+    norm_kind: str = "rms"
+    block_kind: str = "sequential"
+    ffn_dynamic_rank: int = 0
 
     def __post_init__(self) -> None:
-        if self.d_model != self.n_query_heads * self.d_head:
-            raise ConfigError(
-                f"superstack d_model {self.d_model} != "
-                f"{self.n_query_heads} * {self.d_head}"
-            )
-        if self.n_query_heads % self.n_kv_heads:
-            raise ConfigError("n_query_heads must be a multiple of n_kv_heads")
+        _validate_block_options(self, "superstack")
         if self.cross_stride < 1:
             raise ConfigError("cross_stride must be >= 1")
         if self.min_depth < 1 or self.min_depth > self.n_layers:
@@ -338,11 +407,6 @@ class SuperstackConfig:
             return self.io_projection
         return (self.core_d_model or self.d_model) != self.d_model
 
-    @property
-    def params_per_layer(self) -> int:
-        """Self-attention + SwiGLU + norms, before optional blocks."""
-        d, d_kv, d_ff = self.d_model, self.d_kv, self.d_ff
-        return 2 * d * d + 2 * d * d_kv + 3 * d * d_ff + 2 * d
 
     @property
     def params_per_bridge(self) -> int:
@@ -374,7 +438,7 @@ class SuperstackConfig:
         return lift + project + spectral + pointwise + self.d_model
 
     def params_for_stack(self, stack_index: int) -> int:
-        base = self.n_layers * self.params_per_layer
+        base = self.layers_params()
         bridges = self.n_cross_layers * self.params_per_bridge
         spectral = (
             self.n_spectral_layers * self.params_per_spectral
@@ -405,9 +469,6 @@ class SuperstackConfig:
     def params(self) -> int:
         return sum(self.params_for_stack(i) for i in range(self.n_stacks))
 
-    def kv_bytes_per_token(self, bytes_per_element: int = 2) -> int:
-        """Stack-local cache for one token, in the one stack it visited."""
-        return 2 * self.d_kv * bytes_per_element * self.n_layers
 
 
 @dataclass(frozen=True)
@@ -783,7 +844,7 @@ class IridiumConfig:
             2 * self.core.d_model * st.d_model if st.uses_io_projection else 0
         )
         return (
-            depth * st.params_per_layer
+            st.layers_params(depth)
             + n_cross * st.params_per_bridge
             + n_spec * st.params_per_spectral
             + io
@@ -918,6 +979,7 @@ class IridiumConfig:
         stacks = dict(data["stacks"])
         spec = stacks.get("specializations") or ()
         stacks["specializations"] = tuple(spec)
+        stacks["layer_pattern"] = tuple(stacks.get("layer_pattern") or ())
         core = dict(data["core"])
         # JSON has no tuples; a list here would make the frozen config unhashable.
         core["layer_pattern"] = tuple(core.get("layer_pattern") or ())

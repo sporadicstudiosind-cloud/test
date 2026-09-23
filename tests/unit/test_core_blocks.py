@@ -36,6 +36,10 @@ from iridium.runtime.decode import run_chunked
 VARIANTS = {
     "default": {},
     "local_global": dict(layer_pattern=("local", "global"), local_window=3),
+    # Windows 4 and 5 exercise the cache while it is still shorter than the
+    # window; an early trimming bug kept too few keys there and window 3 hid it.
+    "local_w4": dict(layer_pattern=("local",), local_window=4),
+    "local_w5": dict(layer_pattern=("local", "global"), local_window=5),
     "mla": dict(layer_pattern=("mla",), mla_kv_rank=24, mla_rope_dim=8),
     "mla_q_lora": dict(layer_pattern=("mla",), mla_kv_rank=24, mla_q_rank=12,
                        mla_rope_dim=16),
@@ -361,3 +365,95 @@ def test_per_layer_embeddings_train():
     sum(losses.values()).backward()
     assert all(p.grad is not None and torch.isfinite(p.grad).all()
                for p in model.ple.parameters())
+
+
+# -- superstack options --------------------------------------------------------
+
+STACK_VARIANTS = {
+    "deltanet": dict(layer_pattern=("deltanet", "global")),
+    "mla": dict(layer_pattern=("mla",), mla_kv_rank=24, mla_rope_dim=8),
+    "local": dict(layer_pattern=("local",), local_window=2),
+    "dyt_parallel_dynamic": dict(norm_kind="dyt", block_kind="parallel", ffn_dynamic_rank=4),
+}
+
+
+def _stack_model(options: dict, dtype=torch.float64, core: dict | None = None,
+                 controller: bool = False) -> Iridium1:
+    tiny = get_config("tiny")
+    cfg = dataclasses.replace(
+        tiny, controller_mode=controller,
+        stacks=dataclasses.replace(tiny.stacks, **options),
+        core=dataclasses.replace(tiny.core, **(core or {})),
+    )
+    torch.manual_seed(0)
+    return Iridium1(cfg).to(dtype).eval()
+
+
+@pytest.mark.parametrize("name", sorted(STACK_VARIANTS))
+def test_superstack_options_are_costed_exactly(name):
+    model = _stack_model(STACK_VARIANTS[name], torch.float32)
+    assert sum(p.numel() for p in model.parameters()) == model.cfg.n_params
+    assert model.parameter_inventory()["superstacks"] == model.cfg.stacks.params
+
+
+@pytest.mark.parametrize("name", sorted(STACK_VARIANTS))
+@pytest.mark.parametrize("loops", [1, 2])
+def test_superstack_options_keep_cached_decoding_exact(name, loops):
+    """Stack caches are keyed on each stack's packed routed sequence; every
+    layer kind must still reproduce the uncached forward."""
+    model = _stack_model(STACK_VARIANTS[name])
+    batch = _batch(model.cfg, seed=6)
+    with torch.no_grad():
+        reference = model(batch, n_loops=loops).hidden
+        cached = run_chunked(model, batch, chunk=1, n_loops=loops)
+    torch.testing.assert_close(cached, reference, rtol=0, atol=1e-10)
+
+
+def test_bridges_stay_gqa_whatever_the_stack_options():
+    from iridium.model.layers import BridgeCrossAttention
+
+    model = _stack_model(STACK_VARIANTS["mla"])
+    bridges = [layer.bridge for stack in model.bank.stacks for layer in stack.layers
+               if layer.bridge is not None]
+    assert bridges and all(type(b) is BridgeCrossAttention for b in bridges)
+
+
+def test_everything_everywhere_in_controller_mode():
+    """Core and stack options together, under controller mode's full-core cycles."""
+    model = _stack_model(STACK_VARIANTS["deltanet"], controller=True,
+                         core=VARIANTS["everything"])
+    assert sum(p.numel() for p in model.parameters()) == model.cfg.n_params
+    batch = _batch(model.cfg, seed=7)
+    with torch.no_grad():
+        reference = model(batch, n_loops=2).hidden
+        cached = run_chunked(model, batch, chunk=1, n_loops=2)
+    torch.testing.assert_close(cached, reference, rtol=0, atol=1e-10)
+
+
+# -- cache accounting against the real cache -----------------------------------
+
+
+def _tensor_bytes(entry) -> int:
+    if torch.is_tensor(entry):
+        return entry.numel() * entry.element_size()
+    if isinstance(entry, (tuple, list)):
+        return sum(_tensor_bytes(e) for e in entry)
+    return 0
+
+
+@pytest.mark.parametrize("pattern", [("global",), ("mla",), ("deltanet", "global"),
+                                     ("local", "deltanet", "mla", "global")])
+def test_core_cache_formula_matches_the_bytes_actually_cached(pattern):
+    """Sum the core's real cache entries after decoding T tokens and compare
+    with CoreConfig.cache_bytes(T). Priced per layer kind: GQA K/V, MLA latent,
+    local capped at its window, DeltaNet a fixed state."""
+    options = dict(layer_pattern=pattern, local_window=4, mla_kv_rank=24, mla_rope_dim=8)
+    model = _model(options)
+    batch = _batch(model.cfg, n=1, seed=8)
+    cache: dict = {}
+    with torch.no_grad():
+        run_chunked(model, batch, chunk=1, n_loops=1, cache=cache)
+    t = batch.modality.shape[1]
+    held = sum(_tensor_bytes(v) for k, v in cache.items()
+               if isinstance(k, tuple) and k[:2] == ("core", 0))
+    assert held == model.cfg.core.cache_bytes(t, bytes_per_element=8)
