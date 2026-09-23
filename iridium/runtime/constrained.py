@@ -304,14 +304,11 @@ _ESCAPES = {0x22: 0x22, 0x5C: 0x5C, 0x2F: 0x2F, 0x62: 0x08, 0x66: 0x0C,
 
 def _parse_string(buf: bytes, i: int, enum: Optional[Sequence[str]] = None,
                    max_length: Optional[int] = None):
-    """See the module docstring's "supported subset" for the escape and enum
-    caveats: a ``\\uXXXX`` escape is parsed structurally (so it never breaks
-    the surrounding grammar) but is not resolved to its character for enum
-    matching, so an enum member that differs from its rivals only inside a
-    ``\\u`` escape does not get byte-level pruning across that escape — the
-    final closing-quote membership check still enforces exact equality, so
-    this only ever *relaxes* the mask, it can never let an invalid instance
-    through."""
+    """The six single-character JSON escapes (``\\" \\\\ \\/ \\b \\f \\n \\r
+    \\t``) are supported; ``\\uXXXX`` is not (see the inline comment on that
+    branch for why) and makes a string invalid the moment it appears — not a
+    silent gap, since any character it could represent can already be
+    written as a raw UTF-8 byte inside a JSON string unescaped."""
     n = len(buf)
     if i >= n:
         return "incomplete", i, None
@@ -336,29 +333,56 @@ def _parse_string(buf: bytes, i: int, enum: Optional[Sequence[str]] = None,
                 text_value = None  # opaque but structurally valid; see docstring
             return "complete", i, text_value
         if c == 0x5C:
+            if enc is not None:
+                # An enum-constrained string (this includes an object key
+                # checked against known property names -- see
+                # ``_parse_object``) never needs an escape: every enum member
+                # and every property name this engine's own callers pass it
+                # is a plain identifier-like string with no character that
+                # requires JSON escaping. Refusing a backslash outright here,
+                # rather than resolving it and *then* pruning, is what keeps
+                # the enum-prefix pruning exact: pruning after the fact would
+                # have to reason about which of up to eight possible escape
+                # resolutions could still match a remaining candidate, and a
+                # bare backslash is a dead end for every escape this engine
+                # supports in practice anyway (none of them resolve to a
+                # letter), so a model that starts one here has already
+                # committed to a string no enum member can match.
+                return "invalid", i, None
             if i + 1 >= n:
                 return "incomplete", i, None
             e = buf[i + 1]
             if e in _ESCAPES:
                 content.append(_ESCAPES[e])
                 i += 2
-            elif e == 0x75:  # \u
-                if i + 6 > n:
-                    return "incomplete", i, None
-                hexpart = buf[i + 2:i + 6]
-                try:
-                    int(hexpart, 16)
-                except ValueError:
-                    return "invalid", i, None
-                content.extend(b"?")  # opaque placeholder -- see docstring
-                i += 6
             else:
+                # ``\uXXXX`` is valid JSON but is deliberately not supported
+                # here: checking it correctly needs to reject a bad hex digit
+                # the moment it appears rather than buffering all four and
+                # checking once (an earlier version buffered, and a greedy
+                # decoder over an untrained model happily typed non-hex
+                # filler for three bytes before the check ever ran, since
+                # "incomplete" is genuinely the honest answer for a partial
+                # buffer under that design). Any raw non-ASCII character can
+                # already be written unescaped inside a JSON string (RFC 8259
+                # permits any UTF-8 byte >= 0x20), so \u is not needed to
+                # represent one and this engine fails closed on it rather
+                # than re-solving the buffering problem for a rarely-needed
+                # escape.
                 return "invalid", i, None
-            continue
-        if c < 0x20:
+        elif c < 0x20:
             return "invalid", i, None  # raw control bytes must be escaped
-        content.append(c)
-        i += 1
+        else:
+            content.append(c)
+            i += 1
+        # The bound checks below apply after *every* content-extending path
+        # above, escaped or raw alike -- an earlier version of this function
+        # only ran them after a raw byte, which let an escape sequence (e.g.
+        # an endless run of ``\\``, each one a legal two-byte escape for a
+        # single backslash) dodge both maxLength and enum pruning entirely.
+        # ``tests/unit/test_constrained.py``'s untrained-model regression
+        # test is what caught that: a greedy decoder over arbitrary logits
+        # found exactly this escape hatch before this fix.
         if max_length is not None and len(content) > max_length:
             # Fail closed the instant the bound is crossed, not just at the
             # close quote: this is what makes maxLength an actual decode-time
@@ -379,7 +403,23 @@ def _resolve_property_schema(entry: PropertySchema, obj_so_far: dict) -> Schema:
     return entry if entry is not None else _ANY_SCHEMA
 
 
-def _parse_object(schema: Schema, buf: bytes, i: int):
+#: Real JSON nesting has no grammar-level bound, and neither did an earlier
+#: version of this parser: ``{"type": "any"}`` (reachable whenever a
+#: ``ToolCallValidator`` has not yet resolved which tool's schema governs
+#: ``"arguments"`` -- see that class's docstring) accepts an array of arrays
+#: of arrays without limit, and a greedy decoder over an untrained model can
+#: and did (this module's own regression test caught it) pick ``[`` forever,
+#: turning each extra nesting level into one more Python call frame and
+#: eventually raising ``RecursionError`` -- a crash, not a clean rejection.
+#: Depth is threaded through every recursive parse function and checked
+#: before it grows any further, so a schema (or an ``"any"`` fallback) that
+#: nests this deep is answered with an ordinary ``"invalid"`` instead.
+_MAX_DEPTH = 24
+
+
+def _parse_object(schema: Schema, buf: bytes, i: int, depth: int = 0):
+    if depth > _MAX_DEPTH:
+        return "invalid", i, None
     n = len(buf)
     i = _skip_ws(buf, i)
     if i >= n:
@@ -397,16 +437,20 @@ def _parse_object(schema: Schema, buf: bytes, i: int):
     if i >= n:
         return "incomplete", i, None
 
-    # Keys are constrained to the known property names exactly like an
-    # ``enum``-typed string value -- not merely checked once the closing
-    # quote arrives. Without this, a key string has no bound at all (it is
-    # not declared as an enum in the schema, it *is* the schema's property
-    # names), and a greedy decoder over an untrained model's arbitrary
-    # logits can spell an endless key that never matches anything and never
-    # closes -- exactly the failure this module's own regression test
-    # caught before this pruning was added.
-    key_enum = list(props) if not open_ else None
     while True:
+        # Keys are constrained to the known property names *not already
+        # seen*, exactly like an ``enum``-typed string value -- not merely
+        # checked once the closing quote arrives. Two things this fixes at
+        # once, both caught by this module's own untrained-model regression
+        # test before the fix: without any pruning, a key string has no
+        # bound at all (it is not declared as an enum, it *is* the schema's
+        # property names) and a greedy decoder can spell an endless key that
+        # never matches anything and never closes; and without *excluding
+        # already-seen keys*, JSON's tolerance of syntactically-duplicate
+        # keys lets the same one property be re-typed forever, which is a
+        # separate infinite loop with an otherwise-valid-looking key every
+        # time.
+        key_enum = [p for p in props if p not in obj] if not open_ else None
         kstatus, kpos, kval = _parse_string(buf, i, key_enum)
         if kstatus != "complete":
             return kstatus, i, None
@@ -421,7 +465,7 @@ def _parse_object(schema: Schema, buf: bytes, i: int):
         if j >= n:
             return "incomplete", i, None
         value_schema = _resolve_property_schema(props.get(kval), obj)
-        vstatus, vpos, vval = _parse_value(value_schema, buf, j)
+        vstatus, vpos, vval = _parse_value(value_schema, buf, j, depth + 1)
         if vstatus != "complete":
             return vstatus, i, None
         obj[kval] = vval
@@ -432,6 +476,18 @@ def _parse_object(schema: Schema, buf: bytes, i: int):
             return ("complete", k + 1, obj) if required <= set(obj) else ("invalid", i, None)
         if buf[k] != 0x2C:  # ','
             return "invalid", i, None
+        if not open_ and set(props) <= set(obj):
+            # A comma promises another key follows, and there is no closed-
+            # world key left to supply one (every declared property is
+            # already in ``obj`` and unknown keys are always rejected) -- so
+            # the comma itself is the invalid byte, not (only, eventually)
+            # whatever unmatchable key string would have to follow it. Catch
+            # it exactly here rather than one key-parse later: the earlier,
+            # weaker form of this ("prune impossible keys") still let a
+            # decoder open a string it could never legally close, and only
+            # discovered that a byte later with nothing left to fall back on
+            # -- see this module's own untrained-model regression test.
+            return "invalid", i, None
         i = _skip_ws(buf, k + 1)
         if i >= n:
             return "incomplete", i, None
@@ -439,7 +495,9 @@ def _parse_object(schema: Schema, buf: bytes, i: int):
         # accepted here, which is what rejects a trailing comma.
 
 
-def _parse_array(schema: Schema, buf: bytes, i: int):
+def _parse_array(schema: Schema, buf: bytes, i: int, depth: int = 0):
+    if depth > _MAX_DEPTH:
+        return "invalid", i, None
     n = len(buf)
     i = _skip_ws(buf, i)
     if i >= n:
@@ -464,7 +522,7 @@ def _parse_array(schema: Schema, buf: bytes, i: int):
         return "incomplete", i, None
 
     while True:
-        vstatus, vpos, vval = _parse_value(items_schema, buf, i)
+        vstatus, vpos, vval = _parse_value(items_schema, buf, i, depth + 1)
         if vstatus != "complete":
             return vstatus, i, None
         arr.append(vval)
@@ -480,7 +538,9 @@ def _parse_array(schema: Schema, buf: bytes, i: int):
             return "incomplete", i, None
 
 
-def _parse_any(buf: bytes, i: int):
+def _parse_any(buf: bytes, i: int, depth: int = 0):
+    if depth > _MAX_DEPTH:
+        return "invalid", i, None
     n = len(buf)
     i = _skip_ws(buf, i)
     if i >= n:
@@ -489,9 +549,9 @@ def _parse_any(buf: bytes, i: int):
     if c == 0x22:
         return _parse_string(buf, i)
     if c == 0x7B:
-        return _parse_object({"type": "object", "properties": {}, "required": (), "_open": True}, buf, i)
+        return _parse_object({"type": "object", "properties": {}, "required": (), "_open": True}, buf, i, depth)
     if c == 0x5B:
-        return _parse_array({"type": "array", "items": _ANY_SCHEMA}, buf, i)
+        return _parse_array({"type": "array", "items": _ANY_SCHEMA}, buf, i, depth)
     if c in (0x74, 0x66):
         return _parse_boolean(buf, i)
     if c == 0x6E:
@@ -501,12 +561,12 @@ def _parse_any(buf: bytes, i: int):
     return "invalid", i, None
 
 
-def _parse_value(schema: Schema, buf: bytes, i: int):
+def _parse_value(schema: Schema, buf: bytes, i: int, depth: int = 0):
     t = schema["type"]
     if t == "object":
-        return _parse_object(schema, buf, i)
+        return _parse_object(schema, buf, i, depth)
     if t == "array":
-        return _parse_array(schema, buf, i)
+        return _parse_array(schema, buf, i, depth)
     if t == "string":
         return _parse_string(buf, i, schema.get("enum"), schema.get("maxLength"))
     if t in ("number", "integer"):
@@ -516,7 +576,7 @@ def _parse_value(schema: Schema, buf: bytes, i: int):
     if t == "null":
         return _parse_null(buf, i)
     if t == "any":
-        return _parse_any(buf, i)
+        return _parse_any(buf, i, depth)
     raise AssertionError(f"unsupported type {t!r} reached the parser; "
                          "_validate_supported should have rejected it earlier")
 
