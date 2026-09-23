@@ -389,6 +389,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--dry-run", action="store_true",
                    help="build on the meta device, audit and estimate; no network, no training")
+    p.add_argument("--max-data", action="store_true",
+                   help="also use opt-in chat sources (non-commercial or unclear terms); "
+                        "the manifest records which")
     p.set_defaults(func=cmd_train)
 
     p = sub.add_parser("evaluate", help="graded accuracy on held-out splits")
@@ -421,7 +424,8 @@ def cmd_train(args) -> int:
         result = run_preset.dry_run(preset)
         return 0 if result["match"] else 1
     run_preset.train_preset(preset, steps=args.steps, rounds=args.rounds, device=args.device,
-                            out=args.out, init=args.init, resume=args.resume, seed=args.seed)
+                            out=args.out, init=args.init, resume=args.resume, seed=args.seed,
+                            max_data=args.max_data)
     return 0
 
 

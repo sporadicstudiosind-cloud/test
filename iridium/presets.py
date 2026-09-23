@@ -40,6 +40,13 @@ from typing import Optional
 
 from .config import TEXT_ID_OFFSET, IridiumConfig, get_config
 
+#: Duplicated from iridium.data (which imports numpy) so presets stay importable
+#: with the standard library alone; a test holds the copies equal.
+_TALK_MIX = {"fineweb_edu": 0.30, "wikipedia": 0.20, "cosmopedia_stories": 0.20,
+             "cosmopedia_textbooks": 0.15, "gutenberg": 0.10, "finemath": 0.05}
+_STEM_MIX = {"finemath": 0.35, "openwebmath": 0.15, "fineweb_edu": 0.25,
+             "cosmopedia_textbooks": 0.15, "wikipedia": 0.10}
+
 __all__ = ["Preset", "PRESETS", "get_preset", "FREE_TIERS", "estimate_hours", "preset_table"]
 
 
@@ -79,6 +86,10 @@ class Preset:
     free_tier: Optional[str] = "kaggle_p100"
     status: str = "verified in theory"
     notes: str = ""
+    #: Source weights inside the ``text_lm`` and ``chat`` families; ``None``
+    #: means the module defaults. See iridium.data.text_corpus / chat_corpus.
+    text_mix: Optional[dict[str, float]] = None
+    chat_mix: Optional[dict[str, float]] = None
 
     @property
     def tokens(self) -> int:
@@ -106,6 +117,7 @@ def _presets() -> dict[str, Preset]:
         "A small model that holds a conversation: prose plus human-written chats.",
         chat34, {"text_lm": 0.60, "chat": 0.40},
         steps=20_000, batch_size=32, window=512, lr=1.5e-3, free_tier="colab_t4", rounds=5,
+        text_mix=_TALK_MIX,
         notes="The first thing to train. ~330M tokens, about half of compute-"
               "optimal for 36M params: roughly one free Colab session, optimistically.")
 
@@ -114,7 +126,7 @@ def _presets() -> dict[str, Preset]:
         "chat-100m", 1,
         "The main talking model: prose, chat, and a little false-premise reasoning.",
         chat100, {"text_lm": 0.55, "chat": 0.35, "false_premise": 0.10},
-        steps=20_000, batch_size=32, window=1024, lr=8e-4, rounds=10,
+        steps=20_000, batch_size=32, window=1024, lr=8e-4, rounds=10, text_mix=_TALK_MIX,
         notes="~655M tokens: about a third of compute-optimal for 104M params, "
               "spread over several weeks of Kaggle quota.")
 
@@ -124,7 +136,7 @@ def _presets() -> dict[str, Preset]:
         "synthetic tool tasks, decoded under schema constraints.",
         replace(chat100, name="iridium-1-tools-100m"),
         {"text_lm": 0.40, "chat": 0.30, "tools": 0.30},
-        steps=20_000, batch_size=32, window=1024, lr=8e-4, rounds=10,
+        steps=20_000, batch_size=32, window=1024, lr=8e-4, rounds=10, text_mix=_TALK_MIX,
         notes="Best started from a chat-100m checkpoint rather than from scratch.")
 
     omni = replace(chat100, name="iridium-1-omni-100m", mrope_sections=(8, 12, 12),
@@ -147,7 +159,7 @@ def _presets() -> dict[str, Preset]:
         replace(chat100, name="iridium-1-stem-100m"),
         {"text_lm": 0.25, "chat": 0.10, "channel_depth": 0.20, "channel_intervention": 0.20,
          "field_rollout": 0.15, "false_premise": 0.10},
-        steps=15_000, batch_size=32, window=1024, lr=8e-4, rounds=6)
+        steps=15_000, batch_size=32, window=1024, lr=8e-4, rounds=6, text_mix=_STEM_MIX)
 
     world = replace(omni, name="iridium-1-world-100m",
                     codecs=replace(omni.codecs, camera_features=6, n_modalities=10,

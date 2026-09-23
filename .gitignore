@@ -8,3 +8,6 @@ checkpoints/
 
 # Stray pytest output redirects from tooling; never part of the tree.
 _pytest*.log
+
+# Tokenizer and other training caches.
+artifacts/

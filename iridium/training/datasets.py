@@ -97,6 +97,7 @@ def build_corpus(
     chat_mix: Optional[dict[str, float]] = None,
     tokenizer=None,
     text_skip_docs: int = 0,
+    chat_max_bytes: int = 1024,
 ) -> Corpus:
     """Assemble a corpus. ``text_lm`` in the mixture streams *real* text.
 
@@ -141,7 +142,8 @@ def build_corpus(
         items.extend(text)
     if n_chat:
         from ..data.chat_corpus import chat_items
-        chat = chat_items(n_chat, mix=chat_mix, seed=seed, split=split)
+        chat = chat_items(n_chat, mix=chat_mix, seed=seed, split=split,
+                          max_bytes=chat_max_bytes)
         if len(chat) != n_chat:
             raise RuntimeError(f"chat source returned {len(chat)}/{n_chat} requested items")
         items.extend(chat)

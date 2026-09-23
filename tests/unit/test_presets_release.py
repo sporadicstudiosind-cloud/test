@@ -115,3 +115,15 @@ def test_a_trained_preset_checkpoint_chats_through_its_own_tokenizer(tmp_path, m
     out = generate(model, Sample([text_span("A calculator", offset=16, tokenizer=again)]),
                    max_new_tokens=3, text_only=True, tokenizer=again)
     assert isinstance(out.text, str)
+
+
+def test_preset_text_mixes_match_the_data_module_and_name_real_sources():
+    from iridium import presets
+    from iridium.data import text_corpus
+
+    assert presets._TALK_MIX == text_corpus.TALK_MIX
+    assert presets._STEM_MIX == text_corpus.STEM_MIX
+    for p in presets.PRESETS.values():
+        if p.text_mix:
+            assert set(p.text_mix) <= set(text_corpus.SOURCES), p.name
+            assert abs(sum(p.text_mix.values()) - 1) < 1e-9

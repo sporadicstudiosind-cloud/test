@@ -396,7 +396,7 @@ def _fake_stream_documents(docs):
     that never runs out would hide a bug where text_items loops forever
     waiting for more tokens than the mixture can ever supply."""
     def _stream(key, limit=None, seed=0, buffer=None, shuffle=True,
-                split=None, max_scanned=None):
+                split=None, max_scanned=None, skip=0):
         yield from docs
     return _stream
 
