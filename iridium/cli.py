@@ -372,12 +372,55 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--system", default=None, help="optional system message")
     p.set_defaults(func=cmd_chat)
 
+    p = sub.add_parser("presets", help="the ready-to-train presets and free-tier estimates")
+    p.add_argument("name", nargs="?", help="show one preset in detail")
+    p.set_defaults(func=cmd_presets)
+
+    p = sub.add_parser("train", help="train a preset end to end, in rounds of fresh data")
+    p.add_argument("--preset", required=True, help="see `iridium presets`")
+    p.add_argument("--steps", type=int, default=None, help="override the preset's step budget")
+    p.add_argument("--rounds", type=int, default=None, help="fresh-data rounds (bounds memory)")
+    p.add_argument("--device", default=None, help="cpu | cuda | cuda:N (default: detect)")
+    p.add_argument("--out", default="runs")
+    p.add_argument("--init", default=None, help="start from a checkpoint (e.g. chat -> tools)")
+    p.add_argument("--resume", default=None, help="continue from a round checkpoint")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--dry-run", action="store_true",
+                   help="build on the meta device, audit and estimate; no network, no training")
+    p.set_defaults(func=cmd_train)
+
     p = sub.add_parser("evaluate", help="graded accuracy on held-out splits")
     p.add_argument("checkpoint")
     p.add_argument("--items", type=int, default=300)
     p.add_argument("--per-family", type=int, default=24)
     p.set_defaults(func=cmd_evaluate)
     return ap
+
+
+def cmd_presets(args) -> int:
+    from .presets import get_preset, preset_table
+    from .training.run_preset import describe
+    if args.name:
+        print(describe(get_preset(args.name)))
+    else:
+        print(preset_table())
+    return 0
+
+
+def cmd_train(args) -> int:
+    from .presets import get_preset
+    from .training import run_preset
+    try:
+        preset = get_preset(args.preset)
+    except KeyError as exc:
+        print(f"train: {exc.args[0]}", file=sys.stderr)
+        return 2
+    if args.dry_run:
+        result = run_preset.dry_run(preset)
+        return 0 if result["match"] else 1
+    run_preset.train_preset(preset, steps=args.steps, rounds=args.rounds, device=args.device,
+                            out=args.out, init=args.init, resume=args.resume, seed=args.seed)
+    return 0
 
 
 def main(argv=None) -> int:

@@ -295,8 +295,16 @@ def stream_documents(
     shuffle: bool = True,
     split: Optional[str] = None,
     max_scanned: Optional[int] = None,
+    skip: int = 0,
 ) -> Iterator[str]:
     """Yield raw documents from one source. Requires ``datasets``.
+
+    ``skip`` drops that many rows, in file order, before the shuffle buffer
+    fills. It is what lets training proceed in *rounds* of fresh documents:
+    a shuffle buffer only permutes a window of the stream, so re-seeding it
+    each round re-reads mostly the same opening documents -- the same flaw
+    that once leaked 10% of a test split into training. Skipping is paid in
+    reading (the rows still stream past), not in memory.
 
     ``buffer`` defaults to the source's own :attr:`SourceSpec.shuffle_buffer`,
     because a shuffle buffer is measured in *rows* and a row is a whole book in
@@ -317,6 +325,8 @@ def stream_documents(
     ds = load_dataset(
         spec.dataset, spec.config, split=spec.split, streaming=True,
     )
+    if skip:
+        ds = ds.skip(int(skip))
     if shuffle:
         ds = ds.shuffle(seed=seed, buffer_size=buffer or spec.shuffle_buffer)
     clean = CLEANERS.get(key, lambda t: t)
@@ -541,8 +551,13 @@ def text_items(
     collapse_repeats: bool = True,
     max_repeat_run: int = 8,
     dedupe: bool = True,
+    skip_docs: int = 0,
 ):
     """Build language-modelling items from streamed real text.
+
+    ``skip_docs`` starts every source that many rows in, so successive calls
+    with growing offsets yield *new* documents -- the round-based training in
+    :mod:`iridium.training.run_preset` depends on it.
 
     ``tokenizer=None`` keeps the original byte-level behaviour (id == byte
     value): there is no vocabulary to train, nothing to go stale, and no
@@ -689,7 +704,8 @@ def text_items(
             cap = max_windows_per_doc or SOURCES[key].windows_per_doc
             got = 0
             budget = max(8, -(-quota // max(cap, 1)) * 8 + 8)
-            for doc in stream_documents(key, limit=budget, seed=seed + i, split=split):
+            for doc in stream_documents(key, limit=budget, seed=seed + i, split=split,
+                                        skip=skip_docs):
                 doc = clean(doc)
                 if doc is None:
                     continue

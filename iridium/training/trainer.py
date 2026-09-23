@@ -247,6 +247,18 @@ class Trainer:
         self.scaler = torch.amp.GradScaler("cuda", enabled=precision == "fp16")
         self.completed_steps = 0
 
+    def set_corpus(self, corpus: Corpus) -> None:
+        """Swap in a fresh corpus between rounds without touching model,
+        optimizer, schedule or step count -- how a run streams more data than
+        fits in memory as one list of items."""
+        if not corpus.items:
+            raise ValueError("training corpus is empty")
+        self.loader = BatchLoader(
+            corpus, self.model.cfg.codecs, self.loader.batch_size,
+            self.cfg.seed + self.completed_steps, device=self.device,
+            max_length=self.cfg.max_length or self.model.cfg.max_seq_len,
+        )
+
     def _apply_freeze(self) -> None:
         if not self.cfg.freeze:
             return
@@ -260,8 +272,16 @@ class Trainer:
     # -- loop -------------------------------------------------------------
 
     def train(
-        self, on_eval: Optional[Callable[[int], dict[str, Any]]] = None
+        self, on_eval: Optional[Callable[[int], dict[str, Any]]] = None,
+        until: Optional[int] = None,
     ) -> list[dict[str, Any]]:
+        """Train to ``cfg.steps``, or stop early at step ``until``.
+
+        ``until`` is how a run proceeds in rounds of fresh data
+        (:meth:`set_corpus` between calls) while the learning-rate schedule
+        still spans the whole run: the schedule reads ``cfg.steps``, which
+        never changes, so round boundaries are invisible to it.
+        """
         if not self.completed_steps:
             torch.manual_seed(self.cfg.seed)
         self.model.train()
@@ -269,7 +289,8 @@ class Trainer:
         started = time.time()
         stream = self._infinite_batches()
         overflow_retries = 0
-        while step < self.cfg.steps:
+        stop = self.cfg.steps if until is None else min(until, self.cfg.steps)
+        while step < stop:
             lr = learning_rate(step, self.cfg)
             for group in self.optimizer.param_groups:
                 group["lr"] = lr

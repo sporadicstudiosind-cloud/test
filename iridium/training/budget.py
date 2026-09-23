@@ -166,14 +166,20 @@ def audit(
 
     floor = REFERENCE_RATIOS["chinchilla_optimal"]
     ratio = corpus / max(parameters, 1)
+    epochs = consumed / max(corpus, 1)
     if ratio < floor:
+        # Which failure it is depends on repetition. Seen once, too little data
+        # leaves a model undertrained; seen many times, it gets memorised.
+        consequence = (
+            "and with repeated passes it will memorise rather than generalise"
+            if epochs > 1.5 else
+            "so it will be undertrained -- more tokens, not more passes, is the fix"
+        )
         warnings.append(
             f"{ratio:.3f} tokens per parameter against a compute-optimal floor of "
-            f"{floor:.0f} — this model has far more capacity than the corpus can "
-            "constrain, and will memorise rather than generalise"
+            f"{floor:.0f}; {consequence}"
         )
 
-    epochs = consumed / max(corpus, 1)
     if epochs > 4:
         warnings.append(
             f"{epochs:.1f} passes over the same tokens; past roughly 4 epochs "

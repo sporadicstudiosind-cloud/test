@@ -1,0 +1,84 @@
+"""Presets: every one builds, costs exactly, and the round-based runner trains."""
+from __future__ import annotations
+
+import dataclasses
+import json
+
+import pytest
+
+from iridium.presets import FREE_TIERS, PRESETS, estimate_hours, get_preset, preset_table
+from iridium.training import run_preset
+
+
+@pytest.mark.parametrize("name", sorted(PRESETS))
+def test_every_preset_builds_and_matches_its_formula(name):
+    assert run_preset.dry_run(get_preset(name))["match"]
+
+
+def test_presets_follow_the_release_priority_order():
+    order = {p.name: p.priority for p in PRESETS.values()}
+    assert order["chat-34m"] == order["chat-100m"] == 1
+    assert order["tools-100m"] == 2 and order["omni-100m"] == 3
+    assert order["stem-100m"] == 4 and order["world-100m"] == 5
+
+
+def test_free_tier_presets_fit_free_tier_memory():
+    """fp32 Adam state (16 B/param) must fit the target device with headroom."""
+    for p in PRESETS.values():
+        if p.free_tier is None:
+            continue
+        state_gb = p.config.training_state_bytes() / 1e9
+        assert state_gb < 0.5 * FREE_TIERS[p.free_tier]["memory_gb"], p.name
+
+
+def test_every_preset_vocabulary_has_no_dead_rows():
+    for p in PRESETS.values():
+        if p.config.text_vocab_size:
+            assert p.config.codecs.vocab_size == p.config.text_vocab_size + 16, p.name
+
+
+def test_estimates_scale_with_tokens_and_device():
+    p = get_preset("chat-34m")
+    assert estimate_hours(p, "colab_t4", p.tokens * 2) == pytest.approx(
+        2 * estimate_hours(p, "colab_t4"))
+    assert estimate_hours(p, "tpu_v5e1") < estimate_hours(p, "colab_t4")
+    assert "optimistic" in preset_table()
+
+
+def test_8b_is_not_a_trainable_preset():
+    with pytest.raises(KeyError, match="8b"):
+        get_preset("8b")
+
+
+def test_round_based_training_streams_fresh_corpora_and_checkpoints(tmp_path, monkeypatch):
+    """Offline: synthetic families only, tokenizer bypassed, tiny budget.
+
+    Checks the part that matters for free tiers: several rounds, one schedule,
+    a checkpoint per round, the step count carried across rounds.
+    """
+    from iridium.training import tokenizer_bridge
+
+    monkeypatch.setattr(tokenizer_bridge, "tokenizer_for_config", lambda cfg: None)
+    monkeypatch.setattr(tokenizer_bridge, "tokenizer_manifest",
+                        lambda tok, cfg=None: {"kind": "test", "fell_back": False})
+    base = get_preset("chat-34m")
+    preset = dataclasses.replace(
+        base, mixture={"channel_depth": 1.0, "false_premise": 1.0},
+        steps=4, batch_size=2, window=256, rounds=2, ema_decay=0.9)
+    seen = []
+
+    import iridium.training.datasets as datasets
+    original = datasets.build_corpus
+
+    def recording_build(n, **kw):
+        seen.append(kw["seed"])
+        return original(n, **kw)
+
+    monkeypatch.setattr(datasets, "build_corpus", recording_build)
+    final = run_preset.train_preset(preset, device="cpu", out=str(tmp_path))
+    assert final is not None and final.exists()
+    assert len(seen) == 2 and seen[0] != seen[1]          # a fresh corpus per round
+    out = tmp_path / "chat-34m"
+    assert (out / "chat-34m-round0.pt").exists() and (out / "chat-34m-round1.pt").exists()
+    meta = json.loads((out / "preset.json").read_text())
+    assert meta["steps"] == 4 and meta["rounds"] == 2
