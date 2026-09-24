@@ -135,6 +135,32 @@ class Tool:
         )
         return f"{self.name}({args}) — {self.description}"
 
+    @classmethod
+    def from_mcp(cls, spec: Mapping[str, Any], fn: Optional[Callable[..., Any]] = None) -> "Tool":
+        """Build a :class:`Tool` from an MCP-style tool definition —
+        ``{"name": ..., "description": ..., "inputSchema": {...}}``, exactly
+        the shape the Model Context Protocol's ``tools/list`` returns and
+        this codebase's own ``mcp__*`` tool entries in a system prompt use.
+        No format translation is needed beyond the field rename: MCP's
+        ``inputSchema`` already *is* a JSON-Schema object schema, the same
+        thing :attr:`parameters` is here, which is exactly why registering an
+        MCP tool directly is possible at all rather than needing its own
+        constrained-decoding or supervision story — one JSON-Schema-shaped
+        thing, decoded and validated the same way regardless of which
+        ecosystem's naming convention described it. ``fn`` is supplied
+        separately because an MCP tool definition, by design, describes the
+        call's shape without binding it to this process's own callable (the
+        real MCP call goes over a session to a server); a caller that wants
+        :meth:`ToolRegistry.call` to actually execute it passes the
+        function that does so (e.g. one that dispatches over that session).
+        """
+        return cls(
+            name=spec["name"],
+            description=spec.get("description", ""),
+            parameters=spec.get("inputSchema") or {"type": "object", "properties": {}},
+            fn=fn,
+        )
+
 
 def _type_hint(schema: Mapping[str, Any]) -> str:
     t = schema.get("type", "any")
@@ -255,7 +281,8 @@ def parse_tool_call(text: str) -> tuple[str, dict]:
     return name, arguments
 
 
-def extract_tool_call(ids: Sequence[int], text_offset: int = TEXT_OFFSET) -> Optional[str]:
+def extract_tool_call(ids: Sequence[int], text_offset: int = TEXT_OFFSET,
+                       tokenizer=None) -> Optional[str]:
     """Given one turn's raw generated ids, the JSON text if it is a tool call,
     else ``None`` if it is an ordinary text reply.
 
@@ -263,16 +290,25 @@ def extract_tool_call(ids: Sequence[int], text_offset: int = TEXT_OFFSET) -> Opt
     a turn the same way for either outcome (see ``chat.conversation_spans``'s
     ``open_for_reply``) and lets the model's very first emitted id decide
     which kind of turn this is — :data:`~iridium.runtime.chat.TOOL_CALL` if
-    it chose to call a tool, an ordinary text byte otherwise. Bytes after
-    that are decoded exactly the way ``generate.Generated.text`` already
-    does (subtract ``text_offset``, drop anything outside ``0..255``, ignore
-    any other control id that sneaks in) so the JSON text handed to
-    :func:`parse_tool_call` matches what training actually supervised.
+    it chose to call a tool, an ordinary text byte otherwise. That first id is
+    a reserved control id below ``text_offset`` regardless of ``tokenizer``
+    (control ids are never subword-encoded — see ``chat.py``'s marker-block
+    docstring), so the check is the same either way; only the *decoding* of
+    what follows differs. Byte-level (``tokenizer=None``): subtract
+    ``text_offset``, drop anything outside ``0..255``, exactly what
+    ``generate.Generated.text`` already does. Subword (``tokenizer`` given):
+    subtract ``text_offset`` from each id and hand the list to
+    ``tokenizer.decode`` — the inverse of how ``codecs.spans.text_span``
+    encoded it — rather than reimplementing per-byte decoding for a
+    vocabulary this function does not otherwise need to know about.
     """
     if not ids or int(ids[0]) != TOOL_CALL:
         return None
+    rest = ids[1:]
+    if tokenizer is not None:
+        return tokenizer.decode([int(t) - text_offset for t in rest if int(t) >= text_offset])
     body = bytearray()
-    for token in ids[1:]:
+    for token in rest:
         v = int(token) - text_offset
         if 0 <= v < 256:
             body.append(v)
@@ -301,6 +337,7 @@ def run_tool_loop(
     seed: int = 0,
     max_bytes: int = 4096,
     generate_fn: Optional[Callable[..., Any]] = None,
+    tokenizer=None,
     **generate_kwargs,
 ) -> ToolLoopResult:
     """Generate -> execute -> feed the result back -> repeat, until a final
@@ -323,6 +360,15 @@ def run_tool_loop(
     mirroring ``iridium.agency.media_agent``'s own "no completion claimed"
     discipline: a caller must check ``stopped`` rather than assume ``answer``
     is a real answer.
+
+    ``tokenizer``, when given, is the run's subword vocabulary (anything with
+    ``encode``/``decode``, e.g. ``iridium.data.tokenizer.BytePairTokenizer``)
+    — passed straight through to ``conversation_sample`` (so the prompt is
+    encoded the way the model was trained) and to :func:`extract_tool_call`
+    (so a generated call is decoded the same way). Passing a different
+    tokenizer than the checkpoint trained with is the exact failure
+    ``codecs.spans.text_span``'s docstring warns about: not an error, fluent
+    nonsense.
     """
     if max_calls < 1:
         raise ValueError("max_calls must be at least 1")
@@ -331,7 +377,7 @@ def run_tool_loop(
 
     params = dict(
         max_new_tokens=max_new_tokens, stop_ids=STOP_IDS, text_offset=TEXT_OFFSET,
-        text_only=True, seed=seed,
+        text_only=True, seed=seed, tokenizer=tokenizer,
     )
     params.update(generate_kwargs)
 
@@ -343,7 +389,8 @@ def run_tool_loop(
         context = fit_to_budget(turns, max_bytes)
         while context and context[0].role == "assistant":
             context = context[1:]
-        sample = conversation_sample(context, supervise_assistant=False, open_for_reply=True)
+        sample = conversation_sample(context, supervise_assistant=False, open_for_reply=True,
+                                     tokenizer=tokenizer)
         budget = params["max_new_tokens"]
         if len(sample) + budget > max_seq_len:
             budget = max(1, max_seq_len - len(sample))
@@ -351,7 +398,7 @@ def run_tool_loop(
         out = generate_fn(model, sample, **step_params)
         params["seed"] = params.get("seed", seed) + 1  # vary sampling call to call
 
-        call_text = extract_tool_call(out.ids, TEXT_OFFSET)
+        call_text = extract_tool_call(out.ids, TEXT_OFFSET, tokenizer=tokenizer)
         if call_text is None:
             answer = out.text.strip()
             turns = [*context, Turn("assistant", answer)]

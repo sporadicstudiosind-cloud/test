@@ -251,48 +251,74 @@ def _parse_number(buf: bytes, i: int, integer_only: bool = False):
     structurally valid number is followed by *any* other byte, leaving it to
     the caller (which always knows what must follow a value: a comma, a
     closing bracket, or end of input) to decide whether that next byte is
-    itself acceptable."""
+    itself acceptable. ``_MAX_NUMBER_LEN`` bounds the digits actually
+    *consumed as part of the number*, not the visible buffer — a candidate
+    byte that terminates the number (a comma, a bracket, real end of input)
+    is always still visible and checked, however long the number in front of
+    it; only *one more digit* past the cap is refused. An earlier version
+    capped the buffer window itself, which made a perfectly short, cleanly
+    terminated number look "invalid" whenever the byte that terminated it
+    happened to land past the cap in the raw buffer — this checks the
+    number's own consumed length instead, at the single point (just before
+    every "incomplete" return, and once more before the final "complete")
+    where that length is known.
+    """
     n = len(buf)
-    if i >= n:
+
+    def bail(pos: int):
+        # "Ran out of real input" and "refused to grow this number past the
+        # cap" collapse to the same two-way choice here: incomplete (still
+        # might close, or might grow) unless growing further would exceed
+        # the cap, in which case there is nothing left this prefix could
+        # validly become, so it is invalid instead. A JSON number has no
+        # length limit of its own, so without this an unbounded run of
+        # extra digits is a legitimately valid extension at every single
+        # step -- exactly what an untrained model's greedy decode found and
+        # exploited before this cap existed.
+        if pos - i >= _MAX_NUMBER_LEN:
+            return "invalid", i, None
         return "incomplete", i, None
+
+    if i >= n:
+        return bail(i)
     j = i
     if buf[j] == 0x2D:  # '-'
         j += 1
     if j >= n:
-        return "incomplete", i, None
+        return bail(j)
     if buf[j] == 0x30:  # '0'
         j += 1
     elif 0x31 <= buf[j] <= 0x39:
         j += 1
-        while j < n and 0x30 <= buf[j] <= 0x39:
+        while j < n and 0x30 <= buf[j] <= 0x39 and j - i < _MAX_NUMBER_LEN:
             j += 1
     else:
         return "invalid", i, None
     if not integer_only:
-        if j < n and buf[j] == 0x2E:  # '.'
+        if j < n and buf[j] == 0x2E and j - i < _MAX_NUMBER_LEN:  # '.'
             k = j + 1
             if k >= n:
-                return "incomplete", i, None
+                return bail(k)
             if not (0x30 <= buf[k] <= 0x39):
                 return "invalid", i, None
             k += 1
-            while k < n and 0x30 <= buf[k] <= 0x39:
+            while k < n and 0x30 <= buf[k] <= 0x39 and k - i < _MAX_NUMBER_LEN:
                 k += 1
             j = k
-        if j < n and buf[j] in (0x65, 0x45):  # 'e'/'E'
+        if j < n and buf[j] in (0x65, 0x45) and j - i < _MAX_NUMBER_LEN:  # 'e'/'E'
             k = j + 1
             if k < n and buf[k] in (0x2B, 0x2D):
                 k += 1
             if k >= n:
-                return "incomplete", i, None
+                return bail(k)
             if not (0x30 <= buf[k] <= 0x39):
                 return "invalid", i, None
             k += 1
-            while k < n and 0x30 <= buf[k] <= 0x39:
+            while k < n and 0x30 <= buf[k] <= 0x39 and k - i < _MAX_NUMBER_LEN:
                 k += 1
             j = k
     if j >= n:
-        return "incomplete", i, None
+        return bail(j)
     text = buf[i:j].decode("ascii")
     value = int(text) if integer_only or ("." not in text and "e" not in text and "E" not in text) else float(text)
     return "complete", j, value
@@ -427,6 +453,15 @@ def _resolve_property_schema(entry: PropertySchema, obj_so_far: dict) -> Schema:
 #: nests this deep is answered with an ordinary ``"invalid"`` instead.
 _MAX_DEPTH = 24
 
+#: A bare safety bound on a JSON number's own digit count, for the same
+#: reason ``_MAX_WS_RUN`` bounds whitespace: nothing in JSON's grammar limits
+#: how many digits a number literal may have, so "incomplete" is the
+#: literally correct answer to every one of an unbounded run of extra
+#: digits. 32 characters covers any float this engine's callers plausibly
+#: need (double precision needs at most 17 significant digits) with room to
+#: spare for a sign, a decimal point and an exponent.
+_MAX_NUMBER_LEN = 32
+
 
 def _parse_object(schema: Schema, buf: bytes, i: int, depth: int = 0):
     if depth > _MAX_DEPTH:
@@ -557,6 +592,18 @@ def _parse_array(schema: Schema, buf: bytes, i: int, depth: int = 0):
         if buf[k] == 0x5D:
             return finish(k + 1)
         if buf[k] != 0x2C:
+            return "invalid", i, None
+        max_items = schema.get("maxItems")
+        if max_items is not None and len(arr) >= max_items:
+            # ``maxItems`` was previously only checked once the array
+            # actually closed, at ``finish`` -- which never stops a comma
+            # promising a fourth item to a 3-item-capped array, only
+            # rejects the *result* after one more item has already been
+            # parsed. An unconstrained ``items`` schema (or one whose own
+            # length is itself unbounded, e.g. an unbounded number) turns
+            # that gap into an endless array for the same reason every
+            # other cap in this module exists: nothing about validity favours
+            # stopping over adding one more element.
             return "invalid", i, None
         i = _skip_ws(buf, k + 1)
         if i >= n:
