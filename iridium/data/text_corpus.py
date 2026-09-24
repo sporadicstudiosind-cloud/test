@@ -83,7 +83,10 @@ SOURCES: dict[str, SourceSpec] = {
         description=(
             "Project Gutenberg English books. The cleanest provenance available: "
             "these works are out of copyright outright. They are also old, and "
-            "carry the assumptions of their period into anything trained on them."
+            "carry the assumptions of their period into anything trained on them. "
+            "Not in any default mix: streaming this dump peaks near 12 GB of host "
+            "RAM before the first book (measured), more than a free Colab session "
+            "has."
         ),
         homepage="https://www.gutenberg.org/policy/permission.html",
         shuffle_buffer=16,          # rows are whole books
@@ -213,12 +216,12 @@ SOURCES: dict[str, SourceSpec] = {
     ),
 }
 
-DEFAULT_MIX = {"gutenberg": 0.4, "wikipedia": 0.4, "fineweb_edu": 0.2}
+DEFAULT_MIX = {"wikipedia": 0.45, "fineweb_edu": 0.35, "cosmopedia_stories": 0.20}
 
 #: Prose for the talking presets: the default sources plus synthetic stories
 #: and textbooks, which small models learn fluency from fastest.
-TALK_MIX = {"fineweb_edu": 0.30, "wikipedia": 0.20, "cosmopedia_stories": 0.20,
-            "cosmopedia_textbooks": 0.15, "gutenberg": 0.10, "finemath": 0.05}
+TALK_MIX = {"fineweb_edu": 0.35, "wikipedia": 0.25, "cosmopedia_stories": 0.20,
+            "cosmopedia_textbooks": 0.15, "finemath": 0.05}
 
 #: Prose for the STEM preset.
 STEM_MIX = {"finemath": 0.35, "openwebmath": 0.15, "fineweb_edu": 0.25,

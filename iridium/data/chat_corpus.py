@@ -52,6 +52,10 @@ class ChatSourceSpec:
     written_by: str = "human"
     #: Opt-in sources are registered and loadable, but never in a default mix.
     opt_in: bool = False
+    #: Columns to read; ``None`` reads all. Streaming parquet materialises
+    #: whole row groups, so skipping a wide unused column (OpenR1's traces)
+    #: is the difference between ~1 GB and ~4 GB of host RAM.
+    columns: Optional[tuple[str, ...]] = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -131,6 +135,7 @@ CHAT_SOURCES: dict[str, ChatSourceSpec] = {
         homepage="https://huggingface.co/datasets/open-r1/OpenR1-Math-220k",
         approx_rows=93_700,
         written_by="human-written solutions (NuminaMath)",
+        columns=("problem", "solution"),
     ),
     "ultrachat": ChatSourceSpec(
         key="ultrachat",
@@ -212,8 +217,9 @@ def _load(spec: ChatSourceSpec, streaming: bool = True):
         raise RuntimeError(
             "pip install datasets  — required for conversational training"
         ) from exc
+    extra = {"columns": list(spec.columns)} if spec.columns else {}
     return load_dataset(spec.dataset, spec.config, split=spec.split,
-                        streaming=streaming)
+                        streaming=streaming, **extra)
 
 
 def dolly_conversations(limit: Optional[int] = None, seed: int = 0

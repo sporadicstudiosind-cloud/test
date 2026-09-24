@@ -42,8 +42,8 @@ from .config import TEXT_ID_OFFSET, IridiumConfig, get_config
 
 #: Duplicated from iridium.data (which imports numpy) so presets stay importable
 #: with the standard library alone; a test holds the copies equal.
-_TALK_MIX = {"fineweb_edu": 0.30, "wikipedia": 0.20, "cosmopedia_stories": 0.20,
-             "cosmopedia_textbooks": 0.15, "gutenberg": 0.10, "finemath": 0.05}
+_TALK_MIX = {"fineweb_edu": 0.35, "wikipedia": 0.25, "cosmopedia_stories": 0.20,
+             "cosmopedia_textbooks": 0.15, "finemath": 0.05}
 _STEM_MIX = {"finemath": 0.35, "openwebmath": 0.15, "fineweb_edu": 0.25,
              "cosmopedia_textbooks": 0.15, "wikipedia": 0.10}
 

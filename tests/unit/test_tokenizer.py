@@ -188,13 +188,21 @@ def test_saved_artifact_is_small_json(trained, tmp_path):
 # needs IRIDIUM_NETWORK_TESTS=1 and is not exercised here.
 # ---------------------------------------------------------------------------
 
-def test_train_from_sources_raises_without_datasets_or_network():
+def _offline(monkeypatch):
+    """Make the corpus unreachable whatever the host has installed."""
+    import sys
+    monkeypatch.setitem(sys.modules, "datasets", None)
+
+
+def test_train_from_sources_raises_without_datasets_or_network(monkeypatch):
+    _offline(monkeypatch)
     with pytest.raises(Exception):
         train_from_sources(vocab_size=300, n_docs=5)
 
 
-def test_tokenizer_for_falls_back_to_byte_tokenizer_offline(tmp_path):
+def test_tokenizer_for_falls_back_to_byte_tokenizer_offline(tmp_path, monkeypatch):
     from iridium.data.tokenizer import tokenizer_for
+    _offline(monkeypatch)
     tok = tokenizer_for(vocab_size=300, cache_dir=tmp_path)
     assert tok.vocab_size == 256  # fell back to byte_tokenizer()
     assert tok.decode(tok.encode("hello")) == "hello"
