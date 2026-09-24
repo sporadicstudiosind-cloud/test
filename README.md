@@ -56,6 +56,25 @@ quotas, the reasoning behind the numbers, and what Groq / NVIDIA NIM style
 hosted APIs can do here (generate and grade data, subject to each model's
 licence; not train).
 
+## First test (recommended path)
+
+1. **Colab or Kaggle GPU** (or a free TPU v5e-1): open `notebooks/iridium_studio.ipynb`
+   (Colab) or `notebooks/iridium_studio_kaggle.ipynb`, add a `GITHUB_TOKEN` secret, run
+   top to bottom with `PRESET = '50m'`.
+2. Or from a shell:
+   ```bash
+   pip install -e ".[data]"
+   python -m iridium data prepare --preset 50m          # ~330M tokens to disk (CPU is fine)
+   python -m iridium train --preset 50m --data data     # logs val bits-per-byte every 5%
+   python -m iridium chat --checkpoint runs/50m/50m-final.pt
+   ```
+3. What to watch: `val_text_lm_bpb` and `val_chat_bpb` should fall steadily
+   (they start near 3 bits/byte); `H(stack)` near its maximum means the router
+   has not specialised yet. Send the log and any traceback.
+
+A quick pipeline check before spending quota: add `--tokens 2e6 --steps 20` to
+both commands; it runs in minutes on CPU.
+
 ## What the architecture is
 
 ```

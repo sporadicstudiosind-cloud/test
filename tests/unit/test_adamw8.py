@@ -32,7 +32,7 @@ def test_matches_fp32_adamw_on_a_regression():
             loss = ((lin(X) - y) ** 2).mean()
             loss.backward()
             opt.step()
-        losses[name] = float(loss)
+        losses[name] = float(loss.detach())
     assert losses["int8"] < 1e-3 and losses["int8"] < 5 * losses["fp32"] + 1e-4
 
 
