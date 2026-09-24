@@ -5,7 +5,7 @@ import torch
 
 from iridium.config import get_config
 from iridium.model.iridium1 import Iridium1
-from iridium.runtime.abstain import UNKNOWN_TEXT, Answerer
+from iridium.runtime.abstain import ASK_TO_EXTRAPOLATE, EXTRAPOLATION_LABEL, Answerer
 from iridium.training.tasks import UNKNOWN, unknowable_item
 
 
@@ -23,20 +23,38 @@ def test_unknowable_family_is_balanced_and_graded_exactly():
             assert it.grade("UNKNOWN")
 
 
-def test_untrained_model_climbs_the_whole_ladder_then_says_it_does_not_know():
+def test_untrained_model_climbs_every_rung_then_asks_to_extrapolate():
     torch.manual_seed(0)
     model = Iridium1(get_config("tiny"))
-    queries = []
-    answerer = Answerer(model, threshold=0.99, max_new_tokens=4,
-                        search=lambda q: queries.append(q) or "nothing relevant")
-    out = answerer.ask("what is the airspeed of a laden swallow?")
-    assert out.abstained and out.text == UNKNOWN_TEXT
+    calls = []
+
+    def search(q, depth=1):
+        calls.append(depth)
+        return f"results at depth {depth}"
+
+    answerer = Answerer(model, threshold=0.99, max_new_tokens=4, search=search)
+    q = "what is the airspeed of a laden swallow?"
+    out = answerer.ask(q)
+    assert out.abstained and out.needs_permission and out.text == ASK_TO_EXTRAPOLATE
     stages = [a.stage for a in out.attempts]
-    assert stages[:2] == ["answer", "think_harder"] and stages[-1] == "search"
-    assert queries == ["what is the airspeed of a laden swallow?"]
+    assert stages[:2] == ["answer", "think_harder"]
+    assert stages[-2:] == ["search_depth_1", "search_depth_2"] and calls == [1, 2]
+    assert out.evidence == ["results at depth 1", "results at depth 2"]
     assert "after:" in out.reason
+    guess = answerer.extrapolate(q, out)
+    assert guess.text.startswith(EXTRAPOLATION_LABEL) and not guess.needs_permission
+    assert guess.attempts[-1].stage == "extrapolate"
     # The router's configuration is restored after widening.
     assert model.router.cfg.top_k == model.cfg.router.top_k
+
+
+def test_a_one_argument_search_is_used_once():
+    torch.manual_seed(0)
+    model = Iridium1(get_config("tiny"))
+    seen = []
+    out = Answerer(model, threshold=0.99, max_new_tokens=2,
+                   search=lambda q: seen.append(q) or "x").ask("q?")
+    assert seen == ["q?"] and out.attempts[-1].stage == "search_depth_1"
 
 
 def test_a_confident_first_answer_is_returned_without_escalating():

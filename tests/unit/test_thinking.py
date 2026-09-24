@@ -27,15 +27,32 @@ def _batch(cfg, text="hello there"):
     return TensorBatch(collate([Sample([text_span(text, offset=16)])], continuous_dims(cfg.codecs)))
 
 
-def test_confident_tokens_stop_after_one_loop_and_caches_stay_aligned():
-    m = _model(+20.0)
+def test_confidence_alone_never_halts_the_first_loop_and_caches_stay_aligned():
+    m = _model(+20.0)                                     # halting head: always "done"
     cache = {}
     with torch.no_grad():
-        out = m(_batch(m.cfg), n_loops=3, cache=cache, halt_threshold=0.9)
-    assert out.stats["halted_at"] == 1
+        out = m(_batch(m.cfg, "a"), n_loops=3, cache=cache, halt_threshold=0.9)
+    # The halt needs the previous loop to agree, so loop 1 can never stop.
+    assert out.stats["halted_at"] >= 2
     lengths = {cache[("core", loop, 0)][0].shape[2] for loop in range(3)}
     assert lengths == {cache[("stream", "n")]}           # every loop covers every position
-    assert torch.equal(cache[("core", 2, 0)][0], cache[("core", 0, 0)][0])
+
+
+def test_a_prediction_that_keeps_changing_is_not_allowed_to_halt():
+    m = _model(+20.0)
+    calls = {"n": 0}
+
+    class Flip(torch.nn.Module):                         # a different answer every loop
+        def forward(self, h):
+            calls["n"] += 1
+            logits = torch.zeros(*h.shape[:-1], m.cfg.codecs.vocab_size)
+            logits[..., 16 + calls["n"]] = 1.0
+            return logits
+
+    m.codecs.text_head = Flip()
+    with torch.no_grad():
+        out = m(_batch(m.cfg, "a"), n_loops=3, cache={}, halt_threshold=0.9)
+    assert out.stats["halted_at"] == 3                   # confident, but never settled
 
 
 def test_unsure_tokens_use_every_loop_and_no_threshold_changes_nothing():
@@ -52,7 +69,7 @@ def test_generation_adapts_depth_per_token():
     easy = _model(+20.0)
     out = generate(easy, Sample([text_span("hi", offset=16)]), max_new_tokens=5,
                    stop_ids=(), thinking=ThinkingBudget("fast"))
-    assert out.loops[1:] and all(l == 1.0 for l in out.loops[1:])
+    assert out.loops[1:] and all(l >= 2.0 for l in out.loops[1:])
     hard = _model(-20.0)
     out = generate(hard, Sample([text_span("hi", offset=16)]), max_new_tokens=5,
                    stop_ids=(), thinking=ThinkingBudget("deep"))

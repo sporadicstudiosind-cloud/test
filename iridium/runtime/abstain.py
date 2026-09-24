@@ -43,10 +43,15 @@ from ..codecs.spans import Sample, collate, text_span
 from .chat import STOP_IDS, TEXT_OFFSET, Turn, conversation_sample
 from .generate import generate
 
-__all__ = ["Answerer", "Answer", "Attempt", "UNKNOWN_TEXT"]
+__all__ = ["Answerer", "Answer", "Attempt", "UNKNOWN_TEXT", "ASK_TO_EXTRAPOLATE",
+           "EXTRAPOLATION_LABEL"]
 
 UNKNOWN_TOKEN = 13
 UNKNOWN_TEXT = "I don't know."
+ASK_TO_EXTRAPOLATE = ("I couldn't find this, even after thinking it through and searching. "
+                      "Do you want me to extrapolate? I'll label the answer as an unverified "
+                      "estimate.")
+EXTRAPOLATION_LABEL = "Extrapolated, not verified: "
 
 
 @dataclass
@@ -68,6 +73,10 @@ class Answer:
     abstained: bool
     attempts: list[Attempt] = field(default_factory=list)
     reason: str = ""
+    #: True when every rung failed and the model is asking permission to
+    #: extrapolate rather than stating an answer; see Answerer.extrapolate.
+    needs_permission: bool = False
+    evidence: list[str] = field(default_factory=list)
 
 
 class Answerer:
@@ -79,46 +88,88 @@ class Answerer:
     """
 
     def __init__(self, model, tokenizer=None, threshold: float = 0.5,
-                 search: Optional[Callable[[str], Optional[str]]] = None,
-                 max_new_tokens: int = 64) -> None:
+                 search: Optional[Callable[..., Optional[str]]] = None,
+                 max_new_tokens: int = 64, search_depths: int = 2) -> None:
         self.model = model.eval()
         self.tokenizer = tokenizer
         self.threshold = threshold
         self.search = search
+        self.search_depths = search_depths
         self.max_new_tokens = max_new_tokens
 
     def ask(self, question: str) -> Answer:
+        """Climb the ladder; return an answer, or a request to extrapolate.
+
+        Rungs: answer (adaptive depth) -> think harder (every loop) -> more
+        superstacks -> search depth 1 -> search depth 2 ... Each search rung
+        keeps the earlier results in context. Only when every rung fails does
+        the model stop -- and then it asks whether to extrapolate instead of
+        either guessing or flatly refusing.
+        """
+        from .thinking import ThinkingBudget
+
         cfg = self.model.cfg
         max_loops = cfg.router.max_loops
+        n_stacks = cfg.stacks.n_stacks
+        wide = n_stacks if cfg.router.top_k < n_stacks else None
         attempts: list[Attempt] = []
         turns = [Turn("user", question)]
 
-        stages = [("answer", dict(n_loops=1)), ("think_harder", dict(n_loops=max_loops))]
-        n_stacks = cfg.stacks.n_stacks
-        if cfg.router.top_k < n_stacks:
-            stages.append(("more_superstacks", dict(n_loops=max_loops, top_k=n_stacks)))
-        for stage, kw in stages:
+        rungs = [("answer", dict(n_loops=max_loops, thinking=ThinkingBudget("balanced"))),
+                 ("think_harder", dict(n_loops=max_loops))]
+        if wide:
+            rungs.append(("more_superstacks", dict(n_loops=max_loops, top_k=wide)))
+        for stage, kw in rungs:
             a = self._attempt(stage, turns, **kw)
             attempts.append(a)
             if self._accept(a):
                 return Answer(a.text, False, attempts)
 
+        evidence: list[str] = []
         if self.search is not None:
-            found = self.search(question)
-            if found:
-                search_turns = [*turns, Turn("tool_result", found)]
-                a = self._attempt("search", search_turns, n_loops=max_loops,
-                                  top_k=max(cfg.router.top_k, n_stacks if n_stacks > 1 else 1))
+            for depth in range(1, self.search_depths + 1):
+                found = self._search(question, depth)
+                if not found:
+                    continue
+                evidence.append(found)
+                turns = [*turns, Turn("tool_result", found)]
+                a = self._attempt(f"search_depth_{depth}", turns, n_loops=max_loops, top_k=wide)
                 attempts.append(a)
                 if self._accept(a):
-                    return Answer(a.text, False, attempts)
+                    return Answer(a.text, False, attempts, evidence=evidence)
 
         tried = ", ".join(a.stage for a in attempts)
         why = ("the model marked it unknowable" if any(a.said_unknown for a in attempts)
                else f"confidence stayed below {self.threshold:.2f}")
-        return Answer(UNKNOWN_TEXT, True, attempts,
+        return Answer(ASK_TO_EXTRAPOLATE, True, attempts,
                       reason=f"{why} after: {tried}"
-                             + ("" if self.search else "; no search tool was available"))
+                             + ("" if self.search else "; no search tool was available"),
+                      needs_permission=True, evidence=evidence)
+
+    def extrapolate(self, question: str, previous: Optional[Answer] = None) -> Answer:
+        """The user said yes: best effort at full depth and width, labelled.
+
+        Uses whatever the search rungs found as context. The label is part of
+        the returned text so it cannot be dropped by a caller that only
+        forwards ``.text``.
+        """
+        cfg = self.model.cfg
+        turns = [Turn("user", question)]
+        for found in (previous.evidence if previous else []):
+            turns.append(Turn("tool_result", found))
+        wide = cfg.stacks.n_stacks if cfg.router.top_k < cfg.stacks.n_stacks else None
+        a = self._attempt("extrapolate", turns, n_loops=cfg.router.max_loops, top_k=wide,
+                          allow_unknown=False)
+        return Answer(EXTRAPOLATION_LABEL + (a.text or "(no estimate produced)"), False,
+                      [*(previous.attempts if previous else []), a],
+                      reason="user asked for an extrapolation")
+
+    def _search(self, query: str, depth: int) -> Optional[str]:
+        try:
+            return self.search(query, depth=depth)
+        except TypeError:
+            # A one-argument search has one depth; do not repeat it.
+            return self.search(query) if depth == 1 else None
 
     # -- internals -------------------------------------------------------------
 
@@ -127,7 +178,8 @@ class Answerer:
             and bool(a.text.strip())
 
     @torch.no_grad()
-    def _attempt(self, stage: str, turns, n_loops: int, top_k: Optional[int] = None) -> Attempt:
+    def _attempt(self, stage: str, turns, n_loops: int, top_k: Optional[int] = None,
+                 thinking=None, allow_unknown: bool = True) -> Attempt:
         router = self.model.router
         original = router.cfg
         if top_k is not None:
@@ -136,7 +188,9 @@ class Answerer:
             prompt = conversation_sample(turns, supervise_assistant=False, open_for_reply=True,
                                          tokenizer=self.tokenizer)
             out = generate(self.model, prompt, max_new_tokens=self.max_new_tokens,
-                           temperature=0.0, stop_ids=(*STOP_IDS, UNKNOWN_TOKEN),
+                           temperature=0.0,
+                           stop_ids=(*STOP_IDS, UNKNOWN_TOKEN) if allow_unknown else STOP_IDS,
+                           thinking=thinking,
                            n_loops=n_loops, text_offset=TEXT_OFFSET, text_only=True,
                            tokenizer=self.tokenizer)
             said_unknown = UNKNOWN_TOKEN in out.ids[:1]

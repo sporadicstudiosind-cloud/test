@@ -257,6 +257,7 @@ class Iridium1(nn.Module):
         stats["memory_reconstruction"] = memory_loss
         stats["core_dispatch"] = []
         stats["subject_loss"] = h.sum() * 0
+        prev_pick: Optional[torch.Tensor] = None
         for loop in range(n_loops):
             start = 0 if loop == 0 else self.cfg.router.loop_entry
             h1 = (self.core._run(h, core_positions, keep, range(self.cfg.core.n_layers), loop,
@@ -373,13 +374,22 @@ class Iridium1(nn.Module):
             if (halt_threshold is not None and cache is not None and not self.training
                     and loop < n_loops - 1):
                 # Adaptive thinking: stop pondering once every real token in
-                # this step is confident it is done. The model's own halting
-                # head decides, so easy tokens take one loop and hard ones
-                # take more. Later loops still need this position in their
-                # caches, so the halted loop's entries stand in for them
-                # (CALM-style state propagation, applied per loop).
+                # this step is done. "Done" needs two signals, not one: the
+                # halting head is confident, AND this loop's prediction agrees
+                # with the previous loop's. The second is the check a
+                # confidently-wrong token cannot pass while its answer is
+                # still moving -- confidence alone would halt it on exactly
+                # the step that needed more thought -- and it means no token
+                # ever halts on its first pass. Later loops still need this
+                # position in their caches, so the halted loop's entries stand
+                # in for them (CALM-style state propagation, per loop).
                 lam_now = torch.sigmoid(halt_logits[-1].float())
-                done = (lam_now >= halt_threshold) | ~batch.valid
+                head = self.codecs.text_head
+                now_pick = head(per_loop[-1]).argmax(-1)
+                settled = (now_pick == prev_pick) if prev_pick is not None \
+                    else torch.zeros_like(now_pick, dtype=torch.bool)
+                prev_pick = now_pick
+                done = ((lam_now >= halt_threshold) & settled) | ~batch.valid
                 if bool(done.all()):
                     _propagate_loop_cache(cache, loop, n_loops, t)
                     stats["halted_at"] = loop + 1

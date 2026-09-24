@@ -185,10 +185,16 @@ Nothing here has been trained; no accuracy number is claimed.
 
 ## When the model does not know (`iridium.runtime.abstain`)
 
-`Answerer(model, search=...)` climbs a ladder before it answers: answer ->
-think harder (all ponder loops) -> more superstacks (`top_k` raised to all)
--> search (if a search callable is provided; the result enters as a
-`tool_result` turn) -> **"I don't know."**, with the stages it tried. An
+`Answerer(model, search=...)` climbs a ladder before it answers: answer
+(adaptive depth) -> think harder (all ponder loops) -> more superstacks
+(`top_k` raised to all) -> search depth 1 -> search depth 2 (`search(query,
+depth=...)`; results accumulate as `tool_result` turns) -> only then does it
+stop, and it **asks**: "I couldn't find this ... Do you want me to
+extrapolate?" (`Answer.needs_permission`). `Answerer.extrapolate(question,
+answer)` then answers at full depth and width, labelled "Extrapolated, not
+verified:". Halting inside the core also waits for the previous loop: a token
+stops only when the halting head is confident *and* its prediction matches
+the previous loop's, so no token halts on its first pass. An
 answer is accepted only if the model did not emit its `UNKNOWN` token, its
 teacher-forced geometric-mean confidence clears `threshold`, and its last two
 ponder loops agree on the first token. The `unknowable` training family
