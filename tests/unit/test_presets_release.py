@@ -138,3 +138,20 @@ def test_tools_family_builds_offline_from_synthetic_tasks(monkeypatch):
                         lambda n, **kw: real(n, **{**kw, "mix": {"synthetic": 1.0}}))
     corpus = build_corpus(6, mixture={"tools": 1.0}, text_window=1024)
     assert len(corpus.items) == 6
+
+
+@pytest.mark.parametrize("key,lo,hi", [("100m", 0.09e9, 0.12e9), ("500m", 0.45e9, 0.55e9),
+                                       ("1b", 0.9e9, 1.1e9), ("2b", 1.9e9, 2.2e9),
+                                       ("4b", 3.8e9, 4.2e9)])
+def test_size_ladder_presets_hit_their_size_and_build_exactly(key, lo, hi):
+    import torch
+    from iridium.model.iridium1 import Iridium1
+
+    p = get_preset(key)
+    assert lo <= p.config.n_params <= hi
+    with torch.device("meta"):
+        built = sum(t.numel() for t in Iridium1(p.config).parameters())
+    assert built == p.config.n_params
+    # fp32 AdamW needs ~16 bytes/param: only sizes that leave room on a 16 GB
+    # device claim a free tier.
+    assert p.trainable_on_free_tier == (p.config.n_params * 16 < 12e9)

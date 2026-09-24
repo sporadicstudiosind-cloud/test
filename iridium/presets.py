@@ -186,6 +186,38 @@ def _presets() -> dict[str, Preset]:
         notes="Costed, not free-tier trainable: fp32 Adam state alone is ~12 GB and "
               "the token budget is weeks of a single A100.")
 
+    # -- the size ladder: one general recipe (talk + tools) at five sizes ----
+    # Same mixture everywhere so the sizes are comparable; a subword vocabulary
+    # of 32k from 500M up, where the embedding is a small share of parameters.
+    from .config_builder import build
+    general = {"text_lm": 0.45, "chat": 0.35, "tools": 0.20}
+    out["100m"] = replace(out["tools-100m"], name="100m", priority=1,
+                          goal="The general small model: talk and tools, 104M parameters.",
+                          mixture=general)
+    ladder = {
+        # key: (build kwargs, steps, window, lr, free_tier, notes)
+        "500m": (dict(d_model=1024, core_layers=10, n_superstacks=3, superstack_layers=9,
+                      n_kv_heads=4, d_ff=2816), 30_000, 2048, 6e-4, "tpu_v5e1",
+                 "~2B tokens. Fits a 16 GB device with fp32 AdamW (~8 GB of state); "
+                 "on a T4/P100 it is weeks, on a free TPU v5e-1 about a day."),
+        "1b": (dict(d_model=1280, core_layers=12, n_superstacks=3, superstack_layers=13,
+                    n_kv_heads=4, d_ff=3456), 60_000, 2048, 4e-4, None,
+               "~4B tokens. fp32 AdamW state is ~16 GB: past every free device before "
+               "activations. Needs 8-bit optimizer state or a paid GPU."),
+        "2b": (dict(d_model=1792, core_layers=14, n_superstacks=3, superstack_layers=14,
+                    d_head=128, n_kv_heads=2, d_ff=4864), 120_000, 2048, 3e-4, None,
+               "~8B tokens. Costed only: ~33 GB of optimizer state."),
+        "4b": (dict(d_model=2304, core_layers=14, n_superstacks=3, superstack_layers=18,
+                    d_head=128, n_kv_heads=2, d_ff=6144), 240_000, 2048, 2.5e-4, None,
+               "~16B tokens. Costed only: ~64 GB of optimizer state; multi-GPU."),
+    }
+    for key, (kw, steps, window, lr, tier, notes) in ladder.items():
+        cfg = _with_vocab(build(name=f"iridium-1-{key}", max_seq_len=4096, **kw), 32_768)
+        out[key] = Preset(key, 1 if tier else 0,
+                          f"The general recipe (talk + tools) at {key}.",
+                          cfg, general, steps=steps, batch_size=32, window=window, lr=lr,
+                          free_tier=tier, rounds=max(10, steps // 3000), text_mix=_TALK_MIX,
+                          micro_batch=4, notes=notes)
     return out
 
 

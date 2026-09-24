@@ -39,6 +39,9 @@ round, not the run.
 | `omni-100m` | omnimodal | 112 M | 655 M | ~21 h | ~18 h | ~0.9 h |
 | `stem-100m` | physics / STEM | 108 M | 492 M | ~16 h | ~14 h | ~0.6 h |
 | `world-100m` | world model | 112 M | 328 M | ~11 h | ~9 h | ~0.4 h |
+| `100m` | talk + tools, general | 108 M | 655 M | ~21 h | ~18 h | ~0.9 h |
+| `500m` | talk + tools, general | 498 M | 2.0 B | weeks | weeks | ~19 h |
+| `1b` / `2b` / `4b` | talk + tools, general | 1.0 / 2.1 / 4.0 B | 3.9 / 7.9 / 15.7 B | costed only: optimizer state exceeds 16 GB | | |
 | `modern-744m` | every option at scale | 744 M | 26 B | costed only | | |
 
 Hours are **optimistic arithmetic** (3 × forward FLOPs, 30% of published
