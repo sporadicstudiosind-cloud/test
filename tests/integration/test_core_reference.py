@@ -162,8 +162,12 @@ def test_shared_prefix_is_readable_by_every_stream():
     assert mask[3, 1].item() < 0                 # but not each other
 
 
-def test_cached_incremental_decode_matches_uncached_reference(model):
-    """§18.3 cache-correctness gate, at FP64 so the tolerance is meaningful."""
+def test_cached_incremental_decode_matches_uncached_reference(model, exact_attention):
+    """§18.3 cache-correctness gate, at FP64 so the tolerance is meaningful.
+
+    Pinned to the manual attention path: FP64 only makes the tolerance
+    meaningful if the arithmetic is FP64 on both sides, and SDPA's fused
+    kernels are not obliged to keep it there. See tests/conftest.py."""
     torch.manual_seed(3)
     full = make_input(t=9, b=1)
     depth = RecurrencePolicy(2)

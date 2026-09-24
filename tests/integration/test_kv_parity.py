@@ -33,6 +33,12 @@ from iridium.config import get_config
 from iridium.model.iridium1 import Iridium1
 from iridium.runtime.decode import atomic_chunks, run_atomic_chunked, run_chunked
 
+# Every exactness claim in this module runs on the manual attention path:
+# SDPA's fused kernels may compute float64 inputs at float32 internally on
+# some CPUs, which breaks the gate for a reason that is not the cache. See
+# the `exact_attention` fixture in tests/conftest.py.
+pytestmark = pytest.mark.usefixtures("exact_attention")
+
 
 @pytest.fixture(scope="module")
 def model():
@@ -66,13 +72,41 @@ def mixed_batch(seed=0, n=2):
 
 
 @pytest.mark.parametrize("chunk", [1, 2, 3, 5, 11])
-def test_single_loop_decoding_is_bit_exact(model, chunk):
-    """With one loop the two paths agree bit for bit, which is worth pinning."""
+def test_single_loop_decoding_matches_to_fp64_rounding(model, chunk):
+    """One loop, and the two paths agree to fp64 rounding — not bit for bit.
+
+    This test used to assert ``torch.equal``, and it passed. That was not the
+    strong result it reads as. Every normaliser and masked softmax under it
+    was calling ``.float()``, so both sides were being rounded to fp32 inside
+    an fp64 model: bit-identity was manufactured by discarding the very
+    precision that would have distinguished them. It was also not portable —
+    the same claim failed outright on a CI runner whose fused attention
+    kernel rounded differently from the reference path (2**-22 and 2**-23
+    discrepancies across every parity test at once).
+
+    With ``layers.at_least_fp32`` keeping fp64 in fp64, the arithmetic is
+    genuinely fp64 and the two paths differ where they must: a T-token
+    forward and T one-token steps reduce in different orders, which is a
+    property of floating-point addition, not of the cache. Measured worst
+    case over this sweep is 3.8e-15 against an activation scale of 2.6 —
+    about six times fp64 eps — so 1e-13 is a bound with real headroom that
+    still sits ~10**8 below anything a cache defect produces.
+
+    The one case where bit-identity *is* a genuine invariant is kept: a chunk
+    as long as the sequence is the same computation in the same shapes, so it
+    must return the same bits, and that is asserted exactly.
+    """
     batch = text_batch()
     with torch.no_grad():
         reference = model(batch, n_loops=1).hidden
         cached = run_chunked(model, batch, chunk=chunk, n_loops=1)
-    assert torch.equal(reference, cached)
+    if chunk >= reference.shape[1]:
+        assert torch.equal(reference, cached), (
+            "a single chunk covering the whole sequence is the uncached "
+            "forward; it must be bit-identical, not merely close")
+        return
+    delta = float((reference - cached).abs().max())
+    assert delta <= 1e-13, f"chunk={chunk} max delta {delta:.3e}"
 
 
 @pytest.mark.parametrize("chunk", [1, 2, 3, 5, 11])

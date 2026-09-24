@@ -26,6 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .inventory import TransformerConfig
+from .layers import at_least_fp32
 
 
 class RMSNorm(nn.Module):
@@ -35,8 +36,9 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        norm = x.float().pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
-        return (x.float() * norm).type_as(x) * self.weight
+        work = at_least_fp32(x)
+        norm = work.pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
+        return (work * norm).type_as(x) * self.weight
 
 
 class GroupedQueryAttention(nn.Module):
@@ -78,7 +80,7 @@ class GroupedQueryAttention(nn.Module):
         scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.d_head)
         if mask is not None:
             scores = scores + mask
-        out = torch.softmax(scores.float(), dim=-1).type_as(q) @ v
+        out = torch.softmax(at_least_fp32(scores), dim=-1).type_as(q) @ v
         return self.wo(out.transpose(1, 2).reshape(b, t, -1))
 
 

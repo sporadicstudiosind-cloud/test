@@ -33,6 +33,12 @@ from iridium.model.iridium1 import Iridium1
 from iridium.model.layers import causal_keep
 from iridium.runtime.decode import run_chunked
 
+# Every exactness claim in this module runs on the manual attention path:
+# SDPA's fused kernels may compute float64 inputs at float32 internally on
+# some CPUs, which breaks the gate for a reason that is not the cache. See
+# the `exact_attention` fixture in tests/conftest.py.
+pytestmark = pytest.mark.usefixtures("exact_attention")
+
 VARIANTS = {
     "default": {},
     "local_global": dict(layer_pattern=("local", "global"), local_window=3),
