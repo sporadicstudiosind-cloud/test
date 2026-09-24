@@ -55,19 +55,31 @@ the full budget audit.
 ## The workflow
 
 ```bash
-python -m iridium presets                       # the table above
-python -m iridium train --preset chat-34m --dry-run
-python -m iridium train --preset chat-34m       # rounds of fresh data, a checkpoint per round
-python -m iridium train --preset chat-34m --resume runs/chat-34m/chat-34m-round2.pt
-python -m iridium train --preset tools-100m --init runs/chat-100m/chat-100m-final.pt
+python -m iridium presets                                   # sizes, budgets, estimates
+python -m iridium data prepare --preset chat-34m            # tokenize to disk, once
+python -m iridium train --preset chat-34m --data data       # train from the shards
+python -m iridium train --preset chat-34m --data data --resume runs/chat-34m/chat-34m-round2.pt
+python -m iridium train --preset 1b --tokens-per-param 20 --data data   # any budget
 ```
 
-A run is split into **rounds**. Each round streams a fresh slice of the text
-sources (skipping documents earlier rounds used), trains on it and saves.
-The optimizer, step counter and learning-rate schedule span the whole run, so
-rounds only bound memory — and they are what makes a free session that dies
-mid-run cost one round instead of the whole thing. The notebooks in
-[`../notebooks/`](../notebooks/) wrap exactly these commands.
+**Prepare once, train from disk.** `data prepare` streams the preset's text,
+chat and tool sources one source at a time, tokenizes them with the Rust
+tokenizer, and writes flat token files (`.bin` ids, `.mask` targets, `.idx`
+item offsets). Training memory-maps them, so RAM use does not grow with the
+token budget, and the network is used once. Run `prepare` on a free *CPU*
+session (Kaggle CPU notebooks do not spend GPU quota) and attach the output to
+the GPU/TPU run. Synthetic families are generated on demand from a seeded
+index and are never stored.
+
+**Budgets.** `--tokens 2e9` or `--tokens-per-param 20` (Chinchilla) resizes
+any preset's run; `data prepare --plan` prints how many items that needs.
+
+**Optimizers.** `eager_adamw` (fp32, 16 bytes/param of training state),
+`adamw8` (8-bit block-wise moments, ~10 bytes/param, runs on every backend:
+what lets `1b` fit a 16 GB device), and `muon` (~12 bytes/param).
+
+Without `--data`, training falls back to the older in-memory rounds path,
+which streams and tokenizes inside the training process.
 
 Recommended order, following the 1.0 priorities: **chat-34m** (a single
 session; the smoke test that the pipeline works end to end) → **chat-100m**

@@ -23,7 +23,8 @@ camera-posed 3D worlds.
 pip install -e ".[data]"                     # torch, numpy, pyyaml, jsonschema, datasets
 python -m iridium presets                    # what can be trained, and how long it takes
 python -m iridium train --preset chat-34m --dry-run
-python -m iridium train --preset chat-34m
+python -m iridium data prepare --preset chat-34m    # tokenize once, to disk
+python -m iridium train --preset chat-34m --data data
 python -m iridium chat --checkpoint runs/chat-34m/chat-34m-final.pt
 ```
 
@@ -39,9 +40,11 @@ round, not the run.
 | `omni-100m` | omnimodal | 112 M | 655 M | ~21 h | ~18 h | ~0.9 h |
 | `stem-100m` | physics / STEM | 108 M | 492 M | ~16 h | ~14 h | ~0.6 h |
 | `world-100m` | world model | 112 M | 328 M | ~11 h | ~9 h | ~0.4 h |
+| `50m` | talk + tools, general | 53 M | 328 M | ~7 h | ~6 h | ~0.3 h |
 | `100m` | talk + tools, general | 108 M | 655 M | ~21 h | ~18 h | ~0.9 h |
 | `500m` | talk + tools, general | 498 M | 2.0 B | weeks | weeks | ~19 h |
-| `1b` / `2b` / `4b` | talk + tools, general | 1.0 / 2.1 / 4.0 B | 3.9 / 7.9 / 15.7 B | costed only: optimizer state exceeds 16 GB | | |
+| `1b` | talk + tools, general (8-bit AdamW) | 1.0 B | 3.9 B | — | — | ~77 h, tight on memory |
+| `2b` / `4b` | talk + tools, general | 2.1 / 4.0 B | 7.9 / 15.7 B | costed only: training state exceeds 16 GB | | |
 | `modern-744m` | every option at scale | 744 M | 26 B | costed only | | |
 
 Hours are **optimistic arithmetic** (3 × forward FLOPs, 30% of published

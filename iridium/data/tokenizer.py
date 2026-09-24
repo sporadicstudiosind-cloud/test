@@ -309,6 +309,11 @@ class BytePairTokenizer:
                     ids.extend(self._encode_piece(piece))
         return ids
 
+    kind = "bpe"
+
+    def encode_batch(self, texts: Sequence[str]) -> list[list[int]]:
+        return [self.encode(t) for t in texts]
+
     def decode(self, ids: Sequence[int]) -> str:
         """Token ids back to text. Concatenating each id's stored bytes and
         decoding once (rather than decoding id-by-id) is what makes a
@@ -336,6 +341,7 @@ class BytePairTokenizer:
         """The persisted form (see :meth:`save`): plain lists, so it can ride
         inside a checkpoint manifest that is loaded with ``weights_only``."""
         return {
+            "kind": "bpe",
             "version": 1,
             "special_tokens": list(self.special_tokens.keys()),
             "merges": [list(p) for p in self._merge_order],
@@ -411,6 +417,9 @@ def train_from_sources(
     for i, (key, weight) in enumerate(sorted(mix.items())):
         quota = max(1, int(round(n_docs * weight / total)))
         docs.extend(stream_documents(key, limit=quota, seed=seed + i))
+    from .tokenization import FastBPETokenizer, fast_available
+    if fast_available() and not special_tokens:
+        return FastBPETokenizer.train(docs, vocab_size)
     tok = BytePairTokenizer()
     tok.train(docs, vocab_size=vocab_size, special_tokens=special_tokens)
     return tok
@@ -436,16 +445,24 @@ def tokenizer_for(
     propagating the exception, so a notebook that cannot reach the Hub still
     trains — on byte-level text, which is strictly worse but never wrong.
     """
+    from .tokenization import fast_available, from_state
+
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_dir / f"bpe_v{vocab_size}_s{seed}_n{n_docs}.json"
+    fast = fast_available()
+    # The Rust trainer affords ten times the sample the Python one does in
+    # less time, and a vocabulary trained on more text wastes fewer merges.
+    if fast:
+        n_docs = max(n_docs, 20_000)
+    kind = "hf" if fast else "bpe"
+    path = cache_dir / f"{kind}_v{vocab_size}_s{seed}_n{n_docs}.json"
     if path.exists():
-        return BytePairTokenizer.load(path)
+        return from_state(json.loads(path.read_text()))
     try:
         tok = train_from_sources(vocab_size=vocab_size, sources=sources, seed=seed, n_docs=n_docs)
     except Exception:
         return byte_tokenizer()
-    tok.save(path)
+    path.write_text(json.dumps(tok.to_dict()))
     return tok
 
 

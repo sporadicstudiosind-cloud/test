@@ -398,7 +398,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-data", action="store_true",
                    help="also use opt-in chat sources (non-commercial or unclear terms); "
                         "the manifest records which")
+    p.add_argument("--data", default=None,
+                   help="train from shards written by `iridium data prepare` (memory-mapped)")
+    _budget_args(p)
     p.set_defaults(func=cmd_train)
+
+    p = sub.add_parser("data", help="tokenize a preset's language data to disk shards")
+    p.add_argument("action", choices=["prepare"])
+    p.add_argument("--preset", required=True)
+    p.add_argument("--out", default="data")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--max-data", action="store_true")
+    p.add_argument("--plan", action="store_true", help="print item counts and exit")
+    _budget_args(p)
+    p.set_defaults(func=cmd_data)
 
     p = sub.add_parser("evaluate", help="graded accuracy on held-out splits")
     p.add_argument("checkpoint")
@@ -418,11 +431,37 @@ def cmd_presets(args) -> int:
     return 0
 
 
+def _budgeted_preset(args):
+    """The named preset, with ``--tokens`` / ``--tokens-per-param`` applied."""
+    from .presets import get_preset, with_tokens
+    preset = get_preset(args.preset)
+    if getattr(args, "tokens_per_param", None):
+        preset = with_tokens(preset, int(args.tokens_per_param * preset.config.n_params))
+    elif getattr(args, "tokens", None):
+        preset = with_tokens(preset, int(float(args.tokens)))
+    return preset
+
+
+def cmd_data(args) -> int:
+    from .training.prepare import plan, prepare
+    try:
+        preset = _budgeted_preset(args)
+    except KeyError as exc:
+        print(f"data: {exc.args[0]}", file=sys.stderr)
+        return 2
+    if args.plan:
+        for family, n in plan(preset).items():
+            print(f"{family:<8} {n:>12,} items of up to {preset.window} tokens")
+        return 0
+    out = prepare(preset, args.out, seed=args.seed, max_data=args.max_data)
+    print(f"shards written to {out}")
+    return 0
+
+
 def cmd_train(args) -> int:
-    from .presets import get_preset
     from .training import run_preset
     try:
-        preset = get_preset(args.preset)
+        preset = _budgeted_preset(args)
     except KeyError as exc:
         print(f"train: {exc.args[0]}", file=sys.stderr)
         return 2
@@ -431,8 +470,16 @@ def cmd_train(args) -> int:
         return 0 if result["match"] else 1
     run_preset.train_preset(preset, steps=args.steps, rounds=args.rounds, device=args.device,
                             out=args.out, init=args.init, resume=args.resume, seed=args.seed,
-                            max_data=args.max_data)
+                            max_data=args.max_data, data=args.data)
     return 0
+
+
+def _budget_args(p) -> None:
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--tokens", default=None,
+                   help="override the preset's token budget, e.g. 2e9")
+    g.add_argument("--tokens-per-param", type=float, default=None,
+                   help="budget as a multiple of parameters (Chinchilla-optimal is ~20)")
 
 
 def main(argv=None) -> int:

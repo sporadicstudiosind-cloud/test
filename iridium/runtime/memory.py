@@ -183,6 +183,9 @@ def build_optimizer(params, kind: str = "adamw", lr: float = 3e-4,
         from ..training.eager_adamw import EagerAdamW
         return EagerAdamW(params, lr=lr, weight_decay=weight_decay, betas=betas,
                           foreach=foreach)
+    if kind == "adamw8":
+        from ..training.adamw8 import AdamW8bit
+        return AdamW8bit(params, lr=lr, weight_decay=weight_decay, betas=betas)
     flat = [p for g in params for p in g["params"]] if grouped else params
     if kind in ("paged_adamw", "adamw_8bit"):
         if not all(p.is_cuda for p in flat):

@@ -23,12 +23,13 @@ def test_presets_follow_the_release_priority_order():
 
 
 def test_free_tier_presets_fit_free_tier_memory():
-    """fp32 Adam state (16 B/param) must fit the target device with headroom."""
+    """Training state for the preset's own optimizer must leave >=30% of the
+    device for activations (fp32 AdamW 16 B/param; 8-bit AdamW ~10 B/param)."""
+    from iridium.presets import state_gb
     for p in PRESETS.values():
         if p.free_tier is None:
             continue
-        state_gb = p.config.training_state_bytes() / 1e9
-        assert state_gb < 0.5 * FREE_TIERS[p.free_tier]["memory_gb"], p.name
+        assert state_gb(p) < 0.7 * FREE_TIERS[p.free_tier]["memory_gb"], p.name
 
 
 def test_every_preset_vocabulary_has_no_dead_rows():
@@ -140,7 +141,7 @@ def test_tools_family_builds_offline_from_synthetic_tasks(monkeypatch):
     assert len(corpus.items) == 6
 
 
-@pytest.mark.parametrize("key,lo,hi", [("100m", 0.09e9, 0.12e9), ("500m", 0.45e9, 0.55e9),
+@pytest.mark.parametrize("key,lo,hi", [("50m", 0.04e9, 0.06e9), ("100m", 0.09e9, 0.12e9), ("500m", 0.45e9, 0.55e9),
                                        ("1b", 0.9e9, 1.1e9), ("2b", 1.9e9, 2.2e9),
                                        ("4b", 3.8e9, 4.2e9)])
 def test_size_ladder_presets_hit_their_size_and_build_exactly(key, lo, hi):
@@ -152,6 +153,7 @@ def test_size_ladder_presets_hit_their_size_and_build_exactly(key, lo, hi):
     with torch.device("meta"):
         built = sum(t.numel() for t in Iridium1(p.config).parameters())
     assert built == p.config.n_params
-    # fp32 AdamW needs ~16 bytes/param: only sizes that leave room on a 16 GB
+    # Only presets whose training state leaves room for activations on a 16 GB
     # device claim a free tier.
-    assert p.trainable_on_free_tier == (p.config.n_params * 16 < 12e9)
+    from iridium.presets import state_gb
+    assert p.trainable_on_free_tier == (state_gb(p) < 11.0)

@@ -459,3 +459,48 @@ def _take(key, quota, seed, split, max_bytes, lo, hi, seen, items, tokenizer,
         if got >= quota:
             break
     return got
+
+
+def iter_chat_items(mix: Optional[dict[str, float]] = None, seed: int = 0,
+                    max_bytes: int = 1024, split: str = "train", tokenizer=None,
+                    max_tokens: Optional[int] = None):
+    """Every fitting conversation in the mix, once, interleaved by weight.
+
+    The streaming counterpart of :func:`chat_items` for writing shards: one
+    pass over each source, nothing held beyond the item being yielded, and a
+    source that runs dry simply stops contributing.
+    """
+    from ..training.tasks import Item
+    from .text_corpus import in_split
+    from ..runtime.chat import conversation_sample, fit_to_budget
+
+    mix = {k: w for k, w in (mix or DEFAULT_CHAT_MIX).items() if w > 0}
+
+    def source(i, key):
+        for turns in CONVERSATION_LOADERS[key](limit=None, seed=seed + i):
+            if not in_split("\n".join(t.text for t in turns), split):
+                continue
+            turns = fit_to_budget(turns, max_bytes)
+            while turns and turns[0].role == "assistant":
+                turns = turns[1:]
+            users = [t for t in turns if t.role == "user"]
+            if not users or turns[-1].role != "assistant":
+                continue
+            sample = conversation_sample(turns, supervise_assistant=True,
+                                         meta={"family": "chat", "source": key},
+                                         tokenizer=tokenizer)
+            if max_tokens is not None and len(sample) > max_tokens:
+                continue
+            yield Item(sample=sample, family="chat", prompt=users[-1].text[:80],
+                       answer=turns[-1].text, truth={"source": key})
+
+    live = {k: source(i, k) for i, k in enumerate(sorted(mix))}
+    drawn = {k: 0 for k in live}
+    while live:
+        # Deficit round-robin: next is the source furthest below its share.
+        key = min(live, key=lambda k: drawn[k] / mix[k])
+        try:
+            yield next(live[key])
+            drawn[key] += 1
+        except StopIteration:
+            del live[key]

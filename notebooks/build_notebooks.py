@@ -300,14 +300,25 @@ def persistence_cell(target: str) -> str:
 
 def train_cell() -> str:
     return '''
+    from pathlib import Path
+    from iridium.presets import with_tokens
+    from iridium.training.prepare import prepare
     from iridium.training.run_preset import train_preset
 
-    STEPS = None        # None: use the preset's own step budget
-    ROUNDS = None        # None: use the preset's own round count
+    TOKENS = None         # e.g. 1e9 to override the preset's token budget
     RESUME_FROM = ''      # e.g. str(OUT_DIR / preset.name / f'{preset.name}-round2.pt') after a restart
+    DATA_DIR = OUT_DIR / 'data'   # tokenized shards; prepare once, reuse across sessions
 
+    if TOKENS:
+        preset = with_tokens(preset, int(TOKENS))
+    # Step 1: stream, tokenize and write the language data to disk once.
+    # Skipped when shards already exist (e.g. prepared on a free CPU session).
+    if not (DATA_DIR / preset.name / 'prepared.json').exists():
+        prepare(preset, DATA_DIR)
+    # Step 2: train from the memory-mapped shards; RAM use no longer grows
+    # with the token budget.
     checkpoint = train_preset(
-        preset, steps=STEPS, rounds=ROUNDS, device=DEVICE, out=str(OUT_DIR),
+        preset, device=DEVICE, out=str(OUT_DIR), data=str(DATA_DIR),
         resume=(RESUME_FROM or None), seed=0,
     )
     print('final checkpoint:', checkpoint)

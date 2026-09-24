@@ -177,7 +177,7 @@ def test_saved_artifact_is_small_json(trained, tmp_path):
     # id_to_bytes / vocab_size / rank table are NOT stored — they are
     # recomputed by load(), so the file holds only the two lists that
     # actually determine the tokenizer.
-    assert set(data) <= {"version", "special_tokens", "merges"}
+    assert set(data) <= {"kind", "version", "special_tokens", "merges"}
 
 
 # ---------------------------------------------------------------------------

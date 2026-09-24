@@ -852,3 +852,53 @@ def probe_availability(keys: Optional[Iterable[str]] = None) -> dict[str, str]:
         except Exception as exc:
             out[key] = f"unavailable: {type(exc).__name__}: {str(exc)[:90]}"
     return out
+
+
+def iter_text_windows(mix: Optional[dict[str, float]] = None, window: int = 1024,
+                      tokenizer=None, seed: int = 0, split: str = "train",
+                      limit: Optional[int] = None, batch_docs: int = 256):
+    """Packed training windows as ``(ids, mask)`` arrays, with bounded memory.
+
+    The shard-writing counterpart of :func:`text_items`. Sources are streamed
+    **one at a time** -- a streaming parquet reader holds whole row groups, a
+    few GB per open source, so five open at once exceeds a free session's RAM
+    -- each until its share of ``limit`` windows is written. Documents are
+    tokenized in batches (all cores, with the Rust tokenizer) and concatenated
+    as ``BOS doc EOS BOS doc EOS ...`` in model-id space; windows are cut
+    contiguously, so every token is used once. BOS is never a target. A source
+    that runs dry hands its unfilled share to the sources after it.
+    """
+    import gc
+
+    from ..data.tokenization import as_tokenizer
+    from ..training.tasks import BOS, EOS
+    from ..config import TEXT_ID_OFFSET
+
+    tok = as_tokenizer(tokenizer)
+    mix = {k: w for k, w in (mix or DEFAULT_MIX).items() if w > 0}
+    keys = sorted(mix)
+    total = sum(mix.values())
+    carry = 0
+    for i, key in enumerate(keys):
+        quota = None if limit is None else round(limit * mix[key] / total) + carry
+        if i == len(keys) - 1 and limit is not None:
+            quota = limit - sum(round(limit * mix[k] / total) for k in keys[:-1]) + carry
+        made = 0
+        buf_ids: list[int] = []
+        buf_mask: list[int] = []
+        docs = stream_documents(key, limit=None, seed=seed + i, split=split)
+        while quota is None or made < quota:
+            batch = [d for _, d in zip(range(batch_docs), docs)]
+            if not batch:
+                break
+            for ids in tok.encode_batch(batch):
+                buf_ids += [BOS, *(t + TEXT_ID_OFFSET for t in ids), EOS]
+                buf_mask += [0, *([1] * len(ids)), 1]
+            while len(buf_ids) >= window and (quota is None or made < quota):
+                yield (np.asarray(buf_ids[:window], np.int64),
+                       np.asarray(buf_mask[:window], np.uint8))
+                del buf_ids[:window], buf_mask[:window]
+                made += 1
+        carry = 0 if quota is None else quota - made
+        del docs, buf_ids, buf_mask
+        gc.collect()

@@ -71,7 +71,8 @@ def dry_run(preset: Preset) -> dict:
 
 def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optional[int] = None,
                  device: Optional[str] = None, out: str = "runs", init: Optional[str] = None,
-                 resume: Optional[str] = None, seed: int = 0, max_data: bool = False) -> Path:
+                 resume: Optional[str] = None, seed: int = 0, max_data: bool = False,
+                 data: Optional[str] = None) -> Path:
     """Train ``preset``; returns the final checkpoint path.
 
     ``max_data`` swaps in every registered chat source, including opt-in ones
@@ -98,7 +99,19 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
     print(describe(replace(preset, steps=steps, rounds=rounds)))
     print(f"device: {info.describe()}")
 
-    tokenizer = tokenizer_for_config(cfg)
+    shard_dir = None
+    if data:
+        # Prepared shards carry the tokenizer that wrote them; use exactly that
+        # one rather than retraining a possibly different vocabulary.
+        from .tokenizer_bridge import tokenizer_from_manifest
+        shard_dir = Path(data) / preset.name if (Path(data) / preset.name).is_dir() else Path(data)
+        prepared = json.loads((shard_dir / "prepared.json").read_text())
+        if prepared["preset"] != preset.name:
+            raise ValueError(f"{shard_dir} was prepared for {prepared['preset']}, not {preset.name}")
+        first = next(iter(prepared["families"].values()))
+        tokenizer = tokenizer_from_manifest(first["tokenizer"])
+    else:
+        tokenizer = tokenizer_for_config(cfg)
     manifest = tokenizer_manifest(tokenizer, cfg)
     print("tokenizer:", {k: v for k, v in manifest.items() if k != "state"})
     if manifest.get("fell_back"):
@@ -107,6 +120,8 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
             "`datasets` package); training it byte-level would silently mismatch its "
             "vocabulary. Install `datasets` and retry with network access.")
 
+    from ..data.tokenization import check_fits
+    check_fits(tokenizer, cfg)
     torch.manual_seed(seed)
     model = Iridium1(cfg)
     if init:
@@ -155,18 +170,26 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
         log_every=max(steps // 100, 1), label=preset.name, warmup_ratio=0.02,
     )
     out_dir = Path(out) / preset.name
+    if shard_dir is not None:
+        # One corpus for the whole run, memory-mapped; rounds become nothing
+        # more than checkpoint intervals.
+        from ..data.shards import MixedCorpus
+        from .datasets import allocate_mixture
+        corpus = MixedCorpus.build(allocate_mixture(steps * preset.batch_size, preset.mixture),
+                                   shard_dir, seed=seed)
+        corpus_for = lambda r: corpus  # noqa: E731
     trainer = Trainer(model, corpus_for(0), tcfg, out_dir=out_dir, device=info.device)
     start_round = 0
     if resume:
         trainer.resume(resume)
         start_round = min(rounds - 1, trainer.completed_steps * rounds // steps)
         print(f"resumed at step {trainer.completed_steps} (round {start_round})")
-        if start_round:
+        if start_round and shard_dir is None:
             trainer.set_corpus(corpus_for(start_round))
 
     path: Optional[Path] = None
     for r in range(start_round, rounds):
-        if r > start_round:
+        if r > start_round and shard_dir is None:
             trainer.set_corpus(corpus_for(r))
         until = steps if r == rounds - 1 else (r + 1) * steps // rounds
         trainer.train(until=until)

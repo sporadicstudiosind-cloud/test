@@ -77,3 +77,27 @@ def test_xla_is_explicit_and_explains_a_missing_torch_xla():
         with pytest.raises(RuntimeError, match="torch_xla"):
             detect("xla")
     assert detect("auto").backend != "xla"
+
+
+def test_every_tokenizer_kind_round_trips_through_its_state():
+    from iridium.data.tokenization import ByteTokenizer, FastBPETokenizer, fast_available, from_state
+
+    kinds = [ByteTokenizer(), _tok()]
+    if fast_available():
+        kinds.append(FastBPETokenizer.train(TEXT, 300))
+    for tok in kinds:
+        again = from_state(tok.to_dict())
+        s = "the cat sat, naïvely ✓"
+        assert again.encode(s) == tok.encode(s)
+        assert again.decode(again.encode(s)) == s
+        assert again.encode_batch([s, "x"]) == [tok.encode(s), tok.encode("x")]
+
+
+def test_check_fits_refuses_a_tokenizer_larger_than_the_table():
+    from iridium.data.tokenization import check_fits
+
+    cfg = get_config("tiny")
+    check_fits(None, cfg)
+    big = type("T", (), {"vocab_size": cfg.codecs.vocab_size})()
+    with pytest.raises(ValueError, match="embedding rows"):
+        check_fits(big, cfg)

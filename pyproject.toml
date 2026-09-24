@@ -25,7 +25,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # Streaming licensed text and training the subword tokenizer.
-data = ["datasets>=2.18", "huggingface_hub>=0.23"]
+data = ["datasets>=2.18", "huggingface_hub>=0.23", "tokenizers>=0.15"]
 # Colab / Kaggle TPU path.
 tpu = ["torch_xla"]
 dev = ["pytest>=8"]

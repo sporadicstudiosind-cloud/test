@@ -47,7 +47,7 @@ _TALK_MIX = {"fineweb_edu": 0.35, "wikipedia": 0.25, "cosmopedia_stories": 0.20,
 _STEM_MIX = {"finemath": 0.35, "openwebmath": 0.15, "fineweb_edu": 0.25,
              "cosmopedia_textbooks": 0.15, "wikipedia": 0.10}
 
-__all__ = ["Preset", "PRESETS", "get_preset", "FREE_TIERS", "estimate_hours", "preset_table"]
+__all__ = ["Preset", "PRESETS", "get_preset", "with_tokens", "TOKEN_BUDGETS", "FREE_TIERS", "estimate_hours", "preset_table"]
 
 
 #: Published peak dense throughput (FLOP/s) and memory of free-tier devices.
@@ -194,6 +194,14 @@ def _presets() -> dict[str, Preset]:
     out["100m"] = replace(out["tools-100m"], name="100m", priority=1,
                           goal="The general small model: talk and tools, 104M parameters.",
                           mixture=general)
+    out["50m"] = Preset(
+        "50m", 1, "The general recipe (talk + tools) at 50M: the cheapest real run.",
+        replace(_with_vocab(build(name="iridium-1-50m", max_seq_len=1024, d_model=384,
+                                  core_layers=6, n_superstacks=2, superstack_layers=9,
+                                  n_kv_heads=2, d_ff=896), 8_192)),
+        general, steps=20_000, batch_size=32, window=512, lr=1.2e-3, free_tier="colab_t4",
+        rounds=5, text_mix=_TALK_MIX,
+        notes="~330M tokens, ~7 tokens/param; one or two free Colab sessions.")
     ladder = {
         # key: (build kwargs, steps, window, lr, free_tier, notes)
         "500m": (dict(d_model=1024, core_layers=10, n_superstacks=3, superstack_layers=9,
@@ -201,9 +209,10 @@ def _presets() -> dict[str, Preset]:
                  "~2B tokens. Fits a 16 GB device with fp32 AdamW (~8 GB of state); "
                  "on a T4/P100 it is weeks, on a free TPU v5e-1 about a day."),
         "1b": (dict(d_model=1280, core_layers=12, n_superstacks=3, superstack_layers=13,
-                    n_kv_heads=4, d_ff=3456), 60_000, 2048, 4e-4, None,
-               "~4B tokens. fp32 AdamW state is ~16 GB: past every free device before "
-               "activations. Needs 8-bit optimizer state or a paid GPU."),
+                    n_kv_heads=4, d_ff=3456), 60_000, 2048, 4e-4, "tpu_v5e1",
+               "~4B tokens. With 8-bit AdamW state (~10 bytes/param total) it fits a "
+               "16 GB device with ~6 GB left for activations: tight; lower micro_batch "
+               "if it OOMs. About four days of a free TPU v5e-1."),
         "2b": (dict(d_model=1792, core_layers=14, n_superstacks=3, superstack_layers=14,
                     d_head=128, n_kv_heads=2, d_ff=4864), 120_000, 2048, 3e-4, None,
                "~8B tokens. Costed only: ~33 GB of optimizer state."),
@@ -217,11 +226,21 @@ def _presets() -> dict[str, Preset]:
                           f"The general recipe (talk + tools) at {key}.",
                           cfg, general, steps=steps, batch_size=32, window=window, lr=lr,
                           free_tier=tier, rounds=max(10, steps // 3000), text_mix=_TALK_MIX,
-                          micro_batch=4, notes=notes)
+                          micro_batch=4, notes=notes,
+                          optimizer="adamw8" if key != "500m" else "eager_adamw")
     return out
 
 
 PRESETS: dict[str, Preset] = _presets()
+
+
+#: Training-state bytes per parameter: fp32 weights and gradients (8) plus the
+#: optimizer's state. Activations come on top and depend on micro-batch.
+STATE_BYTES = {"eager_adamw": 16.0, "adamw": 16.0, "adamw8": 10.03, "muon": 12.0}
+
+
+def state_gb(preset: Preset) -> float:
+    return preset.config.n_params * STATE_BYTES.get(preset.optimizer, 16.0) / 1e9
 
 
 def get_preset(name: str) -> Preset:
@@ -232,6 +251,22 @@ def get_preset(name: str) -> Preset:
         return PRESETS[name]
     except KeyError:
         raise KeyError(f"unknown preset {name!r}; known: {sorted(PRESETS)}") from None
+
+
+#: Named budgets in tokens per parameter, for ``--tokens-per-param`` and docs.
+#: ``chinchilla`` is compute-optimal (Hoffmann et al., 2022); ``small_model``
+#: is where small open models that actually converse were trained (1,000x+).
+TOKEN_BUDGETS = {"free_tier": None, "chinchilla": 20, "overtrained": 100, "small_model": 1000}
+
+
+def with_tokens(preset: Preset, tokens: int) -> Preset:
+    """The preset with its step count set so it consumes ``tokens`` tokens."""
+    import math
+    if tokens < preset.batch_size * preset.window:
+        raise ValueError("token budget smaller than one batch")
+    steps = math.ceil(tokens / (preset.batch_size * preset.window))
+    rounds = max(1, min(steps, math.ceil(preset.rounds * steps / preset.steps)))
+    return replace(preset, steps=steps, rounds=rounds)
 
 
 def estimate_hours(preset: Preset, tier: str, tokens: Optional[int] = None) -> float:

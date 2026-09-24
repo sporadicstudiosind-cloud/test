@@ -176,7 +176,7 @@ class Trainer:
         self.devices = tuple(cfg.devices) or (device,)
         if str(self.devices[0]) != str(device):
             raise ValueError('primary device must equal devices[0]')
-        if len(self.devices) > 1 and cfg.optimizer != 'eager_adamw':
+        if len(self.devices) > 1 and cfg.optimizer not in ('eager_adamw', 'adamw8'):
             raise ValueError('multi-device training currently requires eager_adamw')
         place_model(model, self.devices)
         self.model = model

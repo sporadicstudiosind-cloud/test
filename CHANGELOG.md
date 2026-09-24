@@ -6,6 +6,17 @@ The first release meant to be *trained by someone else*: every capability is
 reachable from a named preset, sized for free compute, and labelled with how
 much has actually been established. **Status: verified in theory, untrained.**
 
+### Data pipeline rebuilt
+- One tokenizer interface: byte level is just the smallest tokenizer. Rust
+  byte-level BPE (Hugging Face `tokenizers`) is the default, pure Python the
+  fallback; every checkpoint stores its tokenizer; `check_fits` refuses a
+  tokenizer larger than the embedding table.
+- `iridium data prepare`: tokenized, memory-mapped disk shards; training RAM
+  no longer scales with the token budget. Sources stream one at a time.
+- `adamw8`: 8-bit block-wise AdamW in plain PyTorch (CUDA, ROCm, XLA, CPU).
+- `--tokens` / `--tokens-per-param` on `train` and `data prepare`.
+- Size ladder presets `50m`, `100m`, `500m`, `1b` (8-bit, fits 16 GB), `2b`, `4b`.
+
 ### Priorities, as presets
 - `chat-34m`, `chat-100m` (talking + reasoning), `tools-100m` (tool use),
   `omni-100m` (omnimodal), `stem-100m` (physics / STEM), `world-100m` (world

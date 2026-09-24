@@ -58,12 +58,12 @@ def tokenizer_manifest(tokenizer, cfg=None) -> dict:
     not if it is noticed at the end.
     """
     requested = int(getattr(cfg, "text_vocab_size", 0) or 0) if cfg is not None else 0
-    if tokenizer is None:
+    if tokenizer is None or getattr(tokenizer, "kind", "") == "byte":
         return {"kind": "byte", "vocab_size": 256, "requested": requested,
-                "fell_back": bool(requested)}
+                "fell_back": bool(requested), "state": {"kind": "byte"}}
     size = int(getattr(tokenizer, "vocab_size", 0) or len(getattr(tokenizer, "vocab", ()) or ()))
     manifest = {
-        "kind": "bpe",
+        "kind": getattr(tokenizer, "kind", "bpe"),
         "vocab_size": size,
         "requested": requested,
         "fell_back": bool(requested) and size < requested,
@@ -89,8 +89,8 @@ def tokenizer_from_manifest(manifest) -> Optional[object]:
         return None
     tok = manifest.get("tokenizer", manifest)
     if isinstance(tok, dict) and isinstance(tok.get("state"), dict):
-        from ..data.tokenizer import BytePairTokenizer
-        return BytePairTokenizer.from_dict(tok["state"])
+        from ..data.tokenization import from_state
+        return from_state(tok["state"])
     config = manifest.get("model_config") or {}
     if config.get("text_vocab_size"):
         raise ValueError(
