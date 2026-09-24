@@ -48,7 +48,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..config import RouterConfig
-from .layers import RMSNorm
+from .layers import RMSNorm, at_least_fp32
 
 
 @dataclass
@@ -153,7 +153,7 @@ class MacroRouter(nn.Module):
         b, t, _ = h.shape
         hn = self.normalize(h, loop_index)
 
-        logits = self.gate(hn).float() / self.cfg.router_temperature
+        logits = at_least_fp32(self.gate(hn)) / self.cfg.router_temperature
         if span_id is not None:
             logits = pool_over_spans(logits, span_id)
         probs = torch.softmax(logits, dim=-1)
@@ -180,7 +180,7 @@ class MacroRouter(nn.Module):
         if summary is None:
             summary = self.prefix_summary(h, loop_index, None)
         focus_in = hn + summary
-        focus = torch.sigmoid(self.focus_head(focus_in).float()).squeeze(-1)
+        focus = torch.sigmoid(at_least_fp32(self.focus_head(focus_in))).squeeze(-1)
         span = self.max_depth - self.min_depth
         target_depth = (
             self.min_depth + torch.round(focus.detach() * span)
@@ -189,7 +189,7 @@ class MacroRouter(nn.Module):
         halt_logit = self.halt_head(hn).squeeze(-1)
 
         balance = self._balance_loss(probs, index, valid)
-        z_tokens = torch.logsumexp(logits.float(), dim=-1).pow(2)
+        z_tokens = torch.logsumexp(at_least_fp32(logits), dim=-1).pow(2)
         z = self.cfg.z_alpha * (z_tokens[valid].mean() if valid is not None else z_tokens.mean())
         return RoutingDecision(
             stack_index=index,
@@ -221,12 +221,15 @@ class MacroRouter(nn.Module):
         the router is both confident and concentrated.
         """
         n = self.n_stacks
-        dispatched = F.one_hot(index, n).sum(2).float()          # [B, T, N]
+        # ``probs`` keeps its own precision: this is a loss term in an fp64
+        # model when the caller asked for fp64, and `.float()` would round it
+        # for no reason the loss benefits from.
+        dispatched = F.one_hot(index, n).sum(2).to(probs.dtype)  # [B, T, N]
         if valid is not None:
             dispatched, probs = dispatched[valid], probs[valid]
-            f, p = dispatched.mean(dim=0), probs.float().mean(dim=0)
+            f, p = dispatched.mean(dim=0), at_least_fp32(probs).mean(dim=0)
         else:
-            f, p = dispatched.mean(dim=(0, 1)), probs.float().mean(dim=(0, 1))
+            f, p = dispatched.mean(dim=(0, 1)), at_least_fp32(probs).mean(dim=(0, 1))
         f = f / f.sum().clamp_min(1e-9)
         return self.cfg.balance_alpha * n * torch.sum(f * p)
 
