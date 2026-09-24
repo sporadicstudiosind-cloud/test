@@ -182,3 +182,15 @@ separate deliberately, because a model that happens to state the same
 number the tool would have returned is not evidence it can use tools.
 
 Nothing here has been trained; no accuracy number is claimed.
+
+## When the model does not know (`iridium.runtime.abstain`)
+
+`Answerer(model, search=...)` climbs a ladder before it answers: answer ->
+think harder (all ponder loops) -> more superstacks (`top_k` raised to all)
+-> search (if a search callable is provided; the result enters as a
+`tool_result` turn) -> **"I don't know."**, with the stages it tried. An
+answer is accepted only if the model did not emit its `UNKNOWN` token, its
+teacher-forced geometric-mean confidence clears `threshold`, and its last two
+ponder loops agree on the first token. The `unknowable` training family
+(facts given, key present or absent, 50/50) is what teaches `UNKNOWN`; it is
+in the talking presets' mixtures.

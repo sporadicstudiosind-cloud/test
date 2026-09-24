@@ -36,7 +36,7 @@ from __future__ import annotations
 from typing import Iterable, Optional, Sequence
 
 __all__ = ["ByteTokenizer", "FastBPETokenizer", "fast_available", "from_state",
-           "check_fits", "as_tokenizer"]
+           "check_fits", "as_tokenizer", "retokenize"]
 
 
 class ByteTokenizer:
@@ -152,3 +152,31 @@ def check_fits(tokenizer, cfg) -> None:
         raise ValueError(f"tokenizer needs {need} embedding rows (vocab "
                          f"{need - TEXT_ID_OFFSET} + {TEXT_ID_OFFSET} control ids) but "
                          f"{cfg.name} has {have}")
+
+
+def retokenize(sample, tokenizer):
+    """Re-encode a byte-level sample's text spans with ``tokenizer``.
+
+    The synthetic task families build their text byte-level (id == byte +
+    offset). That is only valid for a tokenizer whose first 256 ids are the
+    bytes in order -- true of :class:`ByteTokenizer` and the Python BPE, and
+    *not* of the Rust BPE, whose base alphabet is ordered differently. Every
+    synthetic item therefore passes through here before it reaches a subword
+    model; for byte-compatible tokenizers it returns the sample unchanged.
+    """
+    import numpy as np
+    from ..codecs.spans import Sample, Span
+    from ..config import TEXT_ID_OFFSET
+
+    if tokenizer is None or getattr(tokenizer, "kind", "") in ("byte", "bpe"):
+        return sample
+    spans = []
+    for span in sample.spans:
+        if span.modality != "text":
+            spans.append(span)
+            continue
+        raw = bytes(int(i) - TEXT_ID_OFFSET for i in span.payload if int(i) >= TEXT_ID_OFFSET)
+        ids = np.asarray(tokenizer.encode(raw.decode("utf-8", "surrogateescape")), np.int64)
+        spans.append(Span("text", ids + TEXT_ID_OFFSET, supervised=span.supervised,
+                          observed=span.observed, meta=dict(span.meta)))
+    return Sample(spans, meta=sample.meta)

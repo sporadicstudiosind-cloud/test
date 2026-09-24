@@ -120,7 +120,7 @@ def _presets() -> dict[str, Preset]:
     out["chat-34m"] = Preset(
         "chat-34m", 1,
         "A small model that holds a conversation: prose plus human-written chats.",
-        chat34, {"text_lm": 0.60, "chat": 0.40},
+        chat34, {"text_lm": 0.58, "chat": 0.37, "unknowable": 0.05},
         steps=20_000, batch_size=32, window=512, lr=1.5e-3, free_tier="colab_t4", rounds=5,
         text_mix=_TALK_MIX,
         notes="The first thing to train. ~330M tokens, about half of compute-"
@@ -130,7 +130,7 @@ def _presets() -> dict[str, Preset]:
     out["chat-100m"] = Preset(
         "chat-100m", 1,
         "The main talking model: prose, chat, and a little false-premise reasoning.",
-        chat100, {"text_lm": 0.55, "chat": 0.35, "false_premise": 0.10},
+        chat100, {"text_lm": 0.55, "chat": 0.32, "false_premise": 0.07, "unknowable": 0.06},
         steps=20_000, batch_size=32, window=1024, lr=8e-4, rounds=10, text_mix=_TALK_MIX,
         notes="~655M tokens: about a third of compute-optimal for 104M params, "
               "spread over several weeks of Kaggle quota.")
@@ -191,7 +191,7 @@ def _presets() -> dict[str, Preset]:
     # Same mixture everywhere so the sizes are comparable; a subword vocabulary
     # of 32k from 500M up, where the embedding is a small share of parameters.
     from .config_builder import build
-    general = {"text_lm": 0.45, "chat": 0.35, "tools": 0.20}
+    general = {"text_lm": 0.44, "chat": 0.32, "tools": 0.18, "unknowable": 0.06}
     out["100m"] = replace(out["tools-100m"], name="100m", priority=1,
                           goal="The general small model: talk and tools, 104M parameters.",
                           mixture=general)

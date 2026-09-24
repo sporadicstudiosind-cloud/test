@@ -159,9 +159,12 @@ def build_corpus(
         if len(tools) != n_tools:
             raise RuntimeError(f"tool source returned {len(tools)}/{n_tools} requested items")
         items.extend(tools)
+    from ..data.tokenization import retokenize
     for family, count in sorted(quotas.items()):
         for _ in range(count):
-            items.append(make_item(family, rng, split))
+            item = make_item(family, rng, split)
+            item.sample = retokenize(item.sample, tokenizer)
+            items.append(item)
     rng.shuffle(items)
     return Corpus(items, split)
 

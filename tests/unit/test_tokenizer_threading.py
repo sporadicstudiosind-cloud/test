@@ -101,3 +101,19 @@ def test_check_fits_refuses_a_tokenizer_larger_than_the_table():
     big = type("T", (), {"vocab_size": cfg.codecs.vocab_size})()
     with pytest.raises(ValueError, match="embedding rows"):
         check_fits(big, cfg)
+
+
+def test_synthetic_byte_text_is_reencoded_for_a_rust_tokenizer():
+    import numpy as np
+    from iridium.data.tokenization import FastBPETokenizer, fast_available, retokenize
+    from iridium.training.tasks import unknowable_item
+
+    item = unknowable_item(np.random.default_rng(0))
+    assert retokenize(item.sample, None) is item.sample
+    if not fast_available():
+        return
+    tok = FastBPETokenizer.train(TEXT + [item.prompt] * 5, 300)
+    out = retokenize(item.sample, tok)
+    text = [s for s in out.spans if s.modality == "text"][0]
+    assert tok.decode(list(text.payload - 16)) == item.prompt
+    assert [s.modality for s in out.spans] == [s.modality for s in item.sample.spans]

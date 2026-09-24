@@ -51,6 +51,9 @@ TEXT_OFFSET = 16
 BOS, EOS, SEP, PAD_CTRL = 1, 2, 3, 4
 VERDICT_TRUE, VERDICT_FALSE = 5, 6
 VERDICT_NAME = {VERDICT_TRUE: "TRUE", VERDICT_FALSE: "FALSE"}
+#: The model's own "I don't know": one control token, so abstaining is a single
+#: decision the model makes, graded exactly, and never a phrase it can half-say.
+UNKNOWN = 13
 
 TRAIN_DISCHARGE = (1.0, 8.0)
 EXTRAPOLATION_DISCHARGE = (9.0, 14.0)
@@ -394,6 +397,45 @@ def false_premise_item(rng: np.random.Generator, split: str = "train") -> Item:
     )
 
 
+_KEYS = ["red", "blue", "green", "north", "south", "alpha", "beta", "gamma", "delta",
+         "river", "stone", "cedar", "maple", "harbor", "falcon", "copper", "violet", "ember"]
+
+
+def unknowable_item(rng: np.random.Generator, split: str = "train") -> Item:
+    """Answer from the given facts, or abstain when they do not contain it.
+
+    A context of 2-6 ``key = value`` facts and a question about one key. Half
+    the time the key is present and the target is its value; half the time it
+    is absent and the target is the ``UNKNOWN`` token. Both halves are needed
+    for the same reason as in :func:`false_premise_item`: a model trained
+    only to abstain learns that abstaining is always safe, which is its own
+    kind of useless. This is the training signal behind the runtime's
+    "I don't know" (:mod:`iridium.runtime.abstain`); without it, nothing in
+    the data ever rewards saying so.
+    """
+    offset = 0 if split == "train" else len(_KEYS) // 2       # held-out keys differ
+    pool = _KEYS[offset:] + _KEYS[:offset]
+    n = int(rng.integers(2, 7))
+    chosen = [pool[int(i)] for i in rng.choice(len(pool), size=n + 1, replace=False)]
+    facts = {k: int(rng.integers(0, 1000)) for k in chosen[:n]}
+    answerable = bool(rng.integers(0, 2))
+    key = chosen[int(rng.integers(n))] if answerable else chosen[n]
+    context = "; ".join(f"{k} = {v}" for k, v in facts.items())
+    prompt = f"facts: {context}. what is {key}?"
+    target = [encode_text(str(facts[key]))] if answerable else [control_span(UNKNOWN)]
+    return Item(
+        sample=Sample([control_span(BOS, supervised=False), encode_text(prompt, supervised=False),
+                       control_span(SEP, supervised=False), *target, control_span(EOS)],
+                      meta={"family": "unknowable", "split": split}),
+        family="unknowable",
+        answer=str(facts[key]) if answerable else "UNKNOWN",
+        prompt=prompt,
+        truth={"answerable": answerable, "key": key},
+        check=lambda produced, a=(str(facts[key]) if answerable else "UNKNOWN"):
+            produced.strip().upper().startswith(a.upper()),
+    )
+
+
 # --------------------------------------------------------------------------
 # registry
 # --------------------------------------------------------------------------
@@ -404,6 +446,7 @@ GENERATORS: dict[str, Callable[[np.random.Generator, str], Item]] = {
     "field_rollout": field_rollout_item,
     "scene_goal": scene_goal_item,
     "false_premise": false_premise_item,
+    "unknowable": unknowable_item,
 }
 
 #: Which superstack each family is *expected* to prefer. Not enforced during
@@ -414,6 +457,7 @@ FAMILY_DOMAIN: dict[str, str] = {
     "field_rollout": "fluid_dynamics_navier_stokes",
     "scene_goal": "ui_dom_os_actuation",
     "false_premise": "natural_language_pragmatics",
+    "unknowable": "natural_language_pragmatics",
 }
 
 

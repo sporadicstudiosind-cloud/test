@@ -246,7 +246,7 @@ class MixedCorpus:
 
     @classmethod
     def build(cls, quotas: dict[str, int], shard_dir: Optional[str | Path] = None,
-              seed: int = 0, split: str = "train") -> "MixedCorpus":
+              seed: int = 0, split: str = "train", tokenizer=None) -> "MixedCorpus":
         from ..training.tasks import GENERATORS, Item, make_item
 
         sources: list[_Source] = []
@@ -255,8 +255,11 @@ class MixedCorpus:
                 continue
             if family in GENERATORS:
                 def synth(i, family=family):
+                    from .tokenization import retokenize
                     rng = np.random.default_rng([seed, zlib.crc32(family.encode()), i])
-                    return make_item(family, rng, split)
+                    item = make_item(family, rng, split)
+                    item.sample = retokenize(item.sample, tokenizer)
+                    return item
                 sources.append(_Source(family, count, synth))
                 continue
             if shard_dir is None:

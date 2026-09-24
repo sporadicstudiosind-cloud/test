@@ -182,7 +182,7 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
         from ..data.shards import MixedCorpus
         from .datasets import allocate_mixture
         corpus = MixedCorpus.build(allocate_mixture(steps * preset.batch_size, preset.mixture),
-                                   shard_dir, seed=seed)
+                                   shard_dir, seed=seed, tokenizer=tokenizer)
         corpus_for = lambda r: corpus  # noqa: E731
     on_eval = None
     if shard_dir is not None:
