@@ -27,8 +27,30 @@ import torch.nn.functional as F
 from .rope import RotaryEmbedding
 
 
+def at_least_fp32(x: torch.Tensor) -> torch.Tensor:
+    """Widen fp16/bf16 to fp32 for a reduction; leave fp32 and fp64 alone.
+
+    Normalisers and softmaxes accumulate, and accumulating in half precision
+    loses the sum. The usual cure is ``x.float()`` — which is a *downcast*
+    when the caller asked for fp64, and a silent one: the result still has
+    dtype float64, carrying fp32 rounding inside it. That is worth naming
+    precisely because of where it lands. This repo's cache-parity gate runs
+    the model in fp64 and demands cached decoding match the uncached forward
+    to 1e-10; a hardcoded ``.float()`` anywhere under it caps the achievable
+    agreement at fp32 eps, so the gate passes only while both sides happen to
+    round identically, and fails the moment anything makes them differ —
+    which is what a fused attention kernel on one CI runner did, producing
+    2**-22 and 2**-23 discrepancies in every parity test at once while the
+    fp64 physics tests were unaffected.
+
+    ``deltanet.py`` reached this conclusion first and worked around it
+    locally; this is that fix, in one place, for every site that needs it.
+    """
+    return x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
+
+
 def head_rms(x):
-    work = x.float()
+    work = at_least_fp32(x)
     return (work * (work.square().mean(-1, keepdim=True) + 1e-6).rsqrt()).to(x.dtype)
 
 
@@ -44,7 +66,7 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         dtype = x.dtype
-        x32 = x.float()
+        x32 = at_least_fp32(x)
         norm = x32.pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
         return (x32 * norm).to(dtype) * self.weight.to(dtype)
 
@@ -204,7 +226,7 @@ def _masked_softmax(scores: torch.Tensor, keep: torch.Tensor) -> torch.Tensor:
     caller is responsible for making sure such rows are padding.
     """
     filled = scores.masked_fill(~keep, neg_inf(scores.dtype))
-    probs = torch.softmax(filled.float(), dim=-1).to(scores.dtype)
+    probs = torch.softmax(at_least_fp32(filled), dim=-1).to(scores.dtype)
     dead = ~keep.any(dim=-1, keepdim=True)
     return probs.masked_fill(dead, 0.0)
 

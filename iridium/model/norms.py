@@ -92,7 +92,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from .layers import RMSNorm
+from .layers import RMSNorm, at_least_fp32
 
 
 class DyT(nn.Module):
@@ -162,7 +162,7 @@ class AdaptiveRMSNorm(nn.Module):
         elif cond is None:
             raise ValueError("cond is required unless self_conditioned=True")
         dtype = x.dtype
-        x32 = x.float()
+        x32 = at_least_fp32(x)
         rms = x32.pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
         normed = (x32 * rms).to(dtype)
         gain = 1.0 + self.bound * torch.tanh(self.to_gain(cond))

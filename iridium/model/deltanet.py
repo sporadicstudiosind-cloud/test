@@ -126,7 +126,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .layers import RMSNorm
+from .layers import RMSNorm, at_least_fp32
 
 
 def _l2_normalize(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -139,14 +139,19 @@ def _l2_normalize(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     what the gate actually learned. The gated delta rule paper and every
     public Gated DeltaNet implementation normalise for this reason.
 
-    Accumulates in fp32 for bf16/fp16 input, same as ``head_rms`` in
-    ``layers.py`` -- but, unlike ``head_rms``, never *downcasts* fp32 or
+    Accumulates in fp32 for bf16/fp16 input and never *downcasts* fp32 or
     fp64 input to fp32: this module's own equivalence test runs the model in
     fp64 for a tight numeric tolerance, and a hardcoded ``.float()`` here
     would quietly reintroduce fp32 rounding (observed: 1.19e-7, exactly fp32
     eps) into a computation the caller explicitly asked to run in fp64.
+
+    This module reached that conclusion first and worked around it locally.
+    ``layers.at_least_fp32`` is the same rule applied everywhere it was
+    missing -- ``head_rms``, both ``RMSNorm``s, the dynamic-tanh norm and
+    both masked softmaxes all downcast fp64 until it was, which is why the
+    parity gate could only ever be as exact as fp32.
     """
-    work = x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
+    work = at_least_fp32(x)
     return (work * work.square().sum(-1, keepdim=True).clamp_min(eps).rsqrt()).to(x.dtype)
 
 

@@ -390,15 +390,38 @@ import random as _random
 
 
 def _fake_stream_documents(docs):
-    """A drop-in for ``tc.stream_documents`` that just replays a fixed list,
-    ignoring the network-shaped kwargs (``limit``, ``seed``, ``split``,
-    ``max_scanned``) the real one takes. Finite by design: a test corpus
-    that never runs out would hide a bug where text_items loops forever
-    waiting for more tokens than the mixture can ever supply."""
+    """A drop-in for ``tc.stream_documents`` that replays a fixed list.
+
+    It ignores the *network*-shaped kwargs (``limit``, ``seed``, ``split``,
+    ``max_scanned``) but it honours ``skip``, because that one changes which
+    documents come back. An earlier version accepted every kwarg and ignored
+    all of them, which hid a real defect: :func:`text_items` never forwarded
+    ``skip_docs`` on its default packed path, so round-based training re-read
+    the same opening documents every round while the fake happily pretended
+    otherwise. A fake that shrugs at an argument cannot fail when production
+    drops it.
+
+    Finite by design: a test corpus that never runs out would hide a bug where
+    text_items loops forever waiting for more tokens than the mixture can ever
+    supply."""
     def _stream(key, limit=None, seed=0, buffer=None, shuffle=True,
                 split=None, max_scanned=None, skip=0):
-        yield from docs
+        yield from docs[int(skip):]
     return _stream
+
+
+def test_the_fake_stream_accepts_everything_the_real_one_does():
+    """The fake stands in for ``stream_documents`` by monkeypatching, so
+    Python checks nothing: a kwarg added to the real function turns every
+    test that patches it into a TypeError at some unrelated call site (which
+    is exactly how this was found, in CI, two tests deep). Compare the
+    signatures directly, once, so the drift is reported here instead."""
+    import inspect
+
+    real = set(inspect.signature(tc.stream_documents).parameters)
+    fake = set(inspect.signature(_fake_stream_documents([])).parameters)
+    missing = real - fake
+    assert not missing, f"_fake_stream_documents is missing kwargs: {sorted(missing)}"
 
 
 def test_packing_bos_only_on_real_document_starts(monkeypatch):
@@ -595,3 +618,37 @@ def test_corpus_builder_uses_exact_mixture_quotas():
     assert corpus.counts() == {"channel_depth": 4, "false_premise": 3}
     with pytest.raises(ValueError):
         build_corpus(1, mixture={})
+
+
+def test_skip_docs_reaches_the_stream_on_the_default_packed_path(monkeypatch):
+    """``skip_docs`` is the whole mechanism behind round-based training:
+    ``run_preset`` grows it each round so the next round sees documents the
+    last one did not. It was forwarded only on the legacy ``pack=False``
+    branch, so on the default path every round re-read the same opening
+    documents -- training that reports fresh rounds and delivers one round
+    repeated, with a loss curve that looks entirely healthy while it does.
+
+    Distinct single-character documents make the provenance of each window
+    unambiguous: if the skip landed, nothing from the skipped prefix can
+    appear in the output."""
+    docs = [c * 64 for c in "ABCDEFGHIJ"]
+    monkeypatch.setattr(tc, "stream_documents", _fake_stream_documents(docs))
+
+    def payload_bytes(items):
+        out = bytearray()
+        for it in items:
+            for s in it.sample.spans:
+                if s.modality == "text":
+                    out.extend(bytes(int(v) - 16 for v in s.payload))
+        return bytes(out)
+
+    kw = dict(window=16, mix={"gutenberg": 1.0}, seed=0, pack=True,
+              dedupe=False, collapse_repeats=False, filter_printable=False)
+    first = payload_bytes(tc.text_items(4, skip_docs=0, **kw))
+    later = payload_bytes(tc.text_items(4, skip_docs=5, **kw))
+
+    assert b"A" in first, "sanity: round one should start at the first document"
+    for skipped in b"ABCDE":
+        assert bytes([skipped]) not in later, (
+            f"document {chr(skipped)!r} was skipped but still reached the model"
+        )
