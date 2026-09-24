@@ -287,6 +287,13 @@ def _rope_positions(span: "Span", start: int, n: int) -> np.ndarray:
     """
     p = np.arange(start, start + n, dtype=np.int64)
     out = np.stack([p, p, p], axis=-1)
+    coords = span.meta.get("coords") if span.meta else None
+    if coords is not None:
+        # A sparse set of patches (only what changed on screen) has no
+        # rectangular grid; each token carries its own (t, y, x) offset
+        # from the span start instead. See iridium.runtime.live.
+        c = np.asarray(coords, dtype=np.int64)[:n]
+        return start + c
     grid = span.grid
     if grid is None or len(grid) not in (2, 3):
         return out

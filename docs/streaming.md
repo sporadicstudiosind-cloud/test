@@ -223,3 +223,25 @@ a single ponder loop, batch size 1, and `model.cfg.memory_slots == 0` --
 exactly what `get_config("tiny")` and `get_config("nano")` already are. See
 the final report for what extending this to `controller_mode` or a
 multi-loop ponder core would need from `iridium1.py`.
+
+## Continuous perception (`iridium.runtime.live`)
+
+Computer-use agents poll: screenshot, full re-encode, reply, act, repeat.
+`LiveSession` instead keeps **one persistent context** and feeds it
+**deltas**:
+
+- `FrameDelta` patchifies each frame and sends only patches whose mean
+  absolute change exceeds a threshold, each with its own `(t, y, x)` M-RoPE
+  position. A static screen costs 0 tokens; a blinking cursor 1; a scroll what
+  scrolled (a mostly static 10-frame test stream: >80% fewer tokens).
+- `observe(frame)` appends the delta straight into the KV cache (no
+  re-prefill); `hear(text)` adds instructions; `think(n)` decodes text, tool
+  calls or actions from the same cache; `step(frame, n)` is one full-duplex
+  tick.
+- `max_cache_tokens` evicts the oldest frame tokens (never text). Exact for
+  attention (positions are baked into cached keys); Gated DeltaNet layers keep
+  a constant-size recurrent summary of what was evicted.
+
+Tested: incremental observation equals one full forward over the same tokens
+(1e-8, fp64); eviction bounds the cache while decoding continues. Untrained:
+using a delta stream well needs training on screen recordings or video.
