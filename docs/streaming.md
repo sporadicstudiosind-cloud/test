@@ -245,3 +245,23 @@ Computer-use agents poll: screenshot, full re-encode, reply, act, repeat.
 Tested: incremental observation equals one full forward over the same tokens
 (1e-8, fp64); eviction bounds the cache while decoding continues. Untrained:
 using a delta stream well needs training on screen recordings or video.
+
+## Adaptive thinking (`iridium.runtime.thinking`)
+
+The control core's ponder loop has a learned halting head. With
+`halt_threshold`, `Iridium1.forward` **stops looping as soon as every token in
+the step is confident**, so easy tokens take one loop and hard ones take more.
+Skipped loops still need the position in their caches; the halted loop's
+entries are copied in (CALM-style state propagation, per loop), so decoding
+stays aligned.
+
+`ThinkingBudget` sets the loop cap and threshold per token from:
+- **effort** -- `instant` (1 loop), `fast`, `balanced`, `deep`, `max` (always all);
+- **speed** -- optional `latency_ms`; running over lowers the threshold (think
+  less), running under restores it;
+- **difficulty** -- next-token entropy: an unsure step raises the bar for the next.
+
+`generate(..., thinking=ThinkingBudget("balanced", latency_ms=50))`; the
+loops each token used are in `result.loops`. The halting head must be trained
+(ponder KL + subject losses) for the depth to track real difficulty; the
+mechanics are tested with forced-halt and never-halt heads.

@@ -91,12 +91,23 @@ def generate(
     force_modality: Optional[str] = None,
     min_p: float = 0.0,
     tokenizer=None,
+    thinking=None,
 ) -> Generated:
     """Greedy (``temperature=0``) or sampled continuation of ``sample``.
 
     See :func:`_pick` for what each truncation knob does and why ``min_p`` is
     the one to reach for first on an undertrained model.
+
+    ``thinking`` (a :class:`~iridium.runtime.thinking.ThinkingBudget`) makes
+    ponder depth adaptive per token: each step's loop cap and halting
+    threshold come from the budget, which updates from the step's latency and
+    the model's uncertainty. ``result.loops`` records the loops each token used.
     """
+    import time as _time
+    if thinking is not None:
+        # The prompt is read at the budget's loop cap so every loop's cache
+        # covers it; each generated token then halts wherever it is done.
+        n_loops = thinking.plan(model.cfg.router.max_loops)[0]
     if n_loops is None:
         n_loops = min(3, model.cfg.router.max_loops) if model.cfg.controller_mode else 1
     if len(sample) < 1 or max_new_tokens < 1:
@@ -166,7 +177,17 @@ def generate(
         if action_scalars is not None:
             step.scalars = action_scalars.to(step.scalars.dtype)
             result.actions.append({"op": token, "operands": action_scalars[0, 0].cpu().tolist()})
-        out = model(step, n_loops=n_loops, cache=cache)
+        if thinking is not None:
+            step_loops, thr = thinking.plan(model.cfg.router.max_loops)
+            step_loops = min(step_loops, n_loops)
+            t0 = _time.perf_counter()
+            out = model(step, n_loops=step_loops, cache=cache, halt_threshold=thr)
+            used = int(out.stats.get("halted_at", step_loops))
+            thinking.observe(logits if name in ("text", "control") else None,
+                             (_time.perf_counter() - t0) * 1000, used)
+            result.loops[-1] = float(used)
+        else:
+            out = model(step, n_loops=n_loops, cache=cache)
         hidden = out.hidden
         position += 1
 

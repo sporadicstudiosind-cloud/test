@@ -206,6 +206,7 @@ class Iridium1(nn.Module):
         exit_threshold: float = 0.9,
         use_depth_cap: bool = False,
         embedded: Optional[torch.Tensor] = None,
+        halt_threshold: Optional[float] = None,
     ) -> ModelOutput:
         if n_loops is None:
             n_loops = min(3, self.cfg.router.max_loops) if self.cfg.controller_mode else 1
@@ -369,6 +370,20 @@ class Iridium1(nn.Module):
             h = self.core.reinject(h2 + stack_out if self.cfg.controller_mode else h2, entry)
             if self.cfg.loop_identity:
                 h = h + self.router.loop_embed.weight[loop + 1]
+            if (halt_threshold is not None and cache is not None and not self.training
+                    and loop < n_loops - 1):
+                # Adaptive thinking: stop pondering once every real token in
+                # this step is confident it is done. The model's own halting
+                # head decides, so easy tokens take one loop and hard ones
+                # take more. Later loops still need this position in their
+                # caches, so the halted loop's entries stand in for them
+                # (CALM-style state propagation, applied per loop).
+                lam_now = torch.sigmoid(halt_logits[-1].float())
+                done = (lam_now >= halt_threshold) | ~batch.valid
+                if bool(done.all()):
+                    _propagate_loop_cache(cache, loop, n_loops, t)
+                    stats["halted_at"] = loop + 1
+                    break
 
         lam = torch.sigmoid(torch.stack(halt_logits, dim=-1).to(torch.float64 if h.dtype == torch.float64 else torch.float32))
         lam = torch.cat([lam[..., :-1], torch.ones_like(lam[..., -1:])], dim=-1)
@@ -382,14 +397,16 @@ class Iridium1(nn.Module):
             first = stops.to(torch.int64).argmax(-1)
             mixed = stacked.gather(-1, first[..., None, None].expand(-1, -1, stacked.shape[-2], 1)).squeeze(-1)
             stats["chosen_cycle"] = first + 1
-        stats["subject_loss"] = stats["subject_loss"] / n_loops
+        stats["subject_loss"] = stats["subject_loss"] / len(halt_logits)
 
         for key in ("balance_loss", "z_loss", "depth_kl"):
-            stats[key] = stats[key] / n_loops
+            stats[key] = stats[key] / len(halt_logits)
+        ran = len(halt_logits)
         prior = geometric_prior(
-            n_loops, self.cfg.router.ponder_prior_p_stop, h.device, loop_p.dtype
+            ran, self.cfg.router.ponder_prior_p_stop, h.device, loop_p.dtype
         )
-        stats["loop_kl"] = ponder_kl(loop_p, prior) if n_loops > 1 else h.new_zeros(())
+        stats["loop_kl"] = ponder_kl(loop_p, prior) if ran > 1 else h.new_zeros(())
+        stats.setdefault("halted_at", ran)
 
         if cache is not None:
             cache[("stream", "n")] = history + t
@@ -443,3 +460,40 @@ class Iridium1(nn.Module):
         losses["depth_kl"] = self.cfg.router.depth_beta * out.stats["depth_kl"]
         losses["loop_kl"] = self.cfg.router.ponder_beta * out.stats["loop_kl"]
         return losses, out
+
+
+def _propagate_loop_cache(cache: dict, loop: int, n_loops: int, t: int) -> None:
+    """Fill skipped loops' caches with the halted loop's entries for this step.
+
+    Keys are ``("core", loop, layer)`` and ``((loop, stack), depth | "valid")``.
+    Only tensors indexed by history (length ``history + t``) are extended; a
+    recurrent state is left as is (that loop simply does not absorb the token).
+    """
+    def extend(dst, src):
+        if isinstance(src, tuple):
+            return tuple(extend(d, s) for d, s in zip(dst if dst is not None else (None,) * len(src), src))
+        if not torch.is_tensor(src):
+            return dst if dst is not None else src
+        axis = 2 if src.dim() == 4 else 1 if src.dim() in (2, 3) else None
+        if axis is None:
+            return dst if dst is not None else src
+        new = src.narrow(axis, src.shape[axis] - t, t)
+        if dst is None:
+            return src.clone() if src.shape[axis] == t else dst
+        if not torch.is_tensor(dst) or dst.shape[axis] + t != src.shape[axis]:
+            return dst
+        return torch.cat([dst, new], dim=axis)
+
+    for key in list(cache):
+        if not isinstance(key, tuple) or len(key) < 2:
+            continue
+        if key[0] == "core" and key[1] == loop:
+            targets = [("core", later, *key[2:]) for later in range(loop + 1, n_loops)]
+        elif isinstance(key[0], tuple) and key[0] and key[0][0] == loop:
+            targets = [((later, *key[0][1:]), *key[1:]) for later in range(loop + 1, n_loops)]
+        else:
+            continue
+        for target in targets:
+            out = extend(cache.get(target), cache[key])
+            if out is not None:
+                cache[target] = out
