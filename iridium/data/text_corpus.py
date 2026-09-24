@@ -723,6 +723,7 @@ def text_items(
             doc_starts: list[int] = []
             for doc in stream_documents(
                 key, limit=None, seed=seed + i, split=split, max_scanned=max_scanned,
+                skip=skip_docs,
             ):
                 doc = clean(doc)
                 if doc is None:

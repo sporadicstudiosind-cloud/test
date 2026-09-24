@@ -181,11 +181,16 @@ def test_saved_artifact_is_small_json(trained, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# train_from_sources: cannot hit the network in this environment, so this
-# only pins that it fails the way tokenizer_for expects (an exception, not a
-# hang or a silent empty tokenizer), letting tokenizer_for's fallback do its
-# job. A real compression-ratio measurement against the licensed corpora
-# needs IRIDIUM_NETWORK_TESTS=1 and is not exercised here.
+# The offline fallback. These once asserted the *environment* was offline --
+# `train_from_sources` was called for real and merely expected to raise -- so
+# they passed in CI only because CI never installs `datasets`, and failed on
+# any machine that had it. Neither outcome said anything about the fallback.
+# The condition is now forced, so what is under test is the behaviour: a
+# corpus that cannot be reached yields a working byte tokenizer, never an
+# exception out of `tokenizer_for` and never a half-trained vocabulary.
+#
+# A real compression-ratio measurement against the licensed corpora needs
+# IRIDIUM_NETWORK_TESTS=1 and is not exercised here.
 # ---------------------------------------------------------------------------
 
 def _offline(monkeypatch):
@@ -206,3 +211,7 @@ def test_tokenizer_for_falls_back_to_byte_tokenizer_offline(tmp_path, monkeypatc
     tok = tokenizer_for(vocab_size=300, cache_dir=tmp_path)
     assert tok.vocab_size == 256  # fell back to byte_tokenizer()
     assert tok.decode(tok.encode("hello")) == "hello"
+    assert not list(tmp_path.glob("*.json")), (
+        "a failed training run must not leave a cached artifact behind: the "
+        "next call would load it and never retry"
+    )
