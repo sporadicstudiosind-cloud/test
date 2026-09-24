@@ -298,7 +298,12 @@ class Trainer:
             # Catch outside the helper frame so failed graphs can be released.
             try:
                 report, diagnostics, norm, updated = self._update(stream)
-            except torch.cuda.OutOfMemoryError:
+            except (torch.cuda.OutOfMemoryError, RuntimeError) as err:
+                # CPU and ROCm allocators raise a plain RuntimeError; anything
+                # else that is a RuntimeError is a real bug and re-raised.
+                if not isinstance(err, torch.cuda.OutOfMemoryError) \
+                        and "allocate memory" not in str(err):
+                    raise
                 self.optimizer.zero_grad(set_to_none=True)
                 if not self.cfg.oom_retry or self.loader.batch_size <= 1:
                     raise

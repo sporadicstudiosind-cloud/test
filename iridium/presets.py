@@ -75,7 +75,7 @@ class Preset:
     config: IridiumConfig
     mixture: dict[str, float]
     steps: int
-    batch_size: int
+    batch_size: int                    # effective batch, in sequences
     window: int                        # training sequence length, in tokens
     lr: float
     optimizer: str = "eager_adamw"
@@ -83,6 +83,10 @@ class Preset:
     ema_decay: float = 0.999
     loss_balance: str = "none"
     rounds: int = 4                    # fresh-data rounds; see run_preset
+    #: Sequences per forward pass; the rest of ``batch_size`` is gradient
+    #: accumulation. 8 x 1024 tokens of a ~100M routed model fits a 15-16 GB
+    #: card with room for the ponder loop; the trainer halves it on OOM anyway.
+    micro_batch: int = 8
     free_tier: Optional[str] = "kaggle_p100"
     status: str = "verified in theory"
     notes: str = ""

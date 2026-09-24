@@ -127,3 +127,14 @@ def test_preset_text_mixes_match_the_data_module_and_name_real_sources():
         if p.text_mix:
             assert set(p.text_mix) <= set(text_corpus.SOURCES), p.name
             assert abs(sum(p.text_mix.values()) - 1) < 1e-9
+
+
+def test_tools_family_builds_offline_from_synthetic_tasks(monkeypatch):
+    from iridium.data import tool_corpus
+    from iridium.training.datasets import build_corpus
+
+    real = tool_corpus.tool_items
+    monkeypatch.setattr(tool_corpus, "tool_items",
+                        lambda n, **kw: real(n, **{**kw, "mix": {"synthetic": 1.0}}))
+    corpus = build_corpus(6, mixture={"tools": 1.0}, text_window=1024)
+    assert len(corpus.items) == 6

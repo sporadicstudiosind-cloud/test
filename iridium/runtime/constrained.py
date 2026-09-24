@@ -690,13 +690,24 @@ class SchemaPrefixValidator:
 
     def is_valid_instance(self, data: bytes | str) -> bool:
         buf = data if isinstance(data, (bytes, bytearray)) else data.encode("utf-8")
-        status, pos, _ = _parse_value(self.schema, buf, 0)
-        return status == "complete" and bytes(buf[pos:]).strip() == b""
+        # A bare top-level number/``true``/``false``/``null`` has no closing
+        # delimiter of its own -- "42" at the very end of the buffer is
+        # genuinely ambiguous to a *prefix* check (a tenth digit could still
+        # arrive), which is the literally correct behaviour
+        # ``is_valid_prefix`` needs. An *instance* check is a different
+        # question: the caller is asserting there is nothing more coming, so
+        # appending one synthetic, unambiguous terminator byte (an
+        # insignificant-whitespace space, valid nowhere except between
+        # tokens or inside an already-open string, where it changes nothing
+        # this check cares about) resolves exactly that ambiguity without
+        # threading an "end of input" flag through every parse function.
+        status, pos, _ = _parse_value(self.schema, buf + b" ", 0)
+        return status == "complete" and pos <= len(buf) and bytes(buf[pos:]).strip() == b""
 
     def parse(self, data: bytes | str) -> Any:
         buf = data if isinstance(data, (bytes, bytearray)) else data.encode("utf-8")
-        status, pos, value = _parse_value(self.schema, buf, 0)
-        if status != "complete" or bytes(buf[pos:]).strip() != b"":
+        status, pos, value = _parse_value(self.schema, buf + b" ", 0)  # see is_valid_instance
+        if status != "complete" or pos > len(buf) or bytes(buf[pos:]).strip() != b"":
             raise ValueError("not a complete, schema-valid instance")
         return value
 

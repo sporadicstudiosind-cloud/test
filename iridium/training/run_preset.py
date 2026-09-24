@@ -146,8 +146,10 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
                             text_mix=text_mix, chat_mix=chat_mix,
                             chat_max_bytes=chat_max_bytes)
 
+    micro = max(1, min(preset.micro_batch, preset.batch_size))
     tcfg = TrainConfig(
-        steps=steps, batch_size=preset.batch_size, lr=preset.lr, seed=seed,
+        steps=steps, batch_size=micro, accumulate=math.ceil(preset.batch_size / micro),
+        lr=preset.lr, seed=seed,
         optimizer=preset.optimizer, schedule=preset.schedule, ema_decay=preset.ema_decay,
         loss_balance=preset.loss_balance, max_length=min(preset.window, cfg.max_seq_len),
         log_every=max(steps // 100, 1), label=preset.name, warmup_ratio=0.02,

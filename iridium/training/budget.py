@@ -57,7 +57,7 @@ REFERENCE_RATIOS: dict[str, float] = {
 #: of natural language a language model could learn prose from. Everything not
 #: listed is a synthetic structured family: valuable for what it teaches, and
 #: no substitute for text when the complaint is "it does not talk properly".
-NATURAL_LANGUAGE_FAMILIES = frozenset({"text_lm", "chat"})
+NATURAL_LANGUAGE_FAMILIES = frozenset({"text_lm", "chat", "tools"})
 
 
 @dataclass(frozen=True)

@@ -46,6 +46,24 @@ much has actually been established. **Status: verified in theory, untrained.**
   loading; config round-trips dropped tokenizer fields; M-RoPE failed on the
   meta device; the T4 materialised the full attention score matrix.
 
+### Found by a CPU smoke run of chat-34m (30 steps, 2 rounds)
+- Chat sources underfilled and aborted the run; they now top up from each other.
+- Chat data and chat sessions were byte-encoded under a subword preset, which
+  overflowed the window; the tokenizer now flows through data, chat and CLI.
+- Streaming Gutenberg peaked near 12 GB of host RAM (out of default mixes now);
+  OpenR1 read unused columns (~4 GB, now ~0.7 GB).
+- A 32 x 512 batch did not fit in memory; presets now use micro-batch 8 with
+  accumulation, and CPU/ROCm out-of-memory errors trigger the halving retry.
+- Result: loss 9.05 -> 7.2 (ln 8192 = 9.01 at init); the checkpoint loads in
+  `iridium chat` and decodes through its own tokenizer. A pipeline check, not
+  a quality result.
+
+### Data
+- Chat: smol-smoltalk, OpenR1-Math solutions, Dolly, OASST by default;
+  UltraChat and Tulu 3 opt-in (`--max-data`). Text: Cosmopedia stories and
+  textbooks, FineMath. Tools: glaive and Hermes function calling (Apache 2.0)
+  plus exactly graded synthetic tasks. Every source records its licence.
+
 ### Packaging
 - `pyproject.toml` (private: no licence, `Private :: Do Not Upload`),
   `iridium.__version__`, a CPU CI workflow, a docs index and a free-tier

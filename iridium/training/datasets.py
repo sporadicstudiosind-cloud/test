@@ -124,12 +124,13 @@ def build_corpus(
     rather than leaving it to be discovered from the model's output.
     """
     mixture = dict(DEFAULT_MIXTURE) if mixture is None else dict(mixture)
-    unknown = set(mixture) - set(GENERATORS) - {"text_lm", "chat"}
+    unknown = set(mixture) - set(GENERATORS) - {"text_lm", "chat", "tools"}
     if unknown:
         raise ValueError(f"unknown families in mixture: {sorted(unknown)}")
     quotas = allocate_mixture(n_items, mixture)
     n_text = quotas.pop("text_lm", 0)
     n_chat = quotas.pop("chat", 0)
+    n_tools = quotas.pop("tools", 0)
     rng = np.random.default_rng(seed)
     items: list[Item] = []
     if n_text:
@@ -148,6 +149,16 @@ def build_corpus(
         if len(chat) != n_chat:
             raise RuntimeError(f"chat source returned {len(chat)}/{n_chat} requested items")
         items.extend(chat)
+    if n_tools:
+        from ..data.tool_corpus import tool_items
+        # Over-draw, then keep what fits the window: a call cut off mid-JSON
+        # would teach malformed calls, and one with no targets stops training.
+        tools = tool_items(n_tools + n_tools // 2 + 8, seed=seed, split=split,
+                           tokenizer=tokenizer, max_bytes=chat_max_bytes)
+        tools = [it for it in tools if len(it.sample) <= text_window][:n_tools]
+        if len(tools) != n_tools:
+            raise RuntimeError(f"tool source returned {len(tools)}/{n_tools} requested items")
+        items.extend(tools)
     for family, count in sorted(quotas.items()):
         for _ in range(count):
             items.append(make_item(family, rng, split))
