@@ -46,6 +46,11 @@ def describe(preset: Preset) -> str:
     for tier, spec in FREE_TIERS.items():
         lines.append(f"  est.      {spec['label']:<24} {estimate_hours(preset, tier):8.1f} h "
                      f"({spec['quota']})")
+    from ..presets import reference_hparams
+    ref = reference_hparams(preset)
+    lines.append(f"  reference DeepSeek-LLM fit for this compute: lr {ref['lr']:.2g}, batch "
+                 f"{ref['batch_tokens'] / 1e3:,.0f}k tokens (preset: lr {preset.lr:g}, "
+                 f"{preset.batch_size * preset.window / 1e3:,.0f}k)")
     if preset.notes:
         lines.append(f"  note      {preset.notes}")
     return "\n".join(lines)
@@ -168,6 +173,7 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
         optimizer=preset.optimizer, schedule=preset.schedule, ema_decay=preset.ema_decay,
         loss_balance=preset.loss_balance, max_length=min(preset.window, cfg.max_seq_len),
         log_every=max(steps // 100, 1), label=preset.name, warmup_ratio=0.02,
+        eval_every=max(steps // 20, 1) if shard_dir is not None else 0,
     )
     out_dir = Path(out) / preset.name
     if shard_dir is not None:
@@ -178,7 +184,12 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
         corpus = MixedCorpus.build(allocate_mixture(steps * preset.batch_size, preset.mixture),
                                    shard_dir, seed=seed)
         corpus_for = lambda r: corpus  # noqa: E731
+    on_eval = None
+    if shard_dir is not None:
+        on_eval = held_out_evaluator(shard_dir, cfg, info.device, micro, preset.window)
     trainer = Trainer(model, corpus_for(0), tcfg, out_dir=out_dir, device=info.device)
+    if on_eval is not None:
+        on_eval.model = trainer.model
     start_round = 0
     if resume:
         trainer.resume(resume)
@@ -192,7 +203,7 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
         if r > start_round and shard_dir is None:
             trainer.set_corpus(corpus_for(r))
         until = steps if r == rounds - 1 else (r + 1) * steps // rounds
-        trainer.train(until=until)
+        trainer.train(until=until, on_eval=on_eval)
         path = trainer.save(f"round{r}", extra={"preset": preset.name, "round": r,
                                                 "tokenizer": manifest, "sources": sources})
         print(f"round {r + 1}/{rounds} done at step {trainer.completed_steps}: {path}",
@@ -203,3 +214,49 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
         {"preset": preset.name, "steps": steps, "rounds": rounds, "status": preset.status,
          "trained": True, "tokenizer": manifest, "sources": sources}, indent=2), encoding="utf-8")
     return final or path
+
+
+def held_out_evaluator(shard_dir, cfg, device, batch_size: int, window: int,
+                       max_batches: int = 16):
+    """Validation loss and bits per byte on the held-out shards, or ``None``.
+
+    Bits per byte, not loss per token, is the number to compare: it does not
+    depend on the tokenizer, so a 8k- and a 32k-vocabulary run (or a byte-level
+    one) are on the same scale. ``bpb = loss_per_token / ln 2 * tokens / bytes``
+    with tokens and bytes counted over the held-out text when it was written.
+    """
+    import torch
+
+    from ..data.shards import MixedCorpus, Shard
+    from .datasets import BatchLoader
+
+    prepared = json.loads((Path(shard_dir) / "prepared.json").read_text())
+    held = prepared.get("held_out") or {}
+    if not held:
+        return None
+    loaders = {}
+    for family, meta in held.items():
+        n = len(Shard(Path(shard_dir) / f"{family}-test"))
+        corpus = MixedCorpus.build({family: n}, shard_dir, split="test")
+        loaders[family] = (BatchLoader(corpus, cfg.codecs, batch_size, seed=0, device=device,
+                                       max_length=window),
+                           meta.get("text_tokens", 0) / max(meta.get("utf8_bytes", 1), 1))
+
+    @torch.no_grad()
+    def evaluate(step: int) -> dict:
+        out = {}
+        for family, (loader, tokens_per_byte) in loaders.items():
+            total, count = 0.0, 0
+            for i, (batch, _) in enumerate(loader.batches()):
+                if i >= max_batches:
+                    break
+                losses, _ = evaluate.model.losses(batch)
+                total += float(losses["text"])
+                count += 1
+            loss = total / max(count, 1)
+            out[f"val_{family}_loss"] = round(loss, 4)
+            if tokens_per_byte:
+                out[f"val_{family}_bpb"] = round(loss / math.log(2) * tokens_per_byte, 4)
+        return out
+
+    return evaluate

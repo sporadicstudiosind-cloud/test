@@ -47,7 +47,8 @@ _TALK_MIX = {"fineweb_edu": 0.35, "wikipedia": 0.25, "cosmopedia_stories": 0.20,
 _STEM_MIX = {"finemath": 0.35, "openwebmath": 0.15, "fineweb_edu": 0.25,
              "cosmopedia_textbooks": 0.15, "wikipedia": 0.10}
 
-__all__ = ["Preset", "PRESETS", "get_preset", "with_tokens", "TOKEN_BUDGETS", "FREE_TIERS", "estimate_hours", "preset_table"]
+__all__ = ["Preset", "PRESETS", "get_preset", "with_tokens", "with_reference_hparams",
+           "reference_hparams", "TOKEN_BUDGETS", "FREE_TIERS", "estimate_hours", "preset_table"]
 
 
 #: Published peak dense throughput (FLOP/s) and memory of free-tier devices.
@@ -267,6 +268,35 @@ def with_tokens(preset: Preset, tokens: int) -> Preset:
     steps = math.ceil(tokens / (preset.batch_size * preset.window))
     rounds = max(1, min(steps, math.ceil(preset.rounds * steps / preset.steps)))
     return replace(preset, steps=steps, rounds=rounds)
+
+
+def reference_hparams(preset: Preset) -> dict:
+    """DeepSeek LLM's fitted compute-optimal learning rate and batch size.
+
+    ``lr = 0.3118 C^-0.125`` and ``B = 0.2920 C^0.3271`` tokens, with ``C`` the
+    training compute in FLOPs (DeepSeek-AI, 2024, arXiv:2401.02954). Fitted on
+    their dense AdamW models, so for a routed, pondering model it is a
+    reference point, not a prescription: a preset far from it (say 3x) is
+    worth a short sweep, not an automatic override.
+    """
+    compute = 6.0 * preset.config.n_params * preset.tokens
+    return {"lr": 0.3118 * compute ** -0.125, "batch_tokens": 0.2920 * compute ** 0.3271,
+            "compute_flops": compute}
+
+
+def with_reference_hparams(preset: Preset) -> Preset:
+    """The preset at DeepSeek's fitted lr and batch, same token budget.
+
+    The larger batch comes from gradient accumulation (``micro_batch`` is
+    unchanged), so memory is unchanged; the cost is fewer optimizer steps.
+    """
+    import math
+    ref = reference_hparams(preset)
+    micro = max(1, min(preset.micro_batch, preset.batch_size))
+    batch = max(micro, round(ref["batch_tokens"] / preset.window / micro) * micro)
+    steps = max(1, math.ceil(preset.tokens / (batch * preset.window)))
+    return replace(preset, batch_size=batch, steps=steps, lr=ref["lr"],
+                   rounds=max(1, min(preset.rounds, steps)))
 
 
 def estimate_hours(preset: Preset, tier: str, tokens: Optional[int] = None) -> float:

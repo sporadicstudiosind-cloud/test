@@ -76,6 +76,10 @@ class ShardWriter:
         self._mask.write((np.concatenate(mask) if mask else np.zeros(0, np.uint8)).tobytes())
         self._offsets.append(self._offsets[-1] + flat.size)
 
+    @property
+    def n_items(self) -> int:
+        return len(self._offsets) - 1
+
     def add_ids(self, ids: np.ndarray, mask: np.ndarray) -> None:
         """Append one item given directly as model ids and a target mask."""
         ids = np.asarray(ids, dtype=np.int64)
@@ -94,6 +98,56 @@ class ShardWriter:
                 "vocab_rows": self._vocab_rows, "format": 1}
         self.prefix.with_suffix(".json").write_text(json.dumps(meta, indent=2))
         return meta
+
+
+class PackingWriter:
+    """Greedily pack short items (conversations) into windows before writing.
+
+    A 300-token conversation alone in a 1024-token window wastes 70% of the
+    step on padding. Packing concatenates items -- each already starts with its
+    own BOS -- until the next would overflow the window. Items still attend to
+    earlier items in the same window (no intra-document mask yet; GPT-3 and
+    Llama 1/2 trained this way, Llama 3 masks). Exact duplicates are dropped by
+    content hash: repeated conversations are memorised, not learned from.
+    """
+
+    def __init__(self, writer: ShardWriter, window: int) -> None:
+        self.writer, self.window = writer, window
+        self._ids: list[np.ndarray] = []
+        self._mask: list[np.ndarray] = []
+        self._len = 0
+        self._seen: set[bytes] = set()
+        self.duplicates = 0
+        self.items = 0
+
+    def add(self, sample: Sample) -> bool:
+        ids = np.concatenate([np.asarray(s.payload, np.int64) for s in sample.spans])
+        key = zlib.crc32(ids.tobytes()).to_bytes(4, "little") + len(ids).to_bytes(4, "little")
+        if key in self._seen:
+            self.duplicates += 1
+            return False
+        self._seen.add(key)
+        if len(ids) > self.window:
+            return False
+        mask = np.concatenate([np.full(len(s.payload), bool(s.supervised), np.uint8)
+                               for s in sample.spans])
+        if self._len + len(ids) > self.window:
+            self.flush()
+        self._ids.append(ids)
+        self._mask.append(mask)
+        self._len += len(ids)
+        self.items += 1
+        return True
+
+    def flush(self) -> None:
+        if self._ids:
+            self.writer.add_ids(np.concatenate(self._ids), np.concatenate(self._mask))
+        self._ids, self._mask, self._len = [], [], 0
+
+    def close(self) -> dict:
+        self.flush()
+        self.writer.meta.update({"packed_items": self.items, "duplicates_dropped": self.duplicates})
+        return self.writer.close()
 
 
 def write_items(prefix, family: str, vocab_rows: int, samples: Iterable[Sample],

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import math
+
+import numpy as np
 import sys
 import time
 from pathlib import Path
@@ -63,57 +65,105 @@ def prepare(preset: Preset, out: str | Path = "data", *, tokens: Optional[int] =
     base_meta = {"preset": preset.name, "split": split, "window": preset.window,
                  "tokenizer": manifest}
 
+    ctx = dict(out_dir=out_dir, rows=rows, tokenizer=tokenizer, window=preset.window,
+               text_mix=text_mix, chat_mix=chat_mix, chat_bytes=chat_bytes, seed=seed,
+               base_meta=base_meta, max_data=max_data)
     written = {}
     for family, need in plan(preset, tokens).items():
-        prefix = out_dir / f"{family}-{split}"
-        started = time.time()
-        if family == "text_lm":
-            meta = {**base_meta, "sources": [SOURCES[k].as_dict() for k in text_mix]}
-            w = ShardWriter(prefix, family, rows, meta)
-            done = 0
-            for ids, mask in iter_text_windows(text_mix, preset.window, tokenizer,
-                                               seed=seed, split=split, limit=need):
-                w.add_ids(ids, mask)
-                done += 1
-                if done % _CHUNK == 0:
-                    _progress(family, done, need, started)
-                if done >= need:
-                    break
-        elif family == "chat":
-            meta = {**base_meta, "sources": [CHAT_SOURCES[k].as_dict() for k in chat_mix],
-                    "max_data": max_data}
-            w = ShardWriter(prefix, family, rows, meta)
-            done = 0
-            for it in iter_chat_items(chat_mix, seed=seed, max_bytes=chat_bytes, split=split,
-                                      tokenizer=tokenizer, max_tokens=preset.window):
-                w.add(it.sample)
-                done += 1
-                if done % _CHUNK == 0:
-                    _progress(family, done, need, started)
-                if done >= need:
-                    break
-            if done < need:
-                print(f"note: chat sources hold {done:,} fitting conversations, fewer than "
-                      f"the {need:,} planned; training will repeat them "
-                      f"({need / max(done, 1):.1f} epochs)", file=sys.stderr)
-        else:  # tools
-            from ..data.tool_corpus import tool_items
-            w = ShardWriter(prefix, family, rows, base_meta)
-            done, k = 0, 0
-            while done < need:
-                n = min(_CHUNK, need - done)
-                for it in tool_items(n + n // 2 + 8, seed=seed + k, split=split,
-                                     tokenizer=tokenizer, max_bytes=chat_bytes):
-                    if len(it.sample) <= preset.window and done < need:
-                        w.add(it.sample)
-                        done += 1
-                k += 1
-                _progress(family, done, need, started)
-        written[family] = w.close()
+        written[family] = _write_family(family, split, need, **ctx)
+    # A held-out split for validation loss and bits per byte: disjoint from
+    # train by the sources' own content-hash split, small enough to evaluate
+    # often. Tools are exactly graded elsewhere, so only language is held out.
+    held_out = {}
+    for family, need in plan(preset, tokens).items():
+        if family in ("text_lm", "chat"):
+            held_out[family] = _write_family(family, "test", min(max(need // 200, 64), 1024),
+                                             **ctx)
     (out_dir / "prepared.json").write_text(json.dumps(
         {"preset": preset.name, "split": split, "tokens_planned": tokens or preset.tokens,
-         "families": written, "id_offset": TEXT_ID_OFFSET}, indent=2, default=str))
+         "families": written, "held_out": held_out, "id_offset": TEXT_ID_OFFSET},
+        indent=2, default=str))
     return out_dir
+
+
+def _write_family(family, split, need, *, out_dir, rows, tokenizer, window, text_mix,
+                  chat_mix, chat_bytes, seed, base_meta, max_data) -> dict:
+    from ..config import TEXT_ID_OFFSET
+    from ..data.chat_corpus import CHAT_SOURCES, iter_chat_items
+    from ..data.shards import PackingWriter, ShardWriter
+    from ..data.text_corpus import SOURCES, iter_text_windows
+    from ..data.tokenization import as_tokenizer
+
+    tok = as_tokenizer(tokenizer)
+    prefix = out_dir / f"{family}-{split}"
+    started = time.time()
+    meta = {**base_meta, "split": split}
+    measure = split != "train"           # count UTF-8 bytes for bits-per-byte
+    text_tokens = n_bytes = 0
+
+    def account(ids):
+        nonlocal text_tokens, n_bytes
+        if measure:
+            t = [int(i) - TEXT_ID_OFFSET for i in ids if i >= TEXT_ID_OFFSET]
+            text_tokens += len(t)
+            n_bytes += len(tok.decode(t).encode("utf-8"))
+
+    if family == "text_lm":
+        meta["sources"] = [SOURCES[k].as_dict() for k in text_mix]
+        w = ShardWriter(prefix, family, rows, meta)
+        seen: set[int] = set()
+        dropped = 0
+        for ids, mask in iter_text_windows(text_mix, window, tokenizer, seed=seed,
+                                           split=split, limit=need + need // 50 + 8):
+            h = hash(ids.tobytes())       # exact duplicate windows (mirrored pages)
+            if h in seen:
+                dropped += 1
+                continue
+            seen.add(h)
+            w.add_ids(ids, mask)
+            account(ids)
+            if w.n_items % _CHUNK == 0:
+                _progress(family, w.n_items, need, started)
+            if w.n_items >= need:
+                break
+        w.meta["duplicates_dropped"] = dropped
+        inner = w
+    else:
+        if family == "chat":
+            meta.update(sources=[CHAT_SOURCES[k].as_dict() for k in chat_mix], max_data=max_data)
+        inner = ShardWriter(prefix, family, rows, meta)
+        w = PackingWriter(inner, window)
+
+        def stream():
+            if family == "chat":
+                yield from iter_chat_items(chat_mix, seed=seed, max_bytes=chat_bytes, split=split,
+                                           tokenizer=tokenizer, max_tokens=window)
+                return
+            from ..data.tool_corpus import tool_items
+            k = 0
+            while True:
+                batch = tool_items(_CHUNK, seed=seed + k, split=split, tokenizer=tokenizer,
+                                   max_bytes=chat_bytes)
+                if not batch:
+                    return
+                yield from batch
+                k += 1
+
+        for it in stream():
+            if w.add(it.sample):
+                account(np.concatenate([s.payload for s in it.sample.spans]))
+            if inner.n_items and inner.n_items % _CHUNK == 0:
+                _progress(family, inner.n_items, need, started)
+            if inner.n_items >= need:
+                break
+        if inner.n_items < need:
+            print(f"note: {family} sources filled {inner.n_items:,} of {need:,} planned "
+                  f"windows; training repeats them ({need / max(inner.n_items, 1):.1f} epochs)",
+                  file=sys.stderr)
+    if measure:
+        (w if family == "text_lm" else inner).meta.update(
+            text_tokens=text_tokens, utf8_bytes=n_bytes)
+    return w.close()
 
 
 def _progress(family: str, done: int, need: int, started: float) -> None:

@@ -74,6 +74,18 @@ index and are never stored.
 **Budgets.** `--tokens 2e9` or `--tokens-per-param 20` (Chinchilla) resizes
 any preset's run; `data prepare --plan` prints how many items that needs.
 
+**Scoreboard.** With `--data`, training evaluates the held-out shards every
+5% of steps and logs `val_*_loss` and `val_*_bpb` (bits per byte: loss
+converted by the held-out text's own bytes-per-token, so vocabularies of any
+size are comparable).
+
+**Learning rate and batch.** `describe` prints DeepSeek LLM's fitted optimum
+for the preset's compute (`lr = 0.3118 C^-0.125`, `B = 0.2920 C^0.3271`
+tokens). The presets sit at 6-10x smaller batches and 2-3x lower learning
+rates -- consistent with each other, but not the fit. `--hparams deepseek`
+runs the fit instead (same tokens, larger batch by accumulation, no extra
+memory); comparing the two on bits per byte is the cheapest useful sweep.
+
 **Optimizers.** `eager_adamw` (fp32, 16 bytes/param of training state),
 `adamw8` (8-bit block-wise moments, ~10 bytes/param, runs on every backend:
 what lets `1b` fit a 16 GB device), and `muon` (~12 bytes/param).

@@ -15,6 +15,13 @@ much has actually been established. **Status: verified in theory, untrained.**
   no longer scales with the token budget. Sources stream one at a time.
 - `adamw8`: 8-bit block-wise AdamW in plain PyTorch (CUDA, ROCm, XLA, CPU).
 - `--tokens` / `--tokens-per-param` on `train` and `data prepare`.
+- Held-out shards and validation **bits per byte** every 5% of training
+  (tokenizer-independent, so runs with different vocabularies compare).
+- Chat and tool conversations are packed into windows (+31% real tokens per
+  chat window at 512; more at longer windows); exact duplicates are dropped.
+  No intra-document attention mask yet (GPT-3/Llama 2 style packing).
+- `--hparams deepseek`: lr and batch from DeepSeek LLM's compute-optimal fit,
+  for a one-flag comparison against the preset's own values.
 - Size ladder presets `50m`, `100m`, `500m`, `1b` (8-bit, fits 16 GB), `2b`, `4b`.
 
 ### Priorities, as presets

@@ -78,6 +78,26 @@ def test_prepare_then_train_from_shards_offline(tmp_path, monkeypatch):
     monkeypatch.setattr(run_preset, "get_preset", lambda name: preset, raising=False)
     out = prep.prepare(preset, tmp_path / "data")
     assert (out / "text_lm-train.bin").exists() and (out / "chat-train.idx").exists()
+    assert (out / "text_lm-test.bin").exists() and (out / "chat-test.bin").exists()
+    preset = dataclasses.replace(preset, steps=4)
     final = run_preset.train_preset(preset, device="cpu", out=str(tmp_path / "runs"),
                                     data=str(tmp_path / "data"))
     assert final.exists()
+    import torch
+    history = torch.load(final, weights_only=False)["history"]
+    evals = [h["eval"] for h in history if "eval" in h]
+    assert evals and "val_text_lm_bpb" in evals[-1] and "val_chat_loss" in evals[-1]
+
+
+def test_packing_fills_windows_and_drops_duplicates(tmp_path):
+    from iridium.data.shards import PackingWriter, ShardWriter
+
+    inner = ShardWriter(tmp_path / "chat-train", "chat", 400)
+    w = PackingWriter(inner, window=64)
+    for i in range(30):
+        w.add(_conv(i % 20))              # 10 exact repeats
+    meta = w.close()
+    assert meta["duplicates_dropped"] == 10 and meta["packed_items"] == 20
+    shard = Shard(tmp_path / "chat-train")
+    lengths = np.diff(shard.offsets)
+    assert len(shard) < 20 and lengths.max() <= 64
