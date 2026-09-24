@@ -84,3 +84,26 @@ def test_savings_on_a_mostly_static_stream():
         g[:, :model.cfg.codecs.image_patch, :model.cfg.codecs.image_patch] += 0.1 * i  # cursor blink
         live.observe(g)
     assert live.stats.savings > 0.8
+
+
+def test_keyframes_periodic_on_demand_and_on_scene_change_supersede_old_frames():
+    model = _model()
+    cfg = model.cfg
+    p = cfg.codecs.image_patch
+    live = LiveSession(model, keyframe_seconds=10.0)
+    live.hear("task")
+    f = _frame(cfg)
+    assert live.observe(f, now=0.0) == 16                 # first frame: keyframe
+    g = f.copy(); g[:, :p, :p] += 0.5
+    assert live.observe(g, now=1.0) == 1                  # delta
+    assert live.observe(g, now=11.0) == 16                # 10 s elapsed: periodic keyframe
+    # The keyframe superseded both earlier frames: only text + this keyframe remain.
+    kinds = [e.kind for e in live.ledger]
+    assert kinds.count("keyframe") == 1 and "frame" not in kinds
+    assert live._length() == live.ledger[0].length + 16
+    live.refresh()
+    assert live.observe(g, now=12.0) == 16                # asked for a full screenshot
+    h = np.random.default_rng(9).random(f.shape)
+    assert live.observe(h, now=13.0) == 16                # most of the screen changed
+    assert live.stats.keyframes == 4
+    assert isinstance(live.think(2), str)

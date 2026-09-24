@@ -57,12 +57,19 @@ class FrameDelta:
     frame every N frames so accumulated sub-threshold drift is corrected.
     """
 
-    def __init__(self, patch: int, threshold: float = 0.02, keyframe_every: int = 0) -> None:
+    def __init__(self, patch: int, threshold: float = 0.02, keyframe_every: int = 0,
+                 scene_change: float = 0.5) -> None:
         self.patch = patch
         self.threshold = threshold
         self.keyframe_every = keyframe_every
+        #: Fraction of changed patches above which the whole frame is sent as
+        #: a keyframe: past about half, a delta costs nearly a full frame and
+        #: leaves a fragmented picture (a new window, a page load).
+        self.scene_change = scene_change
         self._last: Optional[np.ndarray] = None
         self.frames = 0
+        self.force_next = False
+        self.last_was_key = False
 
     def patches(self, frame: np.ndarray) -> np.ndarray:
         c, h, w = frame.shape
@@ -75,11 +82,15 @@ class FrameDelta:
     def __call__(self, frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """``(features [n, C*p*p], yx [n, 2])`` for the patches to send."""
         cur = self.patches(np.asarray(frame, dtype=np.float32))
-        key = self._last is None or (self.keyframe_every and self.frames % self.keyframe_every == 0)
+        key = (self._last is None or self.force_next
+               or bool(self.keyframe_every and self.frames % self.keyframe_every == 0))
+        if not key:
+            changed = np.abs(cur - self._last).mean(axis=-1) > self.threshold
+            key = changed.mean() >= self.scene_change
         if key:
             changed = np.ones(cur.shape[:2], dtype=bool)
-        else:
-            changed = np.abs(cur - self._last).mean(axis=-1) > self.threshold
+        self.force_next = False
+        self.last_was_key = key
         self._last = cur
         self.frames += 1
         ys, xs = np.nonzero(changed)
@@ -88,7 +99,7 @@ class FrameDelta:
 
 @dataclass
 class _Entry:
-    kind: str          # "frame" | "text" | "generated"
+    kind: str          # "frame" (delta) | "keyframe" | "text" | "generated"
     start: int         # cache index at insertion
     length: int
 
@@ -99,6 +110,7 @@ class LiveStats:
     tokens_sent: int = 0
     tokens_full_frames: int = 0
     evicted: int = 0
+    keyframes: int = 0
 
     @property
     def savings(self) -> float:
@@ -115,11 +127,21 @@ class LiveSession:
 
     def __init__(self, model, tokenizer=None, threshold: float = 0.02,
                  max_cache_tokens: Optional[int] = None, keyframe_every: int = 0,
-                 n_loops: int = 1) -> None:
+                 n_loops: int = 1, keyframe_seconds: Optional[float] = None,
+                 scene_change: float = 0.5, supersede: bool = True) -> None:
         self.model = model.eval()
         self.cfg = model.cfg
         self.tokenizer = tokenizer
-        self.delta = FrameDelta(self.cfg.codecs.image_patch, threshold, keyframe_every)
+        self.delta = FrameDelta(self.cfg.codecs.image_patch, threshold, keyframe_every,
+                                scene_change)
+        #: Wall-clock keyframe interval (the "periodic screenshot"), on top of
+        #: the frame-count interval; ``observe(frame, now=...)`` supplies time.
+        self.keyframe_seconds = keyframe_seconds
+        #: A keyframe restates the whole screen, so every earlier frame token
+        #: is redundant for "what is on screen now"; drop them from attention
+        #: (DeltaNet state still remembers the history).
+        self.supersede = supersede
+        self._last_key_time: Optional[float] = None
         self.dims = continuous_dims(self.cfg.codecs)
         self.max_cache_tokens = max_cache_tokens
         self.n_loops = n_loops
@@ -132,9 +154,30 @@ class LiveSession:
 
     # -- input ----------------------------------------------------------------
 
-    def observe(self, frame: np.ndarray) -> int:
-        """Feed one frame; returns how many tokens it cost (0 if nothing changed)."""
+    def refresh(self) -> None:
+        """Ask for a full screenshot on the next frame (the agent's own call,
+        e.g. before an irreversible click, or when it is unsure what it sees)."""
+        self.delta.force_next = True
+
+    def observe(self, frame: np.ndarray, now: Optional[float] = None) -> int:
+        """Feed one frame; returns how many tokens it cost (0 if nothing changed).
+
+        Frames arrive as deltas, with a full keyframe when: it is the first
+        frame, ``refresh()`` was called, ``keyframe_every`` frames or
+        ``keyframe_seconds`` have passed, or most of the screen changed.
+        """
+        if (self.keyframe_seconds is not None and now is not None
+                and (self._last_key_time is None
+                     or now - self._last_key_time >= self.keyframe_seconds)):
+            self.delta.force_next = True
         feats, yx = self.delta(frame)
+        is_key = self.delta.last_was_key
+        if is_key:
+            self.stats.keyframes += 1
+            if now is not None:
+                self._last_key_time = now
+            if self.supersede:
+                self._drop(lambda e: e.kind in ("frame", "keyframe"))
         per_frame = int(np.prod(self.delta._last.shape[:2]))
         self.stats.frames += 1
         self.stats.tokens_full_frames += per_frame
@@ -144,7 +187,7 @@ class LiveSession:
         # from the span start, so M-RoPE sees "same instant, this location".
         coords = np.concatenate([np.zeros((len(yx), 1), np.int64), yx], axis=1)
         span = Span("image", feats, supervised=False, atomic=False, meta={"coords": coords})
-        self._forward(Sample([span]), "frame")
+        self._forward(Sample([span]), "keyframe" if is_key else "frame")
         self.stats.tokens_sent += len(feats)
         return len(feats)
 
@@ -212,20 +255,30 @@ class LiveSession:
         return int(self.cache.get(("stream", "n"), 0))
 
     def _evict(self) -> None:
+        """Budget eviction: oldest deltas first, then old keyframes; never the
+        latest keyframe, never text."""
         budget = self.max_cache_tokens
         if budget is None or self._length() <= budget:
             return
-        total = self._length()
-        drop = np.zeros(total, dtype=bool)
-        excess = total - budget
-        for entry in self.ledger:
+        excess = self._length() - budget
+        frames = [e for e in self.ledger if e.kind == "frame" and e.length]
+        keys = [e for e in self.ledger if e.kind == "keyframe" and e.length][:-1]
+        chosen = []
+        for e in frames + keys:
             if excess <= 0:
                 break
-            if entry.kind != "frame" or entry.length == 0:
-                continue
-            drop[entry.start:entry.start + entry.length] = True
-            excess -= entry.length
-            entry.length = 0
+            chosen.append(e)
+            excess -= e.length
+        ids = {id(e) for e in chosen}
+        self._drop(lambda e: id(e) in ids)
+
+    def _drop(self, predicate) -> None:
+        total = self._length()
+        drop = np.zeros(total, dtype=bool)
+        for entry in self.ledger:
+            if entry.length and predicate(entry):
+                drop[entry.start:entry.start + entry.length] = True
+                entry.length = 0
         if not drop.any():
             return
         keep_idx = torch.from_numpy(np.flatnonzero(~drop))
@@ -234,12 +287,11 @@ class LiveSession:
         kept = int((~drop).sum())
         self.cache[("stream", "n")] = kept
         self.stats.evicted += int(drop.sum())
-        # Re-index the ledger to the compacted cache.
         new_start = np.cumsum(~drop) - 1
         live = []
         for e in self.ledger:
             if e.length:
-                e.start = int(new_start[e.start]) if e.start < total else kept
+                e.start = int(new_start[e.start])
                 live.append(e)
         self.ledger = live
 
