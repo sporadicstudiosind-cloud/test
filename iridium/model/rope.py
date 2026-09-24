@@ -312,7 +312,16 @@ class RotaryEmbedding(torch.nn.Module):
             self._table_cache.move_to_end(key)
             return cached[1], cached[2]
 
-        inv_freq = self.inv_freq.to(device=positions.device, dtype=torch.float32)
+        # Follow the table's own precision rather than pinning fp32. The
+        # buffer is cast with the model, so an fp64 model has an fp64
+        # ``inv_freq``; forcing fp32 here put fp32-rounded angles into every
+        # position of every layer, and an angle quantised differently on two
+        # code paths is a parity failure with no cache defect behind it. Half
+        # precision still widens, which was the original intent.
+        work_dtype = (self.inv_freq.dtype
+                      if self.inv_freq.dtype in (torch.float32, torch.float64)
+                      else torch.float32)
+        inv_freq = self.inv_freq.to(device=positions.device, dtype=work_dtype)
 
         if self.sections is not None:
             n_axes = len(self.sections)
@@ -326,7 +335,7 @@ class RotaryEmbedding(torch.nn.Module):
                     f"sections={self.sections!r}, got shape {tuple(positions.shape)}"
                 )
             axis_id = self.axis_id.to(positions.device)
-            per_freq_coord = coords.to(torch.float32).index_select(-1, axis_id)  # [B, T, D/2]
+            per_freq_coord = coords.to(work_dtype).index_select(-1, axis_id)  # [B, T, D/2]
             if self.scaling is not None and self.scaling["type"] == "linear":
                 per_freq_coord = per_freq_coord / float(self.scaling["factor"])
             freqs = per_freq_coord * inv_freq
@@ -336,7 +345,7 @@ class RotaryEmbedding(torch.nn.Module):
                     f"positions must be [B, T] when sections is None, got shape "
                     f"{tuple(positions.shape)}"
                 )
-            pos = positions.to(torch.float32)
+            pos = positions.to(work_dtype)
             if self.scaling is not None and self.scaling["type"] == "linear":
                 pos = pos / float(self.scaling["factor"])
             freqs = pos.unsqueeze(-1) * inv_freq
