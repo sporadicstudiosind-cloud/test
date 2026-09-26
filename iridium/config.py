@@ -485,6 +485,11 @@ class RouterConfig:
     balance_alpha: float = 1e-2
     z_alpha: float = 1e-3
     max_loops: int = 3
+    #: Inference-only headroom past ``max_loops``. The ponder loop reuses the
+    #: same weights every pass, so extra passes cost compute, not parameters;
+    #: loops past the trained cap reuse the last loop embedding. Quality past
+    #: the cap is extrapolation -- measure it, do not assume it.
+    extra_loops: int = 10
     loop_entry: int = 0            # core layer index re-entered on a ponder loop
     ponder_prior_p_stop: float = 0.4
     ponder_beta: float = 1e-2
@@ -493,11 +498,18 @@ class RouterConfig:
     capacity_factor: float = 0.0   # 0 disables token dropping (see docs)
     router_temperature: float = 1.0
 
+    @property
+    def loop_ceiling(self) -> int:
+        """Most ponder loops inference may run (trained cap + headroom)."""
+        return self.max_loops + self.extra_loops
+
     def __post_init__(self) -> None:
         if self.top_k < 1:
             raise ConfigError("top_k must be >= 1")
         if self.max_loops < 1:
             raise ConfigError("max_loops must be >= 1")
+        if self.extra_loops < 0:
+            raise ConfigError("extra_loops must be >= 0")
         if not 0.0 < self.ponder_prior_p_stop <= 1.0:
             raise ConfigError("ponder_prior_p_stop must lie in (0, 1]")
 

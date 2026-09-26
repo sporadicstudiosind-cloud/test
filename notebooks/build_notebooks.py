@@ -306,7 +306,7 @@ def train_cell() -> str:
     from iridium.training.run_preset import train_preset
 
     TOKENS = None         # e.g. 1e9 to override the preset's token budget
-    RESUME_FROM = ''      # e.g. str(OUT_DIR / preset.name / f'{preset.name}-round2.pt') after a restart
+    RESUME_FROM = 'auto'  # picks up the newest round in OUT_DIR/<preset>; '' forces a fresh run
     DATA_DIR = OUT_DIR / 'data'   # tokenized shards; prepare once, reuse across sessions
 
     if TOKENS:
@@ -589,7 +589,7 @@ def build_tpu() -> list[dict]:
 
     CONFIRM_TRAIN = False
     OUT_DIR = Path('/content/drive/MyDrive/iridium-runs') if Path('/content/drive').is_dir() else Path('runs')
-    RESUME_FROM = ''
+    RESUME_FROM = 'auto'
 
     if not CONFIRM_TRAIN:
         print('CONFIRM_TRAIN is False; not training. Set it to True and rerun this cell.')

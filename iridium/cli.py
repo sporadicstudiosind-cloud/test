@@ -222,6 +222,14 @@ def _terminal_text(value: str) -> str:
     return visible.encode(encoding, errors="backslashreplace").decode(encoding)
 
 
+def _thinking_from_args(args):
+    think = getattr(args, "think", None)
+    if think is None:
+        return None
+    from .runtime.thinking import ThinkingBudget
+    return ThinkingBudget(effort=args.effort, loops=think, spread=args.think_spread)
+
+
 def cmd_chat(args) -> int:
     """Chat with an actual small checkpoint, with honest provenance and limits."""
     from .runtime.chat import ChatSession
@@ -253,7 +261,7 @@ def cmd_chat(args) -> int:
     session = ChatSession(
         model, tokenizer=tokenizer, system=args.system, temperature=args.temperature, top_p=args.top_p,
         top_k=args.top_k, max_new_tokens=args.max_new_tokens, n_loops=loops,
-        seed=args.seed,
+        seed=args.seed, thinking=_thinking_from_args(args),
     )
     _chat_status(model, manifest, path, info)
 
@@ -376,6 +384,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top-p", type=float, default=0.92)
     p.add_argument("--top-k", type=int, default=0)
     p.add_argument("--n-loops", type=int, help="default: loop count recorded by the checkpoint")
+    p.add_argument("--think", type=int, default=None, metavar="N",
+                   help="base thinking loops; the model picks its own depth within N +- --think-spread")
+    p.add_argument("--think-spread", type=int, default=10)
+    p.add_argument("--effort", default="balanced",
+                   choices=["instant", "fast", "balanced", "deep", "max"],
+                   help="halting strictness used with --think")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--system", default=None, help="optional system message")
     p.set_defaults(func=cmd_chat)
@@ -391,7 +405,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", default=None, help="cpu | cuda | cuda:N (default: detect)")
     p.add_argument("--out", default="runs")
     p.add_argument("--init", default=None, help="start from a checkpoint (e.g. chat -> tools)")
-    p.add_argument("--resume", default=None, help="continue from a round checkpoint")
+    p.add_argument("--resume", default=None, help="continue from a round checkpoint, or 'auto' for the newest one in the run dir")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--dry-run", action="store_true",
                    help="build on the meta device, audit and estimate; no network, no training")

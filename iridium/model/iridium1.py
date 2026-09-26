@@ -207,14 +207,16 @@ class Iridium1(nn.Module):
         use_depth_cap: bool = False,
         embedded: Optional[torch.Tensor] = None,
         halt_threshold: Optional[float] = None,
+        cache_loops: Optional[int] = None,
     ) -> ModelOutput:
         if n_loops is None:
             n_loops = min(3, self.cfg.router.max_loops) if self.cfg.controller_mode else 1
         if n_loops < 1:
             raise ValueError("n_loops must be positive")
-        if n_loops > self.cfg.router.max_loops:
+        ceiling = self.cfg.router.max_loops if self.training else self.cfg.router.loop_ceiling
+        if n_loops > ceiling:
             raise ValueError(
-                f"n_loops {n_loops} exceeds max_loops {self.cfg.router.max_loops}"
+                f"n_loops {n_loops} exceeds {'max_loops' if self.training else 'loop_ceiling'} {ceiling}"
             )
 
         h = self.codecs.embed(batch, cache) if embedded is None else embedded
@@ -370,7 +372,7 @@ class Iridium1(nn.Module):
             halt_logits.append(self.core.halt_logit(h2))
             h = self.core.reinject(h2 + stack_out if self.cfg.controller_mode else h2, entry)
             if self.cfg.loop_identity:
-                h = h + self.router.loop_embed.weight[loop + 1]
+                h = h + self.router.loop_embed.weight[min(loop + 1, self.cfg.router.max_loops)]
             if (halt_threshold is not None and cache is not None and not self.training
                     and loop < n_loops - 1):
                 # Adaptive thinking: stop pondering once every real token in
@@ -391,9 +393,14 @@ class Iridium1(nn.Module):
                 prev_pick = now_pick
                 done = ((lam_now >= halt_threshold) & settled) | ~batch.valid
                 if bool(done.all()):
-                    _propagate_loop_cache(cache, loop, n_loops, t)
+                    _propagate_loop_cache(cache, loop, max(n_loops, cache_loops or 0), t)
                     stats["halted_at"] = loop + 1
                     break
+        else:
+            if cache is not None and cache_loops and cache_loops > n_loops:
+                # This step chose fewer loops than the prompt was read at;
+                # keep the deeper loops' caches aligned for later steps.
+                _propagate_loop_cache(cache, n_loops - 1, cache_loops, t)
 
         lam = torch.sigmoid(torch.stack(halt_logits, dim=-1).to(torch.float64 if h.dtype == torch.float64 else torch.float32))
         lam = torch.cat([lam[..., :-1], torch.ones_like(lam[..., -1:])], dim=-1)

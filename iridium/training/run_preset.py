@@ -74,6 +74,26 @@ def dry_run(preset: Preset) -> dict:
             "match": built == preset.config.n_params}
 
 
+def find_latest(out_dir: Path) -> Optional[str]:
+    """Newest usable checkpoint in ``out_dir`` (``latest.json``, else highest round)."""
+    out_dir = Path(out_dir)
+    pointer = out_dir / "latest.json"
+    if pointer.exists():
+        try:
+            path = out_dir / json.loads(pointer.read_text())["path"]
+            if path.exists() and path.stat().st_size:
+                return str(path)
+        except (ValueError, KeyError):
+            pass
+    import re
+    best = None
+    for path in out_dir.glob("*-round*.pt"):
+        m = re.search(r"-round(\d+)\.pt$", path.name)
+        if m and path.stat().st_size and (best is None or int(m.group(1)) > best[0]):
+            best = (int(m.group(1)), path)
+    return str(best[1]) if best else None
+
+
 def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optional[int] = None,
                  device: Optional[str] = None, out: str = "runs", init: Optional[str] = None,
                  resume: Optional[str] = None, seed: int = 0, max_data: bool = False,
@@ -191,6 +211,9 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
     if on_eval is not None:
         on_eval.model = trainer.model
     start_round = 0
+    if resume == "auto":
+        resume = find_latest(out_dir)
+        print(f"auto-resume: {resume or 'nothing to resume, starting fresh'}")
     if resume:
         trainer.resume(resume)
         start_round = min(rounds - 1, trainer.completed_steps * rounds // steps)

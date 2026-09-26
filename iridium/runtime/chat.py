@@ -187,6 +187,9 @@ class ChatSession:
     #: The checkpoint's subword tokenizer (``tokenizer_from_manifest``);
     #: ``None`` for byte-level models.
     tokenizer: object = None
+    #: Optional :class:`~iridium.runtime.thinking.ThinkingBudget`; with
+    #: ``loops=N`` the model thinks N +- spread loops, its own call per token.
+    thinking: object = None
 
     def __post_init__(self) -> None:
         if self.system:
@@ -225,6 +228,7 @@ class ChatSession:
             text_offset=TEXT_OFFSET,
             text_only=True,
             tokenizer=self.tokenizer,
+            thinking=self.thinking,
         )
         params.update(overrides)
 

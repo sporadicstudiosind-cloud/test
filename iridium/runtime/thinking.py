@@ -11,6 +11,10 @@ cap for each step from three signals:
 * **Speed requirement** -- an optional per-token latency target. A simple
   feedback controller lowers the threshold (think less) while steps run over
   the target and raises it back toward the effort level while they run under.
+* **Loops** -- optionally, a user-chosen base depth. The model then picks its
+  own depth within ``loops +- spread`` (default +-10) from its uncertainty:
+  confident steps think less than the base, uncertain ones more, clamped to
+  ``[1, loop_ceiling]`` (the trained ``max_loops`` plus inference headroom).
 * **Difficulty** -- the model's own uncertainty about what comes next. High
   entropy in the previous step's next-token distribution raises the threshold
   for the next step (demand more confidence before halting); a near-certain
@@ -44,6 +48,10 @@ EFFORT_LEVELS = {
 @dataclass
 class ThinkingBudget:
     effort: str = "balanced"
+    #: User-chosen base loop count; ``None`` derives depth from ``effort``.
+    loops: Optional[int] = None
+    #: How far the model may move from ``loops`` on its own, each way.
+    spread: int = 10
     latency_ms: Optional[float] = None
     #: How strongly next-token entropy moves the threshold (0 disables).
     difficulty_gain: float = 0.15
@@ -58,11 +66,29 @@ class ThinkingBudget:
     def __post_init__(self) -> None:
         if self.effort not in EFFORT_LEVELS:
             raise ValueError(f"effort must be one of {sorted(EFFORT_LEVELS)}")
+        if self.loops is not None and self.loops < 1:
+            raise ValueError("loops must be >= 1")
+        if self.spread < 0:
+            raise ValueError("spread must be >= 0")
 
-    def plan(self, max_loops: int) -> tuple[int, Optional[float]]:
+    def cap(self, max_loops: int, ceiling: Optional[int] = None) -> int:
+        """Most loops any step of this budget can ask for (prefill depth)."""
+        if self.loops is None:
+            return self.plan(max_loops)[0]
+        return max(1, min(ceiling or max_loops, self.loops + self.spread))
+
+    def plan(self, max_loops: int, ceiling: Optional[int] = None) -> tuple[int, Optional[float]]:
         """``(n_loops, halt_threshold)`` for the next step."""
         frac, base = EFFORT_LEVELS[self.effort]
-        n_loops = max(1, round(1 + frac * (max_loops - 1)))
+        if self.loops is not None:
+            # difficulty in [-1, 1]: entropy above/below half-uniform, minus
+            # any latency pressure. The model's own call moves depth +-spread.
+            signal = self._difficulty_shift / self.difficulty_gain if self.difficulty_gain else 0.0
+            signal = max(-1.0, min(1.0, signal + 2 * self._latency_shift))
+            n_loops = self.loops + round(self.spread * signal)
+            n_loops = max(1, min(ceiling or max_loops, n_loops))
+        else:
+            n_loops = max(1, round(1 + frac * (max_loops - 1)))
         if base is None or n_loops == 1:
             return n_loops, None
         thr = base + self._difficulty_shift + self._latency_shift

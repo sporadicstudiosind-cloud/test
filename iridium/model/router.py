@@ -102,6 +102,7 @@ class MacroRouter(nn.Module):
 
     def normalize(self, h: torch.Tensor, loop_index: int) -> torch.Tensor:
         b, t, _ = h.shape
+        loop_index = min(loop_index, self.loop_embed.num_embeddings - 1)
         loop = torch.full((b, t), loop_index, dtype=torch.long, device=h.device)
         return self.norm(h + self.loop_embed(loop))
 

@@ -14,6 +14,7 @@ Nothing exotic. What it does insist on:
 from __future__ import annotations
 
 import json
+import os
 import math
 import subprocess
 import time
@@ -154,6 +155,26 @@ def cosine_lr(step: int, cfg: TrainConfig) -> float:
     t = (step - warm) / max(cfg.steps - warm, 1)
     floor = cfg.lr * cfg.min_lr_ratio
     return floor + 0.5 * (cfg.lr - floor) * (1.0 + math.cos(math.pi * min(t, 1.0)))
+
+
+def _fsync(path: Path) -> None:
+    """Force a file (or directory entry) to stable storage.
+
+    Colab's Drive mount uploads lazily: a checkpoint that is only in the page
+    cache when the runtime disconnects never reaches Drive, which is how a run
+    that logged three rounds can leave only ``round0`` behind. fsync makes the
+    FUSE layer flush before training continues.
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass                       # some filesystems refuse fsync on directories
+    finally:
+        os.close(fd)
 
 
 class Trainer:
@@ -558,7 +579,12 @@ class Trainer:
             },
             path.with_suffix(".pt.tmp"),
         )
-        path.with_suffix(".pt.tmp").replace(path)
+        tmp = path.with_suffix(".pt.tmp")
+        _fsync(tmp)
+        tmp.replace(path)
+        _fsync(self.out_dir)
+        if path.stat().st_size == 0:
+            raise RuntimeError(f"checkpoint {path} was written empty")
         (self.out_dir / f"{self.cfg.label}-{tag}.json").write_text(
             json.dumps(
                 {"manifest": self.manifest(extra), "history": self.history},
@@ -566,6 +592,11 @@ class Trainer:
             ),
             encoding="utf-8",
         )
+        # Pointer to the newest checkpoint, so resume="auto" needs no filename.
+        (self.out_dir / "latest.json").write_text(json.dumps(
+            {"path": path.name, "tag": tag, "completed_steps": self.completed_steps}),
+            encoding="utf-8")
+        _fsync(self.out_dir / "latest.json")
         return path
 
 

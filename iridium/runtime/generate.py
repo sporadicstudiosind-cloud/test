@@ -107,7 +107,7 @@ def generate(
     if thinking is not None:
         # The prompt is read at the budget's loop cap so every loop's cache
         # covers it; each generated token then halts wherever it is done.
-        n_loops = thinking.plan(model.cfg.router.max_loops)[0]
+        n_loops = thinking.cap(model.cfg.router.max_loops, model.cfg.router.loop_ceiling)
     if n_loops is None:
         n_loops = min(3, model.cfg.router.max_loops) if model.cfg.controller_mode else 1
     if len(sample) < 1 or max_new_tokens < 1:
@@ -178,10 +178,12 @@ def generate(
             step.scalars = action_scalars.to(step.scalars.dtype)
             result.actions.append({"op": token, "operands": action_scalars[0, 0].cpu().tolist()})
         if thinking is not None:
-            step_loops, thr = thinking.plan(model.cfg.router.max_loops)
+            step_loops, thr = thinking.plan(model.cfg.router.max_loops,
+                                            model.cfg.router.loop_ceiling)
             step_loops = min(step_loops, n_loops)
             t0 = _time.perf_counter()
-            out = model(step, n_loops=step_loops, cache=cache, halt_threshold=thr)
+            out = model(step, n_loops=step_loops, cache=cache, halt_threshold=thr,
+                        cache_loops=n_loops)
             used = int(out.stats.get("halted_at", step_loops))
             thinking.observe(logits if name in ("text", "control") else None,
                              (_time.perf_counter() - t0) * 1000, used)
