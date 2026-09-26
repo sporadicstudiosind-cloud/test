@@ -1,0 +1,321 @@
+"""Named, ready-to-train configurations, ordered by what Iridium 1.0 is for.
+
+The priority order is a product decision and the presets follow it:
+
+1. **talking + reasoning** -- ``chat-34m``, ``chat-100m``
+2. **tool use** -- ``tools-100m``
+3. **omnimodality** -- ``omni-100m``
+4. **physics / STEM** -- ``stem-100m``
+5. **world model** -- ``world-100m``
+
+plus two that are *costed, not trainable on free tiers*: ``modern-744m`` and
+``8b``. Every preset is a complete recipe -- model config, data mixture,
+tokenizer size, schedule, optimizer, step and batch budget -- so
+``python -m iridium train --preset chat-34m`` is the whole instruction.
+
+The budget column is sized for **free compute**: Colab's free T4, Kaggle's
+30 GPU-hours a week (P100 or 2xT4), and Colab's free TPU v5e-1. Hosted inference
+tiers (Groq, NVIDIA NIM and the like) serve models; they cannot train one.
+Their use here is generating and grading data, and each hosted model's own
+licence decides whether its outputs may train another model.
+
+**Status labels are claims, and they are narrow.** ``verified in theory``
+means the configuration builds, its parameter count matches the formula, and
+the invariants in the test suite (cached decoding equals the full forward,
+exact accounting, finite gradients) hold for it. It does **not** mean the
+preset has been trained, or that training it will produce a good model.
+Nothing in this repository has been trained at these recipes yet.
+
+Time estimates are arithmetic, not measurements: training FLOPs are taken as
+``3 x`` the config's own forward FLOPs per token (forward plus backward),
+divided by the device's published peak at an *assumed* 30% utilisation. Real
+small-model runs are often worse than that on free GPUs (data loading,
+Python overhead, fp32 on cards without bf16), so read them as optimistic.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from typing import Optional
+
+from .config import TEXT_ID_OFFSET, IridiumConfig, get_config
+
+#: Duplicated from iridium.data (which imports numpy) so presets stay importable
+#: with the standard library alone; a test holds the copies equal.
+_TALK_MIX = {"fineweb_edu": 0.35, "wikipedia": 0.25, "cosmopedia_stories": 0.20,
+             "cosmopedia_textbooks": 0.15, "finemath": 0.05}
+_STEM_MIX = {"finemath": 0.35, "openwebmath": 0.15, "fineweb_edu": 0.25,
+             "cosmopedia_textbooks": 0.15, "wikipedia": 0.10}
+
+__all__ = ["Preset", "PRESETS", "get_preset", "with_tokens", "with_reference_hparams",
+           "reference_hparams", "TOKEN_BUDGETS", "FREE_TIERS", "estimate_hours", "preset_table"]
+
+
+#: Published peak dense throughput (FLOP/s) and memory of free-tier devices.
+#: ``precision`` is what the trainer would actually use there: the T4 and P100
+#: have no bf16, and this codebase trains in fp32 rather than fp16 on them
+#: (routed softmaxes overflow fp16; see docs/gpu.md), so the fp32 peak applies.
+FREE_TIERS: dict[str, dict] = {
+    "colab_t4":   {"label": "Colab free T4",        "peak": 8.1e12,  "memory_gb": 15, "precision": "fp32",
+                   "quota": "~4-12 h sessions, availability varies"},
+    "kaggle_p100": {"label": "Kaggle P100",         "peak": 9.3e12,  "memory_gb": 16, "precision": "fp32",
+                    "quota": "30 GPU-h/week, 12 h sessions"},
+    "kaggle_2xt4": {"label": "Kaggle 2xT4",         "peak": 16.2e12, "memory_gb": 30, "precision": "fp32",
+                    "quota": "30 GPU-h/week; needs the multi-GPU placement path"},
+    "tpu_v5e1":   {"label": "Colab free TPU v5e-1", "peak": 197e12, "memory_gb": 16, "precision": "bf16",
+                   "quota": "availability varies; XLA path (Kaggle's is v5e-8, 20 h/week)"},
+}
+ASSUMED_UTILISATION = 0.30
+
+
+@dataclass(frozen=True)
+class Preset:
+    name: str
+    priority: int                      # 1 = talking ... 5 = world model; 0 = costed only
+    goal: str
+    config: IridiumConfig
+    mixture: dict[str, float]
+    steps: int
+    batch_size: int                    # effective batch, in sequences
+    window: int                        # training sequence length, in tokens
+    lr: float
+    optimizer: str = "eager_adamw"
+    schedule: str = "wsd"
+    ema_decay: float = 0.999
+    loss_balance: str = "none"
+    rounds: int = 4                    # fresh-data rounds; see run_preset
+    #: Sequences per forward pass; the rest of ``batch_size`` is gradient
+    #: accumulation. 8 x 1024 tokens of a ~100M routed model fits a 15-16 GB
+    #: card with room for the ponder loop; the trainer halves it on OOM anyway.
+    micro_batch: int = 8
+    free_tier: Optional[str] = "kaggle_p100"
+    status: str = "verified in theory"
+    notes: str = ""
+    #: Source weights inside the ``text_lm`` and ``chat`` families; ``None``
+    #: means the module defaults. See iridium.data.text_corpus / chat_corpus.
+    text_mix: Optional[dict[str, float]] = None
+    chat_mix: Optional[dict[str, float]] = None
+
+    @property
+    def tokens(self) -> int:
+        return self.steps * self.batch_size * self.window
+
+    @property
+    def trainable_on_free_tier(self) -> bool:
+        return self.free_tier is not None
+
+
+def _with_vocab(cfg: IridiumConfig, text_vocab: int, **extra) -> IridiumConfig:
+    """A rung with a subword vocabulary sized so no embedding row is dead."""
+    return replace(cfg, text_vocab_size=text_vocab,
+                   codecs=replace(cfg.codecs, vocab_size=text_vocab + TEXT_ID_OFFSET),
+                   qk_norm=True, **extra)
+
+
+def _presets() -> dict[str, Preset]:
+    nano, n100 = get_config("nano"), get_config("nano100m")
+    out: dict[str, Preset] = {}
+
+    chat34 = replace(_with_vocab(nano, 8_192), name="iridium-1-chat-34m", max_seq_len=1024)
+    out["chat-34m"] = Preset(
+        "chat-34m", 1,
+        "A small model that holds a conversation: prose plus human-written chats.",
+        chat34, {"text_lm": 0.58, "chat": 0.37, "unknowable": 0.05},
+        steps=20_000, batch_size=32, window=512, lr=1.5e-3, free_tier="colab_t4", rounds=5,
+        text_mix=_TALK_MIX,
+        notes="The first thing to train. ~330M tokens, about half of compute-"
+              "optimal for 36M params: roughly one free Colab session, optimistically.")
+
+    chat100 = replace(_with_vocab(n100, 16_384), name="iridium-1-chat-100m", max_seq_len=2048)
+    out["chat-100m"] = Preset(
+        "chat-100m", 1,
+        "The main talking model: prose, chat, and a little false-premise reasoning.",
+        chat100, {"text_lm": 0.55, "chat": 0.32, "false_premise": 0.07, "unknowable": 0.06},
+        steps=20_000, batch_size=32, window=1024, lr=8e-4, rounds=10, text_mix=_TALK_MIX,
+        notes="~655M tokens: about a third of compute-optimal for 104M params, "
+              "spread over several weeks of Kaggle quota.")
+
+    out["tools-100m"] = Preset(
+        "tools-100m", 2,
+        "chat-100m plus tool calling: licensed tool-use data and exactly-graded "
+        "synthetic tool tasks, decoded under schema constraints.",
+        replace(chat100, name="iridium-1-tools-100m"),
+        {"text_lm": 0.40, "chat": 0.30, "tools": 0.30},
+        steps=20_000, batch_size=32, window=1024, lr=8e-4, rounds=10, text_mix=_TALK_MIX,
+        notes="Best started from a chat-100m checkpoint rather than from scratch.")
+
+    omni = replace(chat100, name="iridium-1-omni-100m", mrope_sections=(8, 12, 12),
+                   codecs=replace(chat100.codecs, continuous_conditioning="adaln",
+                                  flow_timestep_sampling="logit_normal"))
+    out["omni-100m"] = Preset(
+        "omni-100m", 3,
+        "Language plus the synthetic multimodal families (scenes, fields), with "
+        "grid-aware positions for media and SD3-style flow heads.",
+        omni, {"text_lm": 0.35, "chat": 0.20, "scene_goal": 0.15, "field_rollout": 0.15,
+               "channel_depth": 0.15},
+        steps=20_000, batch_size=32, window=1024, lr=8e-4, loss_balance="ema", rounds=10,
+        notes="Loss balancing is on here because flow MSE and cross-entropy share "
+              "the objective; it is a heuristic -- compare against 'none'.")
+
+    out["stem-100m"] = Preset(
+        "stem-100m", 4,
+        "Physics and quantitative reasoning: the exactly-checkable fluid, channel "
+        "and quantity families, kept anchored with language.",
+        replace(chat100, name="iridium-1-stem-100m"),
+        {"text_lm": 0.25, "chat": 0.10, "channel_depth": 0.20, "channel_intervention": 0.20,
+         "field_rollout": 0.15, "false_premise": 0.10},
+        steps=15_000, batch_size=32, window=1024, lr=8e-4, rounds=6, text_mix=_STEM_MIX)
+
+    world = replace(omni, name="iridium-1-world-100m",
+                    codecs=replace(omni.codecs, camera_features=6, n_modalities=10,
+                                   point_features=14))
+    out["world-100m"] = Preset(
+        "world-100m", 5,
+        "Camera-conditioned scenes: the camera modality and splat geometry enabled.",
+        world, {"text_lm": 0.30, "chat": 0.20, "scene_goal": 0.25, "field_rollout": 0.25},
+        steps=10_000, batch_size=32, window=1024, lr=8e-4, loss_balance="ema",
+        status="verified in theory; no camera-posed training data yet",
+        notes="The architecture is ready; the data is not. Nothing in the mixture "
+              "carries camera tokens until a posed-video source is added.")
+
+    out["modern-744m"] = Preset(
+        "modern-744m", 0,
+        "Every option with published evidence at scale; 1M-token-capable cache.",
+        get_config("modern"), {"text_lm": 0.55, "chat": 0.30, "tools": 0.15},
+        steps=100_000, batch_size=64, window=4096, lr=3e-4, optimizer="muon",
+        free_tier=None, rounds=50,
+        notes="Costed, not free-tier trainable: fp32 Adam state alone is ~12 GB and "
+              "the token budget is weeks of a single A100.")
+
+    # -- the size ladder: one general recipe (talk + tools) at five sizes ----
+    # Same mixture everywhere so the sizes are comparable; a subword vocabulary
+    # of 32k from 500M up, where the embedding is a small share of parameters.
+    from .config_builder import build
+    general = {"text_lm": 0.44, "chat": 0.32, "tools": 0.18, "unknowable": 0.06}
+    out["100m"] = replace(out["tools-100m"], name="100m", priority=1,
+                          goal="The general small model: talk and tools, 104M parameters.",
+                          mixture=general)
+    out["50m"] = Preset(
+        "50m", 1, "The general recipe (talk + tools) at 50M: the cheapest real run.",
+        replace(_with_vocab(build(name="iridium-1-50m", max_seq_len=1024, d_model=384,
+                                  core_layers=6, n_superstacks=2, superstack_layers=9,
+                                  n_kv_heads=2, d_ff=896), 8_192)),
+        general, steps=20_000, batch_size=32, window=512, lr=1.2e-3, free_tier="colab_t4",
+        rounds=5, text_mix=_TALK_MIX,
+        notes="~330M tokens, ~7 tokens/param; one or two free Colab sessions.")
+    ladder = {
+        # key: (build kwargs, steps, window, lr, free_tier, notes)
+        "500m": (dict(d_model=1024, core_layers=10, n_superstacks=3, superstack_layers=9,
+                      n_kv_heads=4, d_ff=2816), 30_000, 2048, 6e-4, "tpu_v5e1",
+                 "~2B tokens. Fits a 16 GB device with fp32 AdamW (~8 GB of state); "
+                 "on a T4/P100 it is weeks, on a free TPU v5e-1 about a day."),
+        "1b": (dict(d_model=1280, core_layers=12, n_superstacks=3, superstack_layers=13,
+                    n_kv_heads=4, d_ff=3456), 60_000, 2048, 4e-4, "tpu_v5e1",
+               "~4B tokens. With 8-bit AdamW state (~10 bytes/param total) it fits a "
+               "16 GB device with ~6 GB left for activations: tight; lower micro_batch "
+               "if it OOMs. About four days of a free TPU v5e-1."),
+        "2b": (dict(d_model=1792, core_layers=14, n_superstacks=3, superstack_layers=14,
+                    d_head=128, n_kv_heads=2, d_ff=4864), 120_000, 2048, 3e-4, None,
+               "~8B tokens. Costed only: ~33 GB of optimizer state."),
+        "4b": (dict(d_model=2304, core_layers=14, n_superstacks=3, superstack_layers=18,
+                    d_head=128, n_kv_heads=2, d_ff=6144), 240_000, 2048, 2.5e-4, None,
+               "~16B tokens. Costed only: ~64 GB of optimizer state; multi-GPU."),
+    }
+    for key, (kw, steps, window, lr, tier, notes) in ladder.items():
+        cfg = _with_vocab(build(name=f"iridium-1-{key}", max_seq_len=4096, **kw), 32_768)
+        out[key] = Preset(key, 1 if tier else 0,
+                          f"The general recipe (talk + tools) at {key}.",
+                          cfg, general, steps=steps, batch_size=32, window=window, lr=lr,
+                          free_tier=tier, rounds=max(10, steps // 3000), text_mix=_TALK_MIX,
+                          micro_batch=4, notes=notes,
+                          optimizer="adamw8" if key != "500m" else "eager_adamw")
+    return out
+
+
+PRESETS: dict[str, Preset] = _presets()
+
+
+#: Training-state bytes per parameter: fp32 weights and gradients (8) plus the
+#: optimizer's state. Activations come on top and depend on micro-batch.
+STATE_BYTES = {"eager_adamw": 16.0, "adamw": 16.0, "adamw8": 10.03, "muon": 12.0}
+
+
+def state_gb(preset: Preset) -> float:
+    return preset.config.n_params * STATE_BYTES.get(preset.optimizer, 16.0) / 1e9
+
+
+def get_preset(name: str) -> Preset:
+    if name == "8b":
+        raise KeyError("8b is a rung, not a trainable preset; see `iridium report 8b` "
+                       "and docs/training-8b.md")
+    try:
+        return PRESETS[name]
+    except KeyError:
+        raise KeyError(f"unknown preset {name!r}; known: {sorted(PRESETS)}") from None
+
+
+#: Named budgets in tokens per parameter, for ``--tokens-per-param`` and docs.
+#: ``chinchilla`` is compute-optimal (Hoffmann et al., 2022); ``small_model``
+#: is where small open models that actually converse were trained (1,000x+).
+TOKEN_BUDGETS = {"free_tier": None, "chinchilla": 20, "overtrained": 100, "small_model": 1000}
+
+
+def with_tokens(preset: Preset, tokens: int) -> Preset:
+    """The preset with its step count set so it consumes ``tokens`` tokens."""
+    import math
+    if tokens < preset.batch_size * preset.window:
+        raise ValueError("token budget smaller than one batch")
+    steps = math.ceil(tokens / (preset.batch_size * preset.window))
+    rounds = max(1, min(steps, math.ceil(preset.rounds * steps / preset.steps)))
+    return replace(preset, steps=steps, rounds=rounds)
+
+
+def reference_hparams(preset: Preset) -> dict:
+    """DeepSeek LLM's fitted compute-optimal learning rate and batch size.
+
+    ``lr = 0.3118 C^-0.125`` and ``B = 0.2920 C^0.3271`` tokens, with ``C`` the
+    training compute in FLOPs (DeepSeek-AI, 2024, arXiv:2401.02954). Fitted on
+    their dense AdamW models, so for a routed, pondering model it is a
+    reference point, not a prescription: a preset far from it (say 3x) is
+    worth a short sweep, not an automatic override.
+    """
+    compute = 6.0 * preset.config.n_params * preset.tokens
+    return {"lr": 0.3118 * compute ** -0.125, "batch_tokens": 0.2920 * compute ** 0.3271,
+            "compute_flops": compute}
+
+
+def with_reference_hparams(preset: Preset) -> Preset:
+    """The preset at DeepSeek's fitted lr and batch, same token budget.
+
+    The larger batch comes from gradient accumulation (``micro_batch`` is
+    unchanged), so memory is unchanged; the cost is fewer optimizer steps.
+    """
+    import math
+    ref = reference_hparams(preset)
+    micro = max(1, min(preset.micro_batch, preset.batch_size))
+    batch = max(micro, round(ref["batch_tokens"] / preset.window / micro) * micro)
+    steps = max(1, math.ceil(preset.tokens / (batch * preset.window)))
+    return replace(preset, batch_size=batch, steps=steps, lr=ref["lr"],
+                   rounds=max(1, min(preset.rounds, steps)))
+
+
+def estimate_hours(preset: Preset, tier: str, tokens: Optional[int] = None) -> float:
+    """Optimistic wall-clock hours to train ``preset`` on a free tier."""
+    device = FREE_TIERS[tier]
+    _, hi = preset.config.flops_per_token()
+    forward = hi / preset.config.router.max_loops        # one loop, full routed depth
+    total = 3.0 * forward * (tokens if tokens is not None else preset.tokens)
+    return total / (device["peak"] * ASSUMED_UTILISATION) / 3600.0
+
+
+def preset_table() -> str:
+    head = (f"{'preset':<13} {'pri':>3} {'params':>12} {'tokens':>8}  "
+            f"{'T4 h':>6} {'P100 h':>7} {'v5e h':>6}  status")
+    lines = [head, "-" * len(head)]
+    for p in sorted(PRESETS.values(), key=lambda p: (p.priority or 99, p.config.n_params, p.name)):
+        hours = [estimate_hours(p, t) for t in ("colab_t4", "kaggle_p100", "tpu_v5e1")]
+        lines.append(
+            f"{p.name:<13} {p.priority or '-':>3} {p.config.n_params:>12,} "
+            f"{p.tokens / 1e6:>7.0f}M  {hours[0]:>6.1f} {hours[1]:>7.1f} {hours[2]:>6.1f}  {p.status}")
+    lines.append(f"(hours assume {ASSUMED_UTILISATION:.0%} of published peak; optimistic)")
+    return "\n".join(lines)

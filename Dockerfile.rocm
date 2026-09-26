@@ -1,0 +1,104 @@
+# Iridium-1 on AMD GPUs (ROCm).
+#
+# No separate code path exists for AMD: PyTorch's ROCm build exposes the GPU
+# through the same torch.cuda API via HIP, so `.to("cuda")` lands on a Radeon
+# or Instinct card. What this image supplies is a coherent (base image, torch
+# wheel) pair and the runtime groups the device nodes need.
+#
+# THE PAIR MATTERS. The ROCm userspace inside the base image and the ROCm
+# version a torch wheel was built against are two separate things that have to
+# agree; mixing e.g. a rocm6.2 base with a rocm6.1-built torch wheel is a
+# frequent, confusing source of "torch imports fine, first kernel launch
+# segfaults." rocm6.2 base + the rocm6.2 wheel index, both pinned below, is the
+# last pairing verified against PyTorch's official ROCm wheel index at the time
+# this file was written (2026-09) — NOT executed in this container, which has
+# no AMD GPU. Bump both together, never just one.
+#
+#   docker build -f Dockerfile.rocm -t iridium-rocm .
+#   docker run --rm -it \
+#       --device=/dev/kfd --device=/dev/dri \
+#       --group-add video --ipc=host \
+#       --security-opt seccomp=unconfined \
+#       -p 8080:8080 iridium-rocm
+#
+# Then check what the card actually supports before trusting a run:
+#   docker run ... iridium-rocm python3 -m iridium.runtime.device
+#   docker run ... iridium-rocm python3 -m iridium.runtime.backend   # full report
+FROM rocm/dev-ubuntu-22.04:6.2-complete
+
+ARG ROCM_WHEEL_INDEX=https://download.pytorch.org/whl/rocm6.2
+# Pinned, not "torch" bare: an unpinned install silently picks up whatever the
+# index currently serves as latest, which can drift out of the pairing this
+# file documents without the build ever failing. 2.5.1 is the last release
+# known (from PyTorch's published compatibility matrix, not from a run here)
+# to ship official rocm6.2 wheels; check
+# https://download.pytorch.org/whl/rocm6.2/torch/ before bumping either this
+# or the base image tag above.
+ARG TORCH_VERSION=2.5.1
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app \
+    PORT=8080 \
+    IRIDIUM_ENABLE_1B=0 \
+    # Unset by default: setting this to the WRONG arch string produces
+    # silently wrong kernels, not an error, which is worse than ROCm simply
+    # refusing to initialize. See the consumer-card note below before setting
+    # it in a real deployment.
+    HSA_OVERRIDE_GFX_VERSION="" \
+    # Empty (compile-time autotune, cached under MIOPEN_USER_DB_PATH after the
+    # first slow run) is the safe default for an image that will run on
+    # whatever card it's handed. "FAST" skips the search and can pick a worse
+    # kernel on a card MIOpen hasn't got heuristics for; set it explicitly to
+    # FAST only once you've measured that it doesn't regress your shapes.
+    MIOPEN_FIND_MODE="" \
+    MIOPEN_USER_DB_PATH=/app/.miopen_cache \
+    # ROCm's device mask. CUDA_VISIBLE_DEVICES is also honored by ROCm's
+    # PyTorch build for script compatibility with unmodified CUDA code; if
+    # both are set and disagree the result is build-dependent (see
+    # docs/gpu.md), so only one is set here.
+    HIP_VISIBLE_DEVICES=""
+
+WORKDIR /app
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-pip git ffmpeg \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --index-url ${ROCM_WHEEL_INDEX} torch==${TORCH_VERSION} \
+ && pip3 install numpy pyyaml
+
+COPY iridium/ /app/iridium/
+COPY serve/ /app/serve/
+COPY experiments/ /app/experiments/
+
+# Fail the build rather than the first request.
+RUN python3 -c "import torch; print('torch', torch.__version__, '| hip', torch.version.hip)" \
+ && python3 -c "from iridium.config import get_config; c = get_config('nano100m'); \
+    print('config ok:', f'{c.n_params:,}', 'params')" \
+ && python3 -c "import shutil; assert shutil.which('ffmpeg'), 'ffmpeg missing — media codecs shell out to it'" \
+ && python3 -m iridium.runtime.backend
+
+EXPOSE 8080
+CMD ["python3", "serve/server.py"]
+
+# --------------------------------------------------------------------------
+# Consumer Radeon cards (gfx1030/RDNA2, gfx1010/RDNA1, and similar) — UNOFFICIAL,
+# UNSUPPORTED BY AMD. ROCm's official support list is Instinct-first; many
+# consumer Radeon dies report an arch string ROCm has no compiled kernels for
+# and refuse to initialize, even though the underlying ISA is often close
+# enough to a supported one to work if it merely *claims* to be that arch.
+# HSA_OVERRIDE_GFX_VERSION does exactly that override, e.g.:
+#
+#   docker run ... -e HSA_OVERRIDE_GFX_VERSION=10.3.0 iridium-rocm   # RDNA2 (gfx1030-family)
+#   docker run ... -e HSA_OVERRIDE_GFX_VERSION=11.0.0 iridium-rocm   # RDNA3 (gfx1100-family)
+#
+# This is a community workaround, not an AMD-supported configuration: it can
+# produce silently wrong results on a card whose ISA differs from the one it
+# is told to impersonate, rather than failing loudly. Verify with
+# `python3 -m iridium.runtime.device` (checks matmul/FFT/generator actually
+# work) before trusting any output, and never enable it in an image built for
+# unknown/mixed hardware — only for a specific card you have tested by hand.
+# None of this has been exercised against real hardware from this repository;
+# it is transcribed from ROCm/community documentation, not verified here.
