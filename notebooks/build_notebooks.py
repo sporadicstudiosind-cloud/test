@@ -31,14 +31,48 @@ longer matches what this script would produce.
 from __future__ import annotations
 
 import json
+import os
+import re
+import subprocess
 import textwrap
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
-REPO_OWNER = "sporadicstudiosind-cloud"
-REPO_NAME = "test"
-RELEASE_BRANCH = "claude/gallant-faraday-lhycva"
+
+def _git(*args: str) -> str:
+    try:
+        return subprocess.run(["git", *args], cwd=HERE, capture_output=True, text=True,
+                              check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+
+
+def repo_info() -> tuple[str, str, str]:
+    """Owner, repo and branch of the checkout these notebooks are built from.
+
+    Read from ``git`` at build time, so the clone cell always points at the
+    repository and branch the notebooks came from. ``IRIDIUM_REPO`` (as
+    ``owner/name``) and ``IRIDIUM_BRANCH`` override; outside a git checkout
+    the last-known values are used.
+    """
+    owner, name = "sporadicstudiosind-cloud", "test"
+    override = os.environ.get("IRIDIUM_REPO", "")
+    url = _git("remote", "get-url", "origin")
+    m = re.search(r"github\.com[/:]([^/]+)/([^/]+?)(?:\.git)?/?$", url)
+    if "/" in override:
+        owner, name = override.split("/", 1)
+    elif m:
+        owner, name = m.group(1), m.group(2)
+    branch = (os.environ.get("IRIDIUM_BRANCH")
+              or _git("rev-parse", "--abbrev-ref", "HEAD")
+              or "claude/gallant-faraday-lhycva")
+    if branch == "HEAD":                          # detached checkout (CI)
+        branch = os.environ.get("GITHUB_HEAD_REF") or "claude/gallant-faraday-lhycva"
+    return owner, name, branch
+
+
+REPO_OWNER, REPO_NAME, RELEASE_BRANCH = repo_info()
 
 GENERATED_STUDIO = {
     "colab": "iridium_studio.ipynb",
