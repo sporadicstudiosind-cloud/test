@@ -112,6 +112,55 @@ def _with_vocab(cfg: IridiumConfig, text_vocab: int, **extra) -> IridiumConfig:
                    qk_norm=True, **extra)
 
 
+#: Chat share for chat-36m, inside the ``chat`` family. Weighted so the two
+#: small human-written sets are seen about four times at most over a
+#: compute-optimal run (repeats up to ~4 epochs cost little; Muennighoff et
+#: al., 2023) while smol-smoltalk, sized for sub-1B models, carries the bulk.
+_CHAT36_CHAT_MIX = {"smol_smoltalk": 0.60, "openr1_math": 0.20, "oasst": 0.12, "dolly": 0.08}
+
+
+def _chat_36m(chat34: IridiumConfig) -> Preset:
+    """chat-34m rebuilt around what the trained run showed.
+
+    The chat-34m run (20k steps, 330M tokens) put 24.4M of its 30M body in
+    four superstacks and 5.6M in the core every token shares; the router
+    spread tokens evenly over all four (usage entropy 1.38 of a possible
+    1.39), so the stacks never specialised, and stack 0 carried spectral
+    (Fourier) blocks no text token uses. Here the shared core is the larger
+    half, three plain stacks of four layers are routed top-2, and the
+    embedding side is grown Gemma-style, off the compute path: a sqrt(d)
+    scaled tied token table plus Gemma 3n per-layer embeddings. Body 35.8M,
+    embeddings 5.9M, media codec heads (unused by text) another 4.5M.
+    """
+    import math
+    from .config import CoreConfig
+    d, d_head, d_ff = 384, 64, 1024
+    core = CoreConfig(d_model=d, n_layers=10, n_query_heads=d // d_head, n_kv_heads=2,
+                      d_head=d_head, d_ff=d_ff)
+    stacks = replace(chat34.stacks, n_stacks=3, n_layers=4, d_model=d, core_d_model=d,
+                     n_query_heads=d // d_head, n_kv_heads=2, d_head=d_head, d_ff=d_ff,
+                     spectral_stacks=(), spectral_stride=0, min_depth=2,
+                     specializations=())
+    cfg = replace(chat34, name="iridium-1-chat-36m", core=core, stacks=stacks,
+                  router=replace(chat34.router, top_k=2), ple_dim=32,
+                  codecs=replace(chat34.codecs, embed_scale=True),
+                  notes="Body 35.8M + embeddings 5.9M; see presets._chat_36m.")
+    batch, window = 64, 1024
+    # Compute-optimal: 20 tokens per body parameter (Hoffmann et al., 2022).
+    steps = math.ceil(20 * cfg.body_params / (batch * window))
+    return Preset(
+        "chat-36m", 1,
+        "chat-34m rebalanced: bigger shared core, three routed stacks, Gemma-style "
+        "embeddings, and a compute-optimal token budget.",
+        cfg, {"text_lm": 0.70, "chat": 0.25, "unknowable": 0.05},
+        steps=steps, batch_size=batch, window=window, lr=1.5e-3, rounds=8,
+        free_tier="kaggle_p100", text_mix=_TALK_MIX, chat_mix=_CHAT36_CHAT_MIX,
+        notes="~720M tokens = 20 per body parameter. chat-34m's measured 44k tok/s "
+              "scaled to this geometry suggests ~8 GPU-hours: one Kaggle session, "
+              "with rounds to resume from if it drops. `--tokens-per-param 100` "
+              "for an overtrained run across several sessions.")
+
+
 def _presets() -> dict[str, Preset]:
     nano, n100 = get_config("nano"), get_config("nano100m")
     out: dict[str, Preset] = {}
@@ -125,6 +174,8 @@ def _presets() -> dict[str, Preset]:
         text_mix=_TALK_MIX,
         notes="The first thing to train. ~330M tokens, about half of compute-"
               "optimal for 36M params: roughly one free Colab session, optimistically.")
+
+    out["chat-36m"] = _chat_36m(chat34)
 
     chat100 = replace(_with_vocab(n100, 16_384), name="iridium-1-chat-100m", max_seq_len=2048)
     out["chat-100m"] = Preset(
@@ -309,13 +360,16 @@ def estimate_hours(preset: Preset, tier: str, tokens: Optional[int] = None) -> f
 
 
 def preset_table() -> str:
-    head = (f"{'preset':<13} {'pri':>3} {'params':>12} {'tokens':>8}  "
-            f"{'T4 h':>6} {'P100 h':>7} {'v5e h':>6}  status")
+    head = (f"{'preset':<13} {'pri':>3} {'params':>12} {'body':>7} {'embed':>6} {'tokens':>8} "
+            f"{'tok/body':>8}  {'T4 h':>6} {'P100 h':>7} {'v5e h':>6}  status")
     lines = [head, "-" * len(head)]
     for p in sorted(PRESETS.values(), key=lambda p: (p.priority or 99, p.config.n_params, p.name)):
         hours = [estimate_hours(p, t) for t in ("colab_t4", "kaggle_p100", "tpu_v5e1")]
+        cfg = p.config
         lines.append(
-            f"{p.name:<13} {p.priority or '-':>3} {p.config.n_params:>12,} "
-            f"{p.tokens / 1e6:>7.0f}M  {hours[0]:>6.1f} {hours[1]:>7.1f} {hours[2]:>6.1f}  {p.status}")
+            f"{p.name:<13} {p.priority or '-':>3} {cfg.n_params:>12,} "
+            f"{cfg.body_params / 1e6:>6.1f}M {cfg.embedding_params / 1e6:>5.1f}M "
+            f"{p.tokens / 1e6:>7.0f}M {p.tokens / max(cfg.body_params, 1):>8.0f}  "
+            f"{hours[0]:>6.1f} {hours[1]:>7.1f} {hours[2]:>6.1f}  {p.status}")
     lines.append(f"(hours assume {ASSUMED_UTILISATION:.0%} of published peak; optimistic)")
     return "\n".join(lines)

@@ -136,7 +136,10 @@ class CodecBank(nn.Module):
         discrete_mask = text_mask | ctrl_mask
         if bool(discrete_mask.any()):
             ids = batch.discrete.clamp(0, self.cfg.vocab_size - 1)
-            h = h + self.text_embedding(ids) * discrete_mask.unsqueeze(-1)
+            tokens = self.text_embedding(ids)
+            if self.cfg.embed_scale:
+                tokens = tokens * self.d_model ** 0.5
+            h = h + tokens * discrete_mask.unsqueeze(-1)
         if self.ngram is not None:
             # The n-gram at a decode step reads the tokens before it, which a
             # one-token batch does not contain; the cache carries them, so the

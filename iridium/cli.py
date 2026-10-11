@@ -450,7 +450,7 @@ def _budgeted_preset(args):
     from .presets import get_preset, with_tokens
     preset = get_preset(args.preset)
     if getattr(args, "tokens_per_param", None):
-        preset = with_tokens(preset, int(args.tokens_per_param * preset.config.n_params))
+        preset = with_tokens(preset, int(args.tokens_per_param * preset.config.body_params))
     elif getattr(args, "tokens", None):
         preset = with_tokens(preset, int(float(args.tokens)))
     if getattr(args, "hparams", "preset") == "deepseek":
@@ -496,7 +496,8 @@ def _budget_args(p) -> None:
     g.add_argument("--tokens", default=None,
                    help="override the preset's token budget, e.g. 2e9")
     g.add_argument("--tokens-per-param", type=float, default=None,
-                   help="budget as a multiple of parameters (Chinchilla-optimal is ~20)")
+                   help="budget as a multiple of body (non-embedding) parameters "
+                        "(Chinchilla-optimal is ~20)")
     p.add_argument("--hparams", choices=["preset", "deepseek"], default="preset",
                    help="'deepseek': lr and batch from DeepSeek LLM's compute fit, same tokens")
 

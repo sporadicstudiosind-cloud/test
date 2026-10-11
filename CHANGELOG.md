@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### `chat-36m`: chat-34m rebuilt from what its first run showed
+- The trained chat-34m (20k steps, 330M tokens, val 1.19 bpb text / 0.87 chat)
+  spent 24.4M of a 30M body on four superstacks the router used evenly
+  (usage entropy 1.38 of 1.39: no specialisation), one carrying Fourier blocks
+  no text touches, around a 5.6M shared core; and it saw ~11 tokens per body
+  parameter.
+- New preset `chat-36m`: d384, 10-layer core (15.7M), three plain 4-layer
+  stacks routed top-2 (20.1M), no spectral blocks. Body 35.8M; embeddings
+  5.9M on top (tied 8k token table + Gemma 3n per-layer embeddings,
+  `ple_dim=32`); media codec heads 4.5M, unused by text.
+- `CodecConfig.embed_scale`: Gemma/EmbeddingGemma-style `sqrt(d_model)` input
+  scaling of the tied token table. Off by default; on in chat-36m.
+- Compute-optimal budget: 20 tokens per *body* parameter = 716M tokens,
+  batch 64 x 1024, 10,929 steps, 8 rounds. Mixture 70% text / 25% chat /
+  5% unknowable, chat weighted so Dolly and OASST repeat at most ~4 times.
+- `IridiumConfig.body_params` / `embedding_params`; `--tokens-per-param` and
+  the budget audit now count body parameters (Kaplan-style non-embedding N).
+  `iridium presets` shows body, embeddings and tokens per body parameter.
+- The Kaggle notebook and `docs/kaggle-agent-runbook.md` now train chat-36m.
+
 ## 1.0.0 — 2026-09
 
 The first release meant to be *trained by someone else*: every capability is

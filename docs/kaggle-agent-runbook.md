@@ -1,6 +1,6 @@
-# Kaggle runbook: train Iridium `50m` (for a small, low-effort agent)
+# Kaggle runbook: train Iridium `chat-36m` (for a small, low-effort agent)
 
-You drive one Kaggle notebook that trains the `50m` preset. Follow the steps in
+You drive one Kaggle notebook that trains the `chat-36m` preset. Follow the steps in
 order. Do not edit model code. Do not change hyperparameters. If a step fails
 twice, stop and report the exact error text to the human.
 
@@ -19,14 +19,14 @@ twice, stop and report the exact error text to the human.
 1. `pip install kaggle` and check `kaggle --version` works.
 2. Get the notebook: `notebooks/iridium_studio_kaggle.ipynb` from branch
    `claude/gallant-faraday-lhycva` of `sporadicstudiosind-cloud/test`.
-3. Make exactly two edits in cell 5 / cell 11 of the notebook:
-   - `PRESET = 'chat-100m'` -> `PRESET = '50m'`
+3. Check two settings in cell 5 / cell 11 of the notebook (no edits expected):
+   - `PRESET` already defaults to `'chat-36m'`; leave it
    - leave `RESUME_FROM = 'auto'` as it is (it resumes from the newest round).
 4. Make a folder with the notebook and a `kernel-metadata.json`:
    ```json
    {
-     "id": "<kaggle-username>/iridium-50m",
-     "title": "iridium-50m",
+     "id": "<kaggle-username>/iridium-chat-36m",
+     "title": "iridium-chat-36m",
      "code_file": "iridium_studio_kaggle.ipynb",
      "language": "python",
      "kernel_type": "notebook",
@@ -39,15 +39,15 @@ twice, stop and report the exact error text to the human.
    field names change between CLI versions, so trust `--help` over this file.
 5. Push it: `kaggle kernels push -p <folder>`. This runs the whole notebook as a
    committed version, so `/kaggle/working` (checkpoints) is kept as output.
-6. Poll politely: `kaggle kernels status <user>/iridium-50m` every 15-30 minutes,
+6. Poll politely: `kaggle kernels status <user>/iridium-chat-36m` every 15-30 minutes,
    not more often. States: `running`, `complete`, `error`.
 7. When it is `complete` or `error`, download output:
-   `kaggle kernels output <user>/iridium-50m -p ./out`.
-   Expect `out/iridium-runs/50m/50m-round0.pt`, `-round1.pt`, ... and
-   `50m-final.pt` when it finished. `latest.json` names the newest checkpoint.
+   `kaggle kernels output <user>/iridium-chat-36m -p ./out`.
+   Expect `out/iridium-runs/chat-36m/chat-36m-round0.pt`, `-round1.pt`, ... and
+   `chat-36m-final.pt` when it finished. `latest.json` names the newest checkpoint.
 8. If the run stopped early (time limit, `error` after some rounds): push again
    (step 5) with the previous output attached as a dataset input, or copy the
-   checkpoints into `/kaggle/working/iridium-runs/50m/` first. `RESUME_FROM = 'auto'`
+   checkpoints into `/kaggle/working/iridium-runs/chat-36m/` first. `RESUME_FROM = 'auto'`
    continues from the newest round. Do not start over from scratch.
 
 ## Report to the human
@@ -62,4 +62,8 @@ twice, stop and report the exact error text to the human.
 - Kaggle gives a weekly GPU quota and caps a single session's runtime (about 30 h/week
   and 12 h/session at the time of writing; check the Kaggle docs for current numbers).
   Do not start a second run while one is running.
+- `chat-36m` is sized compute-optimal: ~716M tokens (20 per body parameter),
+  10,929 steps in 8 rounds. Expect roughly 1 h of data download/tokenizing and
+  ~7-9 GPU-hours of training (an estimate scaled from chat-34m's measured
+  speed), so it usually fits one 12 h session; if not, step 8 resumes it.
 - Never print secrets, never commit `kaggle.json`, never make the notebook public.

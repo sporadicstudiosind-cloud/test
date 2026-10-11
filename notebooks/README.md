@@ -10,7 +10,7 @@ generated notebook no longer matches what the script would produce.
 | notebook | service | default preset | open |
 |---|---|---|---|
 | `iridium_studio.ipynb` | Google Colab (free T4) | `chat-34m` | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sporadicstudiosind-cloud/test/blob/claude/gallant-faraday-lhycva/notebooks/iridium_studio.ipynb) |
-| `iridium_studio_kaggle.ipynb` | Kaggle Notebooks (P100 or 2xT4) | `chat-100m` | [![Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/sporadicstudiosind-cloud/test/blob/claude/gallant-faraday-lhycva/notebooks/iridium_studio_kaggle.ipynb) |
+| `iridium_studio_kaggle.ipynb` | Kaggle Notebooks (P100 or 2xT4) | `chat-36m` | [![Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/sporadicstudiosind-cloud/test/blob/claude/gallant-faraday-lhycva/notebooks/iridium_studio_kaggle.ipynb) |
 | `iridium_studio_jupyter.ipynb` | any Jupyter host -- Lightning AI, SageMaker Studio Lab, Paperspace, RunPod, your own box | `chat-100m` | open it |
 | `train_iridium_colab.ipynb` | Colab | -- | redirects to `iridium_studio.ipynb` (kept so the old badge/link still works) |
 | `train_iridium_tpu_colab.ipynb` | Colab/Kaggle free TPU v5e-1 | `chat-100m`, with geometry overrides | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sporadicstudiosind-cloud/test/blob/claude/gallant-faraday-lhycva/notebooks/train_iridium_tpu_colab.ipynb) |

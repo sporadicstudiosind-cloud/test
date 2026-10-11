@@ -654,7 +654,7 @@ def build_tpu() -> list[dict]:
 def main() -> None:
     for target, name in GENERATED_STUDIO.items():
         title_prefix = {"colab": "Google Colab", "kaggle": "Kaggle", "jupyter": "Jupyter"}[target]
-        default_preset = {"colab": "chat-34m", "kaggle": "chat-100m", "jupyter": "chat-100m"}[target]
+        default_preset = {"colab": "chat-34m", "kaggle": "chat-36m", "jupyter": "chat-100m"}[target]
         cells = build_studio(target, f"Iridium 1.0 Studio -- {title_prefix}", default_preset)
         write(name, cells)
 

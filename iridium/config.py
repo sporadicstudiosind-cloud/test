@@ -574,6 +574,14 @@ class CodecConfig:
     #: so the modality embedding and slot head have a row for it. Input-only:
     #: costs an encoder, never a decoder. See ``iridium.world.tokens``.
     camera_features: int = 0
+    #: Multiply text-token embeddings by ``sqrt(d_model)`` on the way in, as
+    #: Gemma (and EmbeddingGemma) do. With a tied head the table must serve
+    #: both as input vectors and as output classifiers; the scale lets its
+    #: rows stay small enough for the softmax while the input still arrives
+    #: large next to the residual updates the pre-norm blocks add, instead of
+    #: being drowned by them within a layer or two.
+    #: Off by default: it changes what an existing checkpoint computes.
+    embed_scale: bool = False
 
     def __post_init__(self) -> None:
         # Validated here rather than in the module, because an unknown value
@@ -960,6 +968,30 @@ class IridiumConfig:
     @property
     def n_params(self) -> int:
         return sum(self.parameter_parts().values())
+
+    @property
+    def embedding_params(self) -> int:
+        """Lookup tables: the token table, per-layer and hashed n-gram embeddings.
+
+        Read by index, never multiplied through, so they cost memory rather
+        than compute and are not what a compute-optimal token budget scales
+        with (Kaplan et al., 2020, fit their laws on non-embedding parameters).
+        """
+        parts = self.parameter_parts()
+        return (parts.get("codec.text_embedding", 0) + parts.get("per_layer_embedding", 0)
+                + parts.get("codec.ngram_embedding", 0))
+
+    @property
+    def body_params(self) -> int:
+        """The network every token runs through: core, superstacks, router.
+
+        Excludes embeddings and the media encoders/decoders, which a text
+        token never touches. This is the ``N`` token budgets are sized from.
+        """
+        parts = self.parameter_parts()
+        return sum(parts.get(k, 0) for k in ("control_core", "superstacks", "router",
+                                              "controller_dispatch", "context_memory",
+                                              "bank_gate"))
 
     # -- memory ----------------------------------------------------------
 

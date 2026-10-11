@@ -139,7 +139,9 @@ def audit(
     length = sequence_length or window
     corpus = tokens_for(n_items, window)
     consumed = steps * batch_size * accumulate * length
-    parameters = int(cfg.n_params)
+    # Non-embedding, non-media parameters: what compute-optimal ratios are
+    # fitted on. A lookup table or an unused image decoder needs no tokens.
+    parameters = int(getattr(cfg, "body_params", 0) or cfg.n_params)
 
     weights = dict(mixture) if mixture else {}
     total_weight = sum(v for v in weights.values() if v > 0)

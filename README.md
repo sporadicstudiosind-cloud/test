@@ -35,6 +35,7 @@ round, not the run.
 | preset | for | params | tokens | Colab T4 | Kaggle P100 | TPU v5e-1 |
 |---|---|---|---|---|---|---|
 | `chat-34m` | talking (start here) | 36 M | 328 M | ~4 h | ~4 h | ~0.2 h |
+| `chat-36m` | talking, compute-optimal (Kaggle default) | 36 M body + 6 M embeddings | 716 M | ~14 h | ~13 h | ~0.6 h |
 | `chat-100m` | talking + reasoning | 108 M | 655 M | ~21 h | ~18 h | ~0.9 h |
 | `tools-100m` | tool calling | 108 M | 655 M | ~21 h | ~18 h | ~0.9 h |
 | `omni-100m` | omnimodal | 112 M | 655 M | ~21 h | ~18 h | ~0.9 h |
