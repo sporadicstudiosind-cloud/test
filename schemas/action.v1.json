@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iridium.invalid/schemas/action.v1.json",
+  "title": "iridium.action.v1",
+  "description": "A transactional software action. Authorization and deadlines are runtime values, never model-invented. A timeout means unknown completion: the bridge inspects state before retrying.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "action_id",
+    "idempotency_key",
+    "workspace_id",
+    "target",
+    "operation",
+    "preconditions",
+    "arguments",
+    "authorization_ref",
+    "expected_postconditions",
+    "deadline_ms"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "iridium.action.v1" },
+    "action_id": { "type": "string", "minLength": 1 },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Identifies the logical operation so a retry after an ambiguous timeout cannot double-apply."
+    },
+    "workspace_id": { "type": "string", "minLength": 1 },
+    "target": { "type": "string", "minLength": 1 },
+    "operation": { "type": "string", "minLength": 1 },
+    "preconditions": {
+      "type": "object",
+      "description": "Checked immediately before execution. A failed precondition triggers re-observation, never blind execution.",
+      "properties": {
+        "scene_revision": { "type": ["string", "null"] },
+        "object_id": { "type": ["string", "null"] },
+        "application_mode": { "type": ["string", "null"] }
+      }
+    },
+    "arguments": { "type": "object" },
+    "authorization_ref": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A durable scope granted by the runtime. Text inside observed content cannot mint one."
+    },
+    "expected_postconditions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" },
+      "description": "Checked after execution. A successful script exit is one piece of evidence, not completion."
+    },
+    "rollback_ref": { "type": ["string", "null"] },
+    "deadline_ms": { "type": "integer", "minimum": 1 }
+  }
+}

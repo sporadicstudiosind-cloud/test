@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iridium.invalid/schemas/coupling_interface.v1.json",
+  "title": "iridium.coupling.v1",
+  "description": "One edge of a multiphysics coupling graph. Naming two domains is not a coupled solve; this schema forces the exchange semantics to be stated and checked.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "interface_id",
+    "from",
+    "to",
+    "send",
+    "return",
+    "frame",
+    "exchange_times",
+    "transfer",
+    "iteration",
+    "checks"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "iridium.coupling.v1" },
+    "interface_id": { "type": "string", "minLength": 1 },
+    "from": { "type": "string", "minLength": 1 },
+    "to": { "type": "string", "minLength": 1 },
+    "send": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+    "return": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+    "frame": { "type": "string", "minLength": 1 },
+    "exchange_times": {
+      "enum": ["coupled_step_boundaries", "subcycled", "explicit_schedule"]
+    },
+    "transfer": {
+      "enum": ["conservative_surface_mapping", "nearest_node", "rbf_interpolation", "consistent_projection"]
+    },
+    "iteration": {
+      "enum": ["one_way", "loose_staggered", "partitioned_until_interface_tolerance", "monolithic"],
+      "description": "one_way must be reported as an approximation when the scenario has motion-induced feedback."
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "enum": [
+          "force_balance",
+          "interface_work",
+          "displacement_residual",
+          "mass_flux_continuity",
+          "energy_flux_continuity",
+          "interface_position_consistency",
+          "added_mass_stability"
+        ]
+      }
+    },
+    "tolerances": { "type": "object" },
+    "time_scales": {
+      "type": "object",
+      "properties": {
+        "from_dt_s": { "type": "number", "exclusiveMinimum": 0 },
+        "to_dt_s": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    }
+  }
+}

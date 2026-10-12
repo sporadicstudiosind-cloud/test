@@ -1,0 +1,145 @@
+{
+  "config": {
+    "blocks": [
+      1,
+      2,
+      1
+    ],
+    "d_model": 128,
+    "total_params": 817705,
+    "train": {
+      "eval_episodes": 128,
+      "lr": 0.001,
+      "seed": 0,
+      "steps": 4000,
+      "train_episodes": 1024
+    },
+    "transformer": "iridium-1-slice",
+    "transformer_params": 737280
+  },
+  "environment": {
+    "platform": "Linux-6.18.44-fc-v24-x86_64-with-glibc2.39",
+    "python": "3.11.15",
+    "torch": "2.14.0+cpu"
+  },
+  "history": [
+    {
+      "elapsed_s": 0.8,
+      "loss": 2.5140600204467773,
+      "loss_direct": 0.8724890947341919,
+      "loss_flux": 0.8724890947341919,
+      "loss_image": 3.076326847076416,
+      "step": 0
+    },
+    {
+      "elapsed_s": 118.6,
+      "loss": 0.13255539536476135,
+      "loss_direct": 0.019245803356170654,
+      "loss_flux": 0.04404768720269203,
+      "loss_image": 0.27704766392707825,
+      "step": 500
+    },
+    {
+      "elapsed_s": 236.6,
+      "loss": 0.051313795149326324,
+      "loss_direct": 0.004527899902313948,
+      "loss_flux": 0.012358604930341244,
+      "loss_image": 0.13770917057991028,
+      "step": 1000
+    },
+    {
+      "elapsed_s": 357.7,
+      "loss": 0.04008715599775314,
+      "loss_direct": 0.0025455907452851534,
+      "loss_flux": 0.00457573588937521,
+      "loss_image": 0.1318633258342743,
+      "step": 1500
+    },
+    {
+      "elapsed_s": 477.5,
+      "loss": 0.01740366593003273,
+      "loss_direct": 0.0010162569815292954,
+      "loss_flux": 0.0021660267375409603,
+      "loss_image": 0.056885525584220886,
+      "step": 2000
+    },
+    {
+      "elapsed_s": 595.9,
+      "loss": 0.009186073206365108,
+      "loss_direct": 0.0007084329845383763,
+      "loss_flux": 0.001955099403858185,
+      "loss_image": 0.026090163737535477,
+      "step": 2500
+    },
+    {
+      "elapsed_s": 712.7,
+      "loss": 0.013355388306081295,
+      "loss_direct": 0.0004440090851858258,
+      "loss_flux": 0.0008183068130165339,
+      "loss_image": 0.0483722910284996,
+      "step": 3000
+    },
+    {
+      "elapsed_s": 826.3,
+      "loss": 0.00715635297819972,
+      "loss_direct": 0.00034303986467421055,
+      "loss_flux": 0.0007082688389346004,
+      "loss_image": 0.024420177564024925,
+      "step": 3500
+    },
+    {
+      "elapsed_s": 939.0,
+      "loss": 0.01094956137239933,
+      "loss_direct": 0.000333310425048694,
+      "loss_flux": 0.0005246024811640382,
+      "loss_image": 0.04036659374833107,
+      "step": 3999
+    }
+  ],
+  "image_steps_sweep": {
+    "1": 0.20628109574317932,
+    "16": 0.09027521312236786,
+    "2": 0.1215934157371521,
+    "32": 0.09298241138458252,
+    "4": 0.09808871150016785,
+    "8": 0.09006655216217041
+  },
+  "model": "iridium-1-slice",
+  "reconciliation_findings": [
+    "[unbound] numeral 9.457e-09 is not bound to a metric  (in: '9.457e-09 for')"
+  ],
+  "results": {
+    "extrapolation": {
+      "mass_drift_direct_head": 0.019407052451925044,
+      "mass_drift_exact": 4.168919646085417e-16,
+      "mass_drift_flux_head": 9.129666075711452e-09,
+      "n_episodes": 128,
+      "nrmse_direct_head": 1.4767744057804766,
+      "nrmse_flux_head": 1.4787366354339224,
+      "nrmse_persistence": 1.648174623466112,
+      "nrmse_upwind_reference": 0.2097495621706707
+    },
+    "interpolation": {
+      "mass_drift_direct_head": 0.018336919789019458,
+      "mass_drift_exact": 2.707392743710343e-16,
+      "mass_drift_flux_head": 9.457110931453648e-09,
+      "n_episodes": 128,
+      "nrmse_direct_head": 0.04592514660470891,
+      "nrmse_flux_head": 0.055484787734373,
+      "nrmse_persistence": 1.2612746553900207,
+      "nrmse_upwind_reference": 0.11280272231096036
+    },
+    "train_fit": {
+      "mass_drift_direct_head": 0.020798299642599723,
+      "mass_drift_exact": 4.3619834548344396e-16,
+      "mass_drift_flux_head": 1.089286309020816e-08,
+      "n_episodes": 128,
+      "nrmse_direct_head": 0.03327651221388089,
+      "nrmse_flux_head": 0.04124267202197963,
+      "nrmse_persistence": 1.228799652852473,
+      "nrmse_upwind_reference": 0.10361583147566583
+    }
+  },
+  "scenario_revision": "slice_rev_0001",
+  "wall_clock_s": 947.9
+}

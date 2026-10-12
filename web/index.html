@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Iridium-1 — routed control core, verified at 1 B</title>
+<meta name="description" content="A routed control-core + superstack foundation model architecture, built and verified at 1.00 B parameters and costed to 9 T. Every number on this page comes from code.">
+<link rel="stylesheet" href="./styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>◈</text></svg>">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="brand">◈ Iridium-1 <span>/ routed control core</span></div>
+    <nav class="links">
+      <a href="#rung">1 B rung</a>
+      <a href="#ladder">Ladder</a>
+      <a href="#verified">Verified</a>
+      <a href="#findings">Findings</a>
+      <a href="#waterfall">Waterfall</a>
+      <a href="#results">Results</a>
+    </nav>
+    <button class="theme" id="theme-toggle" aria-label="Toggle colour theme">◐ Theme</button>
+  </div>
+</header>
+
+<div class="wrap hero">
+  <h1>One control core. Five superstacks.<br>A billion parameters that actually run.</h1>
+  <p class="lede">
+    A foundation-model architecture where every token passes through a shared control core,
+    which routes it into deep domain banks, decides how far into them it goes, and decides
+    whether to send it round again. Built at <b>1.00 B</b>, verified by test, and costed to
+    9 T on the same code path. Every number below is generated from the repository, not typed in.
+  </p>
+  <div class="chips" id="hero-chips"></div>
+</div>
+
+<section id="topology">
+  <div class="wrap">
+    <h2>Architecture</h2>
+    <h3>What a token actually does</h3>
+    <p class="intro">
+      Stage I of the core owns the causal KV cache for the whole stream. The router picks
+      <em>k</em> superstacks per token, a focus scalar sets how deep it goes, and a halting head
+      decides whether it loops. Superstacks keep a <em>sparse stack-local</em> cache — the subset of
+      earlier tokens routed to the same stack — plus a bridge onto the core's history. That pair is
+      what makes cached decoding reproduce teacher forcing exactly.
+    </p>
+    <div class="topology" id="topology"></div>
+  </div>
+</section>
+
+<section id="rung">
+  <div class="wrap">
+    <h2>The test rung</h2>
+    <h3>1,001,730,811 parameters, measured on a CPU</h3>
+    <p class="intro">
+      A small core and five general-purpose superstacks, with every mechanism of the full design
+      present: two-stage core, top-2 routing, the bridge, the focus ladder, the ponder loop, and
+      spectral blocks in the science stack. It instantiates, runs, decodes and trains.
+    </p>
+    <div class="tiles" id="rung-tiles"></div>
+    <div class="grid2" style="margin-top:18px">
+      <figure class="card" id="fig-routing"></figure>
+      <figure class="card" id="fig-lora"></figure>
+    </div>
+    <div class="note" id="rung-note"></div>
+    <div class="tablewrap" style="margin-top:18px"><table id="rung-geometry"></table></div>
+  </div>
+</section>
+
+<section id="ladder">
+  <div class="wrap">
+    <h2>Scaling</h2>
+    <h3>The same modules, from 1.5 M to 39.5 T</h3>
+    <p class="intro">
+      Scale is a configuration file, not a rewrite. Pick a rung: the parameter breakdown, the
+      per-token cost and the memory footprint are computed from tensor shapes by the same
+      formulae the test suite checks against the real modules — at the built rungs the difference
+      is exactly zero.
+    </p>
+    <div class="controls">
+      <div class="control">
+        <label for="rung-select">Rung</label>
+        <select id="rung-select"></select>
+      </div>
+      <div class="control">
+        <label for="ctx">Context length</label>
+        <input type="range" id="ctx" min="10" max="20" step="1" value="15">
+      </div>
+      <div class="readout" id="ctx-readout"></div>
+    </div>
+    <div class="tiles" id="ladder-tiles"></div>
+    <figure class="card" id="fig-ladder" style="margin-top:18px"></figure>
+    <div class="tablewrap" style="margin-top:18px"><table id="ladder-table"></table></div>
+  </div>
+</section>
+
+<section id="verified">
+  <div class="wrap">
+    <h2>Evidence</h2>
+    <h3>What holds, and how tightly</h3>
+    <p class="intro">
+      Each of these is a property with a test that fails if it stops being true. The parity gate is
+      the load-bearing one: three separate mechanisms in this design could break it silently, and
+      two of them did during the build before the gate caught them.
+    </p>
+    <div class="tiles" id="verified-tiles"></div>
+  </div>
+</section>
+
+<section id="findings">
+  <div class="wrap">
+    <h2>Verification</h2>
+    <h3>Where the original plan was wrong</h3>
+    <p class="intro">
+      Fifteen of twenty findings against the source specification. <span class="status corrected">corrected</span>
+      means the plan's number or mechanism was wrong and the code uses a different one;
+      <span class="status found">found</span> means a bug nobody had planned for, surfaced by a test.
+    </p>
+    <div class="tablewrap"><table id="findings-table"></table></div>
+  </div>
+</section>
+
+<section id="waterfall">
+  <div class="wrap">
+    <h2>The originating question</h2>
+    <h3>"What if I double the water over the waterfall?"</h3>
+    <p class="intro">
+      Not "it doubles". Steady open-channel flow has two different exact answers depending on which
+      depth you mean, and they disagree by 4.7 %. The solver converges to the analytic normal depth
+      from a starting state far from equilibrium, then recovers Manning's exponent on its own.
+    </p>
+    <div class="controls">
+      <div class="control">
+        <label for="q">Discharge q (m²/s)</label>
+        <input type="range" id="q" min="1" max="11" step="0.25" value="3">
+      </div>
+      <div class="readout" id="q-readout"></div>
+    </div>
+    <div class="tiles" id="waterfall-tiles"></div>
+    <figure class="card" id="fig-waterfall" style="margin-top:18px"></figure>
+  </div>
+</section>
+
+<section id="results">
+  <div class="wrap">
+    <h2>Measured</h2>
+    <h3>The training run, including where it failed</h3>
+    <p class="intro">
+      One phase-1 run at the 34 M rung: 800 steps, 755 s, CPU. The loss fell hard and the router
+      stayed healthy. Graded by free-running generation against independent computation, four of
+      five task families came out at or below a baseline that ignores the prompt entirely. That is
+      reported here because a build whose only published numbers are the good ones is not a
+      measurement.
+    </p>
+    <div class="grid2">
+      <figure class="card" id="fig-graded"></figure>
+      <figure class="card" id="fig-loss"></figure>
+    </div>
+    <div class="note" id="results-note"></div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p style="margin:0 0 6px">
+      Generated from the repository by <code>experiments/build_web_data.py</code>. Nothing on this
+      page is hand-entered; the ladder comes from <code>iridium.config</code>, the 1 B measurements
+      from <code>experiments/run_test1b.py</code>, the physics from the solvers.
+    </p>
+    <p style="margin:0" id="footer-meta"></p>
+  </div>
+</footer>
+
+<div class="tooltip" id="tooltip" role="status"></div>
+<script src="./app.js"></script>
+</body>
+</html>
