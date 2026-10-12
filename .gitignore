@@ -11,3 +11,6 @@ _pytest*.log
 
 # Tokenizer and other training caches.
 artifacts/
+
+# local exported checkpoints
+/weights/

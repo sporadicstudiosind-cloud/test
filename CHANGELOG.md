@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Fix: first Kaggle training step crashed on GPU
+- `place_model` moved a hardcoded list of submodules to the primary device.
+  The per-layer embedding table (`ple`, added with chat-36m) was not on it,
+  stayed on the CPU, and the first GPU forward pass raised "Expected all
+  tensors to be on the same device ... index is on cuda:0, different from
+  other tensors on cpu". It now walks the module tree, so a new submodule
+  cannot be left behind. `tests/unit/test_place_model_covers_every_module.py`
+  checks every preset on the `meta` device, no GPU needed, and fails on the
+  old code.
+- The notebook clone cell now updates an existing checkout (fetch + reset,
+  refusing if it has local edits) instead of silently reusing stale code,
+  prints the source revision, and asks for a kernel restart when the code
+  changed under modules already imported.
+- `python -m iridium chat` with no `--checkpoint` now prefers
+  `$IRIDIUM_CHECKPOINT`, then `weights/iridium-inference.pt`, before the
+  bundled demo.
+- `tests/unit/test_precision.py`: the fp64-downcast guard matched frames by
+  a `"/iridium/"` substring, which never matches Windows paths, so it passed
+  vacuously there. It now compares against the package directory.
+
 ### `chat-36m`: chat-34m rebuilt from what its first run showed
 - The trained chat-34m (20k steps, 330M tokens, val 1.19 bpb text / 0.87 chat)
   spent 24.4M of a 30M body on four superstacks the router used evenly

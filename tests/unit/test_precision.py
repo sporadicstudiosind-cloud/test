@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import collections
 import dataclasses
+import os
 import traceback
 
 import numpy as np
@@ -45,6 +46,10 @@ from iridium.config import get_config
 from iridium.model.iridium1 import Iridium1
 from iridium.model.layers import use_attention_backend
 from iridium.runtime.decode import run_chunked
+
+import iridium
+
+_PACKAGE_DIR = os.path.normcase(os.path.dirname(os.path.abspath(iridium.__file__))) + os.sep
 
 #: Calls that can narrow a tensor's floating-point type.
 NARROWING = {"float", "half", "bfloat16", "to", "type", "type_as"}
@@ -85,8 +90,14 @@ class CatchFp64Downcast(TorchFunctionMode):
         owns can be blamed for it.
         """
         for frame in reversed(traceback.extract_stack()[:-2]):
-            if "/iridium/" in frame.filename:
-                where = "iridium/" + frame.filename.split("/iridium/", 1)[1]
+            # Compare against the package's real location, not a "/iridium/"
+            # substring: on Windows the separators are backslashes (so the
+            # substring never matched and the guard passed vacuously), and a
+            # checkout that is itself named "iridium" makes the substring
+            # match this test file too.
+            filename = os.path.normcase(os.path.abspath(frame.filename))
+            if filename.startswith(_PACKAGE_DIR):
+                where = "iridium/" + filename[len(_PACKAGE_DIR):].replace(os.sep, "/")
                 return f"{where}:{frame.lineno}  {(frame.line or '').strip()}"
         return None
 

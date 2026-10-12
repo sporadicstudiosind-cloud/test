@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
 _DEFAULT_CHAT_CHECKPOINT = (
     Path(__file__).resolve().parents[1] / "serve" / "weights" / "nano-phase1-fp16.pt"
 )
@@ -230,6 +232,21 @@ def _thinking_from_args(args):
     return ThinkingBudget(effort=args.effort, loops=think, spread=args.think_spread)
 
 
+def _default_chat_checkpoint() -> str:
+    """Your own model if one is lying around, the bundled demo otherwise.
+
+    ``python -m iridium chat`` with no arguments used to open the demo
+    checkpoint even when a trained model sat in ``weights/``, which is
+    never what someone who just trained one wants.
+    """
+    import os
+    for candidate in (os.environ.get("IRIDIUM_CHECKPOINT"),
+                      _REPO_ROOT / "weights" / "iridium-inference.pt"):
+        if candidate and Path(candidate).is_file():
+            return str(candidate)
+    return str(_DEFAULT_CHAT_CHECKPOINT)
+
+
 def cmd_chat(args) -> int:
     """Chat with an actual small checkpoint, with honest provenance and limits."""
     from .runtime.chat import ChatSession
@@ -375,7 +392,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_generate)
 
     p = sub.add_parser("chat", help="chat with the bundled small checkpoint or your own")
-    p.add_argument("--checkpoint", default=str(_DEFAULT_CHAT_CHECKPOINT))
+    p.add_argument("--checkpoint", default=_default_chat_checkpoint(),
+                   help="default: $IRIDIUM_CHECKPOINT, then weights/iridium-inference.pt, "
+                        "then the bundled demo")
     p.add_argument("--prompt", help="send one prompt and exit; omit for interactive chat")
     p.add_argument("--device", default="auto", help="auto, cpu, cuda[:N], rocm, or mps")
     p.add_argument("--precision", default="auto", choices=("auto", "fp32", "bf16", "fp16"))

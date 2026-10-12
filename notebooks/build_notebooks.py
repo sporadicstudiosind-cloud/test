@@ -213,36 +213,70 @@ def private_clone_cell(target: str) -> str:
     RELEASE_BRANCH = {RELEASE_BRANCH!r}
     ROOT = Path.cwd()
 
+    # The token travels in an environment-scoped git config header: never in
+    # the URL (git would store it in .git/config) and never in the argv (a
+    # failed subprocess prints its argv).
+    env = dict(os.environ, GIT_TERMINAL_PROMPT='0')
+    if token:
+        import base64
+        basic = base64.b64encode(f'x-access-token:{{token}}'.encode()).decode()
+        env.update(GIT_CONFIG_COUNT='1',
+                   GIT_CONFIG_KEY_0='http.https://github.com/.extraheader',
+                   GIT_CONFIG_VALUE_0=f'AUTHORIZATION: basic {{basic}}')
+        del basic
+
     if (ROOT / 'iridium' / 'presets.py').is_file():
         print('Already inside a checkout of the repository:', ROOT)
     else:
         ROOT = Path.cwd() / REPO_NAME
         if ROOT.is_dir():
-            print('Reusing existing checkout at', ROOT)
-        elif token:
-            # The token travels in an environment-scoped git config header:
-            # never in the URL (git would store it in .git/config) and never in
-            # the argv (a failed subprocess prints its argv).
-            import base64
-            basic = base64.b64encode(f'x-access-token:{{token}}'.encode()).decode()
-            env = dict(os.environ, GIT_CONFIG_COUNT='1',
-                       GIT_CONFIG_KEY_0='http.https://github.com/.extraheader',
-                       GIT_CONFIG_VALUE_0=f'AUTHORIZATION: basic {{basic}}',
-                       GIT_TERMINAL_PROMPT='0')
+            # A checkout left over from earlier in this session would
+            # otherwise silently keep running whatever code it was cloned
+            # with, including bugs fixed upstream since. Bring it up to date.
+            # fetch + reset rather than pull --ff-only: a depth-1 clone has no
+            # history for git to prove a fast-forward with.
+            dirty = subprocess.run(['git', '-C', str(ROOT), 'status', '--porcelain',
+                                    '--untracked-files=no'],
+                                   capture_output=True, text=True).stdout.strip()
+            if dirty:
+                raise RuntimeError('The existing checkout at %s has local edits, so it was '
+                                   'not updated:\\n%s\\nDelete it (!rm -rf %s) and rerun this '
+                                   'cell for a fresh clone.' % (ROOT, dirty, ROOT))
+            fetched = subprocess.run(['git', '-C', str(ROOT), 'fetch', '--depth', '1',
+                                      'origin', RELEASE_BRANCH],
+                                     env=env, capture_output=True, text=True)
+            if fetched.returncode != 0:
+                raise RuntimeError('Could not update the existing checkout at %s (exit %d). '
+                                   'Delete it (!rm -rf %s) and rerun this cell.' %
+                                   (ROOT, fetched.returncode, ROOT))
+            before = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'],
+                                    capture_output=True, text=True).stdout.strip()
+            subprocess.run(['git', '-C', str(ROOT), 'reset', '--hard', 'FETCH_HEAD'],
+                           check=True, capture_output=True)
+            after = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'],
+                                   capture_output=True, text=True).stdout.strip()
+            print('Updated existing checkout at', ROOT)
+            if before != after and 'iridium' in sys.modules:
+                # New code on disk does not replace modules already imported:
+                # the old ones keep running and the update never executes.
+                raise RuntimeError('The checkout was just updated, but this kernel already '
+                                   'imported the old code. Restart the kernel, then run the '
+                                   'notebook from the top.')
+        else:
+            if not token:
+                print('No GITHUB_TOKEN found. {missing_token_hint}')
+                print('Trying an unauthenticated clone (works only if the repo is public)...')
             done = subprocess.run(['git', 'clone', '--depth', '1', '--branch', RELEASE_BRANCH,
                                    f'https://github.com/{{REPO_OWNER}}/{{REPO_NAME}}.git',
                                    str(ROOT)], env=env, capture_output=True, text=True)
-            del env, basic
             if done.returncode != 0:
                 raise RuntimeError('git clone failed (exit %d). Check the token can read '
                                    'the repository and the branch exists.' % done.returncode)
             print('Cloned', REPO_OWNER + '/' + REPO_NAME, '@', RELEASE_BRANCH, 'to', ROOT)
-        else:
-            print('No GITHUB_TOKEN found. {missing_token_hint}')
-            print('Trying an unauthenticated clone (works only if the repo is public)...')
-            subprocess.run(['git', 'clone', '--depth', '1', '--branch', RELEASE_BRANCH,
-                           f'https://github.com/{{REPO_OWNER}}/{{REPO_NAME}}.git', str(ROOT)],
-                          check=True)
+    del env
+    revision = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', '--short', 'HEAD'],
+                              capture_output=True, text=True).stdout.strip()
+    print('source revision:', revision or 'unknown')
     os.chdir(ROOT)
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))

@@ -102,9 +102,31 @@ def test_legacy_checkpoint_loads_for_chat_and_finetuning_only_with_known_gap(tmp
         load_initial_model(path)
 
 
-def test_chat_command_defaults_to_bundled_checkpoint():
+def test_chat_command_defaults_to_bundled_checkpoint(monkeypatch, tmp_path):
+    # No env var and no local weights/: the bundled demo is the fallback.
+    monkeypatch.delenv("IRIDIUM_CHECKPOINT", raising=False)
+    monkeypatch.setattr(cli, "_REPO_ROOT", tmp_path)
     args = cli.build_parser().parse_args(["chat", "--prompt", "hello"])
     assert args.func is cli.cmd_chat
     assert args.checkpoint.endswith("nano-phase1-fp16.pt")
     assert args.max_new_tokens == 96
     assert cli._terminal_text("a\x1b[31m\n") == "a\\u001b[31m\n"
+
+
+def test_chat_command_prefers_your_own_weights(monkeypatch, tmp_path):
+    """A trained model in weights/ beats the demo; $IRIDIUM_CHECKPOINT beats both."""
+    monkeypatch.delenv("IRIDIUM_CHECKPOINT", raising=False)
+    monkeypatch.setattr(cli, "_REPO_ROOT", tmp_path)
+    local = tmp_path / "weights" / "iridium-inference.pt"
+    local.parent.mkdir()
+    local.write_bytes(b"")
+    assert cli.build_parser().parse_args(["chat"]).checkpoint == str(local)
+
+    chosen = tmp_path / "mine.pt"
+    chosen.write_bytes(b"")
+    monkeypatch.setenv("IRIDIUM_CHECKPOINT", str(chosen))
+    assert cli.build_parser().parse_args(["chat"]).checkpoint == str(chosen)
+
+    # An env var naming a missing file is ignored rather than trusted.
+    monkeypatch.setenv("IRIDIUM_CHECKPOINT", str(tmp_path / "absent.pt"))
+    assert cli.build_parser().parse_args(["chat"]).checkpoint == str(local)

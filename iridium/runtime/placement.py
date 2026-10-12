@@ -29,16 +29,25 @@ def place_model(model, devices):
     primary = devices[0]
     if len(devices) > 1 and any(not str(d).startswith('cuda:') for d in devices):
         raise ValueError('multi-device placement requires explicit CUDA indices')
-    for name in ('codecs', 'core', 'router', 'context_memory', 'rope'):
-        module = getattr(model, name, None)
-        if module is not None:
-            module.to(primary)
-    for name in ('entry', 'exit'):
-        module = getattr(model.bank, name)
-        if module is not None:
-            module.to(primary)
-    if model.bank_gate is not None:
-        model.bank_gate.data = model.bank_gate.data.to(primary)
+    # Everything except the specialist stacks lives on the primary device.
+    # This used to be a hardcoded list of submodule names, and every module
+    # added to Iridium1 afterwards (the per-layer embedding table, ``ple``,
+    # was the first) silently stayed on the CPU until its first forward pass
+    # raised "Expected all tensors to be on the same device". Walking the
+    # module tree instead means a new submodule cannot be forgotten.
+    for name, child in model.named_children():
+        if name != 'bank':
+            child.to(primary)
+    for name, child in model.bank.named_children():
+        if name != 'stacks':
+            child.to(primary)
+    for owner in (model, model.bank):
+        for key, param in list(owner._parameters.items()):
+            if param is not None:
+                param.data = param.data.to(primary)
+        for key, buf in list(owner._buffers.items()):
+            if buf is not None:
+                owner._buffers[key] = buf.to(primary)
     for stack, device in zip(model.bank.stacks, plan['stack_devices']):
         stack.to(device)
     model.device_plan = plan
