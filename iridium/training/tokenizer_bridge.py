@@ -23,7 +23,7 @@ __all__ = ["tokenizer_for_config", "tokenizer_manifest", "tokenizer_from_manifes
 
 
 def tokenizer_for_config(cfg, cache_dir: Optional[str | Path] = None, seed: int = 0,
-                         n_docs: int = 2000):
+                         n_docs: int = 2000, sources: Optional[dict] = None):
     """The tokenizer ``cfg`` implies, or ``None`` for the byte-level path.
 
     ``None`` rather than a byte-level tokenizer object, because the byte path
@@ -44,7 +44,7 @@ def tokenizer_for_config(cfg, cache_dir: Optional[str | Path] = None, seed: int 
         return None
     from ..data.tokenizer import tokenizer_for
     directory = Path(cache_dir or cfg.text_tokenizer_cache)
-    return tokenizer_for(cfg.text_vocab_size, directory, seed=seed, n_docs=n_docs)
+    return tokenizer_for(cfg.text_vocab_size, directory, sources, seed=seed, n_docs=n_docs)
 
 
 def tokenizer_manifest(tokenizer, cfg=None) -> dict:

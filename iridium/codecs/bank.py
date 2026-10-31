@@ -36,12 +36,7 @@ from .spans import CONDITIONING, CONTINUOUS, MODALITIES, MODALITY_INDEX, Batch
 
 def continuous_dims(cfg: CodecConfig) -> dict[str, int]:
     return {
-        "image": cfg.image_channels * cfg.image_patch ** 2,
-        "video": cfg.image_channels * cfg.video_patch_t * cfg.image_patch ** 2,
-        "audio": cfg.audio_mels * cfg.audio_frames,
-        "field": cfg.field_channels * cfg.field_patch ** 2,
-        "geometry": cfg.point_features,
-        "quantity": 3 + cfg.quantity_roles,
+        **cfg.continuous_dims(),
         **({"camera": cfg.camera_features} if cfg.camera_features else {}),
     }
 
@@ -101,7 +96,7 @@ class CodecBank(nn.Module):
 
         decoders: dict[str, nn.Module] = {}
         for name, dim in self.dims.items():
-            if name in CONDITIONING:
+            if name in CONDITIONING or not cfg.emit_media:
                 continue                    # read, never emitted: no decoder
             if name == "quantity":
                 decoders[name] = RegressionHead(d_model, 1)

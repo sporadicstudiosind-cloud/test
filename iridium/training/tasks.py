@@ -461,6 +461,18 @@ FAMILY_DOMAIN: dict[str, str] = {
 }
 
 
+def _agent_family(name: str) -> Callable[[np.random.Generator, str], Item]:
+    # Imported on first use: agent_corpus imports the runtime, which imports chat.
+    def generate(rng: np.random.Generator, split: str = "train") -> Item:
+        from ..data import agent_corpus
+        return getattr(agent_corpus, f"{name}_item")(rng, split)
+    return generate
+
+
+GENERATORS.update({name: _agent_family(name) for name in (
+    "arithmetic_drill", "code_exec", "agent_episode", "image_foundation", "audio_foundation")})
+
+
 def make_item(family: str, rng: np.random.Generator, split: str = "train") -> Item:
     try:
         return GENERATORS[family](rng, split)

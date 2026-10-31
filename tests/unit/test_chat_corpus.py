@@ -55,7 +55,9 @@ def test_default_mix_is_commercially_usable_and_opt_ins_are_marked():
     for key in chat_corpus.DEFAULT_CHAT_MIX:
         spec = chat_corpus.CHAT_SOURCES[key]
         assert spec.commercial_ok and not spec.opt_in, key
-    assert set(chat_corpus.MAX_CHAT_MIX) == set(chat_corpus.CHAT_SOURCES)
+    # The general chat mix; iridium-50m's subject sources have their own mixes.
+    assert set(chat_corpus.MAX_CHAT_MIX) <= set(chat_corpus.CHAT_SOURCES)
+    assert {k for k, s in chat_corpus.CHAT_SOURCES.items() if s.opt_in} <= set(chat_corpus.MAX_CHAT_MIX)
     assert all(not chat_corpus.CHAT_SOURCES[k].commercial_ok
                for k in chat_corpus.CHAT_SOURCES if chat_corpus.CHAT_SOURCES[k].opt_in)
     assert set(chat_corpus.CONVERSATION_LOADERS) == set(chat_corpus.CHAT_SOURCES)

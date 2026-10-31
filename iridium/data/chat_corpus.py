@@ -24,6 +24,7 @@ a model that knows nothing.
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Iterator, Optional
 
@@ -136,6 +137,74 @@ CHAT_SOURCES: dict[str, ChatSourceSpec] = {
         approx_rows=93_700,
         written_by="human-written solutions (NuminaMath)",
         columns=("problem", "solution"),
+    ),
+    "gsm8k": ChatSourceSpec(
+        key="gsm8k", dataset="openai/gsm8k", config="main", split="train",
+        licence="MIT", obligation="Retain the licence notice.",
+        description="Grade-school word problems with worked steps, written by people.",
+        homepage="https://huggingface.co/datasets/openai/gsm8k", approx_rows=7_500,
+    ),
+    "nq_open": ChatSourceSpec(
+        key="nq_open", dataset="google-research-datasets/nq_open", config="nq_open", split="train",
+        licence="CC BY-SA 3.0", obligation="Attribution and share-alike on derivative datasets.",
+        description=(
+            "Real search questions with very short answers. Question in, short "
+            "answer out is the behaviour chat-36m never learned."
+        ),
+        homepage="https://huggingface.co/datasets/google-research-datasets/nq_open",
+        approx_rows=87_900,
+    ),
+    "arc": ChatSourceSpec(
+        key="arc", dataset="allenai/ai2_arc", config="ARC-Easy", split="train",
+        licence="CC BY-SA 4.0", obligation="Attribution and share-alike on derivative datasets.",
+        description="Grade-school science questions, answered with the correct choice's text.",
+        homepage="https://huggingface.co/datasets/allenai/ai2_arc", approx_rows=2_300,
+    ),
+    "openstax_requests": ChatSourceSpec(
+        key="openstax_requests", dataset="HuggingFaceTB/cosmopedia", config="openstax", split="train",
+        licence="Apache 2.0", obligation="Retain the licence and attribution notices.",
+        description="Textbook sections as request and reply, from Cosmopedia's own prompts.",
+        homepage="https://huggingface.co/datasets/HuggingFaceTB/cosmopedia", approx_rows=126_000,
+        written_by="synthetic, Mixtral-8x7B-Instruct", columns=("prompt", "text"),
+    ),
+    "story_requests": ChatSourceSpec(
+        key="story_requests", dataset="HuggingFaceTB/cosmopedia", config="stories", split="train",
+        licence="Apache 2.0", obligation="Retain the licence and attribution notices.",
+        description=(
+            "Stories as request and reply, so asking for a story gets a story "
+            "rather than an essay about one."
+        ),
+        homepage="https://huggingface.co/datasets/HuggingFaceTB/cosmopedia", approx_rows=5_000_000,
+        written_by="synthetic, Mixtral-8x7B-Instruct", columns=("prompt", "text"),
+    ),
+    "self_oss_instruct": ChatSourceSpec(
+        key="self_oss_instruct", dataset="bigcode/self-oss-instruct-sc2-exec-filter-50k",
+        config=None, split="train",
+        licence="ODC-By", obligation="Attribution to the dataset.",
+        description="Python tasks whose replies passed execution checks.",
+        homepage="https://huggingface.co/datasets/bigcode/self-oss-instruct-sc2-exec-filter-50k",
+        approx_rows=50_700, written_by="synthetic, StarCoder2-15B",
+        columns=("instruction", "response"),
+    ),
+    "tested_python": ChatSourceSpec(
+        key="tested_python", dataset="Vezora/Tested-22k-Python-Alpaca", config=None, split="train",
+        licence="Apache 2.0", obligation="Retain the licence notice.",
+        description="Instruction and Python reply; the card says each example was run and worked.",
+        homepage="https://huggingface.co/datasets/Vezora/Tested-22k-Python-Alpaca",
+        approx_rows=22_600, written_by="synthetic, generator not stated on the card",
+    ),
+    "python_codes": ChatSourceSpec(
+        key="python_codes", dataset="flytech/python-codes-25k", config=None, split="train",
+        licence="MIT (stated in the card's text, no licence tag)", obligation="Retain the licence notice.",
+        description="Instruction and Python reply, cleaned by its author.",
+        homepage="https://huggingface.co/datasets/flytech/python-codes-25k",
+        approx_rows=24_800, written_by="synthetic, generator not stated on the card",
+    ),
+    "mbpp": ChatSourceSpec(
+        key="mbpp", dataset="google-research-datasets/mbpp", config="full", split="train",
+        licence="CC BY 4.0", obligation="Attribution.",
+        description="Entry-level Python problems with hand-written solutions.",
+        homepage="https://huggingface.co/datasets/google-research-datasets/mbpp", approx_rows=374,
     ),
     "ultrachat": ChatSourceSpec(
         key="ultrachat",
@@ -345,7 +414,65 @@ def openr1_math_conversations(limit: Optional[int] = None, seed: int = 0
             return
 
 
+def _pair_loader(key: str, convert):
+    """Loader for a source where ``convert(row)`` gives ``(request, reply)`` or ``None``."""
+
+    def load(limit: Optional[int] = None, seed: int = 0) -> Iterator[list[Turn]]:
+        ds = _load(CHAT_SOURCES[key]).shuffle(seed=seed, buffer_size=1000)
+        produced = 0
+        for row in ds:
+            pair = convert(row)
+            if not pair or not pair[0].strip() or not pair[1].strip():
+                continue
+            yield [Turn("user", pair[0].strip()), Turn("assistant", pair[1].strip())]
+            produced += 1
+            if limit is not None and produced >= limit:
+                return
+
+    load.__name__ = f"{key}_conversations"
+    return load
+
+
+def _sentence(answer: str) -> str:
+    return answer[0].upper() + answer[1:] + ("" if answer[-1] in ".!?" else ".")
+
+
+def _nq(row):
+    answers = row.get("answer") or []
+    question = (row.get("question") or "").strip()
+    if not answers or not answers[0].strip() or not question:
+        return None
+    return question[0].upper() + question[1:] + "?", _sentence(answers[0].strip())
+
+
+def _gsm8k(row):
+    # "#### 72" is the dataset's answer marker; "<<3*4=12>>" its calculator notes.
+    worked = re.sub(r"<<.*?>>", "", row.get("answer") or "")
+    return row.get("question") or "", worked.replace("####", "The answer is").strip() + "."
+
+
+def _arc(row):
+    choices = dict(zip(row["choices"]["label"], row["choices"]["text"]))
+    answer = choices.get(row.get("answerKey"))
+    return (row.get("question") or "", _sentence(answer)) if answer else None
+
+
+def _instruction(row):
+    context = (row.get("input") or "").strip()
+    prompt = (row.get("instruction") or "").strip()
+    return (f"{prompt}\n\n{context}" if context else prompt), row.get("output") or ""
+
+
 CONVERSATION_LOADERS = {
+    "gsm8k": _pair_loader("gsm8k", _gsm8k),
+    "nq_open": _pair_loader("nq_open", _nq),
+    "arc": _pair_loader("arc", _arc),
+    "openstax_requests": _pair_loader("openstax_requests", lambda r: (r.get("prompt") or "", r.get("text") or "")),
+    "story_requests": _pair_loader("story_requests", lambda r: (r.get("prompt") or "", r.get("text") or "")),
+    "self_oss_instruct": _pair_loader("self_oss_instruct", lambda r: (r.get("instruction") or "", r.get("response") or "")),
+    "tested_python": _pair_loader("tested_python", _instruction),
+    "python_codes": _pair_loader("python_codes", _instruction),
+    "mbpp": _pair_loader("mbpp", lambda r: (r.get("text") or "", r.get("code") or "")),
     "dolly": dolly_conversations,
     "oasst": oasst_conversations,
     "smol_smoltalk": _messages_loader("smol_smoltalk"),

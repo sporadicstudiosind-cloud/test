@@ -39,6 +39,7 @@ import numpy as np
 
 from ..codecs.spans import Sample, Span
 from ..config import TEXT_ID_OFFSET
+from .domains import subject_of
 
 __all__ = ["ShardWriter", "Shard", "MixedCorpus", "write_items"]
 
@@ -182,7 +183,11 @@ class Shard:
         lo, hi = int(self.offsets[i]), int(self.offsets[i + 1])
         ids = np.asarray(self.ids[lo:hi], dtype=np.int64)
         mask = np.asarray(self.mask[lo:hi], dtype=bool)
-        return Sample(_spans(ids, mask), meta={"family": self.family})
+        meta = {"family": self.family}
+        subject = subject_of(self.family)
+        if subject:
+            meta["subject"] = subject
+        return Sample(_spans(ids, mask), meta=meta)
 
 
 def _spans(ids: np.ndarray, mask: np.ndarray) -> list[Span]:

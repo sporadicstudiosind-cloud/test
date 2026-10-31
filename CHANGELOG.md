@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### `iridium-50m`: specialist stacks, agent tools, rebuilt Kaggle notebook
+- New preset: 6-layer core, four subject-routed stacks (science, math, writing,
+  code), body 50.4M, embeddings 7.9M, read-only image and audio input 2.0M. Budget
+  5B tokens. See `docs/iridium-50m.md`. Built and tested, not trained.
+- **Fix: the model could never choose to call a tool.** Generation asks for a reply
+  with an open ASSISTANT marker and reads a call from the first emitted id, but
+  training put an unsupervised TOOL_CALL marker straight after the user turn. Tool
+  calls now train as ASSISTANT then a supervised TOOL_CALL. Any tool data trained
+  before this has the old layout. Tests missed it because they script `generate`.
+- **Fix:** `iridium.runtime.sandbox` could not be imported on Windows (`resource`).
+- **Fix:** a long tool loop could drop its system turn, and so its tool list.
+- **Fix:** a control id generated under `text_only` was fed back as a text token.
+- **Fix:** `IridiumConfig.from_dict` left `spectral_stacks` as a list after JSON.
+- `runtime/agent_tools.py`: optional file, Python, calculator, web and small fun tools.
+- `data/agent_corpus.py`: generated arithmetic, working code, agent episodes that call
+  the real file tools, and basic shapes and tones.
+- `python -m iridium agent`, `battery` and `export`.
+- `CodecConfig.input_media` and `emit_media`; `Preset.prepare_tokens` and
+  `tokenizer_sources`; `train_preset(time_budget_hours=, keep_rounds=)`.
+- The Kaggle notebook and runbook are rebuilt around `iridium-50m`, across sessions.
+- Correction: the entry below says even stack usage meant "no specialisation". It
+  does not: the balance loss asks for even usage, and that run never measured
+  specialisation.
+
 ### Fix: first Kaggle training step crashed on GPU
 - `place_model` moved a hardcoded list of submodules to the primary device.
   The per-layer embedding table (`ple`, added with chat-36m) was not on it,

@@ -165,6 +165,8 @@ def generate(
             continuous_payload = {name: value[0, -1]}
             result.continuous.append((name, value[0, -1].cpu().numpy()))
 
+        if text_only and token < text_offset:
+            slot = MODALITY_INDEX["control"]
         result.ids.append(token)
         result.modalities.append(name)
         result.focus.append(float(out.decisions[0].focus[0, -1]))

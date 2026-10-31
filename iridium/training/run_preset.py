@@ -97,14 +97,24 @@ def find_latest(out_dir: Path) -> Optional[str]:
 def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optional[int] = None,
                  device: Optional[str] = None, out: str = "runs", init: Optional[str] = None,
                  resume: Optional[str] = None, seed: int = 0, max_data: bool = False,
-                 data: Optional[str] = None) -> Path:
-    """Train ``preset``; returns the final checkpoint path.
+                 data: Optional[str] = None, time_budget_hours: Optional[float] = None,
+                 keep_rounds: Optional[int] = None) -> Path:
+    """Train ``preset``; returns the newest checkpoint path.
+
+    ``time_budget_hours`` stops cleanly after the last round that fits, so a
+    12-hour Kaggle session ends with its checkpoint saved instead of being
+    killed; run it again to continue. Check ``<preset>/preset.json``'s
+    ``trained`` flag to tell a stopped run from a finished one.
+    ``keep_rounds`` deletes all but the newest N round checkpoints, since a
+    long run's checkpoints would otherwise fill a session's disk.
 
     ``max_data`` swaps in every registered chat source, including opt-in ones
     whose terms are non-commercial or unclear (see ``chat_corpus.MAX_CHAT_MIX``).
     The sources actually used, with their licences, are written to the
     checkpoint manifest either way.
     """
+    import time
+
     import torch
 
     from ..model.iridium1 import Iridium1
@@ -124,6 +134,13 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
     print(describe(replace(preset, steps=steps, rounds=rounds)))
     print(f"device: {info.describe()}")
 
+    from ..data.domains import DOMAIN_FAMILIES
+    if not data and set(preset.mixture) & set(DOMAIN_FAMILIES):
+        from .prepare import prepare
+        data = str(Path(out) / "data")
+        if not (Path(data) / preset.name / "prepared.json").exists():
+            prepare(preset, data, seed=seed)
+
     shard_dir = None
     if data:
         # Prepared shards carry the tokenizer that wrote them; use exactly that
@@ -136,7 +153,8 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
         first = next(iter(prepared["families"].values()))
         tokenizer = tokenizer_from_manifest(first["tokenizer"])
     else:
-        tokenizer = tokenizer_for_config(cfg)
+        extra = {"sources": preset.tokenizer_sources} if preset.tokenizer_sources else {}
+        tokenizer = tokenizer_for_config(cfg, **extra)
     manifest = tokenizer_manifest(tokenizer, cfg)
     print("tokenizer:", {k: v for k, v in manifest.items() if k != "state"})
     if manifest.get("fell_back"):
@@ -222,7 +240,10 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
             trainer.set_corpus(corpus_for(start_round))
 
     path: Optional[Path] = None
+    started = time.monotonic()
+    slowest = 0.0
     for r in range(start_round, rounds):
+        round_started = time.monotonic()
         if r > start_round and shard_dir is None:
             trainer.set_corpus(corpus_for(r))
         until = steps if r == rounds - 1 else (r + 1) * steps // rounds
@@ -231,12 +252,32 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
                                                 "tokenizer": manifest, "sources": sources})
         print(f"round {r + 1}/{rounds} done at step {trainer.completed_steps}: {path}",
               flush=True)
+        if keep_rounds:
+            _prune_rounds(out_dir, keep_rounds)
+        slowest = max(slowest, time.monotonic() - round_started)
+        if (time_budget_hours and r < rounds - 1
+                and time.monotonic() - started + 1.1 * slowest > time_budget_hours * 3600):
+            (out_dir / "preset.json").write_text(json.dumps(
+                {"preset": preset.name, "steps": steps, "rounds": rounds, "status": preset.status,
+                 "trained": False, "completed_steps": trainer.completed_steps,
+                 "tokenizer": manifest, "sources": sources}, indent=2), encoding="utf-8")
+            print(f"time budget reached after round {r + 1}/{rounds}; run again to continue",
+                  flush=True)
+            return path
     final = trainer.save("final", extra={"preset": preset.name, "tokenizer": manifest,
                                          "sources": sources})
     (out_dir / "preset.json").write_text(json.dumps(
         {"preset": preset.name, "steps": steps, "rounds": rounds, "status": preset.status,
          "trained": True, "tokenizer": manifest, "sources": sources}, indent=2), encoding="utf-8")
     return final or path
+
+
+def _prune_rounds(out_dir: Path, keep: int) -> None:
+    import re
+    rounds = sorted((int(m.group(1)), p) for p in Path(out_dir).glob("*-round*.pt")
+                    if (m := re.search(r"-round(\d+)\.pt$", p.name)))
+    for _, path in rounds[:-keep]:
+        path.unlink(missing_ok=True)
 
 
 def held_out_evaluator(shard_dir, cfg, device, batch_size: int, window: int,

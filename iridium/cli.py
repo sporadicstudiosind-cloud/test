@@ -316,6 +316,92 @@ def cmd_chat(args) -> int:
         reply_to(message)
 
 
+def cmd_agent(args) -> int:
+    """Let a checkpoint use tools on a folder. Each tool group is optional."""
+    from .data.agent_corpus import agent_system_prompt
+    from .runtime.agent_tools import TOOL_GROUPS, build_registry
+    from .runtime.chat import Turn
+    from .runtime.device import detect, inference_autocast
+    from .runtime.tools import run_tool_loop
+    from .training.tokenizer_bridge import tokenizer_from_manifest
+
+    groups = [g for g in TOOL_GROUPS if g not in (args.without or [])]
+    info = detect(args.device, args.precision)
+    model, manifest = _load_chat_checkpoint(Path(args.checkpoint).expanduser().resolve(), info.device)
+    tokenizer = tokenizer_from_manifest(manifest)
+    registry = build_registry(args.workspace, groups=groups, seed=args.seed)
+    print(f"workspace: {Path(args.workspace).resolve()}\ntools: {', '.join(registry.names())}")
+    print("Tool calls run without asking. run_python is guarded, not isolated: see "
+          "iridium/runtime/agent_tools.py.")
+    # The tool block the model was trained on. A disabled tool still appears in
+    # it; calling one returns an error the model can read.
+    system = Turn("system", agent_system_prompt())
+    history: list[Turn] = [system]
+
+    def task(request: str) -> bool:
+        nonlocal history
+        with inference_autocast(info):
+            out = run_tool_loop(model, [*history, Turn("user", request)], registry,
+                                tokenizer=tokenizer, max_calls=args.max_calls,
+                                max_new_tokens=args.max_new_tokens, max_bytes=2800,
+                                temperature=args.temperature, seed=args.seed)
+        for call in out.calls:
+            shown = call.get("error") or call.get("result")
+            print(f"  [{call.get('name') or 'bad call'}] {call.get('arguments') or ''} -> "
+                  f"{_terminal_text(str(shown))[:300]}")
+        if out.stopped != "answer":
+            print(f"iridium> (no answer after {args.max_calls} tool calls)")
+            return False
+        print(f"iridium> {_terminal_text(out.answer)}")
+        history = list(out.turns)
+        return True
+
+    if args.prompt is not None:
+        return 0 if task(args.prompt) else 2
+    print("/reset clears the conversation; /exit quits.")
+    while True:
+        try:
+            line = input("you> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if line in ("/exit", "/quit"):
+            return 0
+        if line == "/reset":
+            history = [system]
+        elif line:
+            task(line)
+
+
+def cmd_battery(args) -> int:
+    """Grade a checkpoint on facts, held-out sums and code, agent tasks and media."""
+    from .evaluation.battery import run_battery
+    from .training.tokenizer_bridge import tokenizer_from_manifest
+
+    model, manifest = _load_chat_checkpoint(Path(args.checkpoint).expanduser().resolve(), args.device)
+    scores = run_battery(model, tokenizer_from_manifest(manifest), seeds=args.seeds)
+    if args.out:
+        Path(args.out).write_text(json.dumps(scores, indent=2), encoding="utf-8")
+    return 0
+
+
+def cmd_export(args) -> int:
+    """Strip a training checkpoint to inference weights, EMA by default."""
+    import torch
+    blob = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    key = "ema_state_dict" if args.weights == "ema" else "state_dict"
+    if blob.get(key) is None:
+        print(f"export: this checkpoint has no {key}", file=sys.stderr)
+        return 2
+    # Round-trip through JSON so the manifest holds only plain types.
+    manifest = json.loads(json.dumps(blob["manifest"], default=str))
+    manifest["completed_steps"] = int(blob.get("completed_steps", 0))
+    torch.save({"state_dict": {k: v.detach().clone() for k, v in blob[key].items()},
+                "manifest": manifest}, args.out)
+    print("wrote", args.out)
+    return 0
+
+
 def cmd_evaluate(args) -> int:
     from .evaluation.harness import evaluate
     from .training.datasets import build_corpus
@@ -412,6 +498,33 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--system", default=None, help="optional system message")
     p.set_defaults(func=cmd_chat)
+
+    p = sub.add_parser("agent", help="let a checkpoint use file, code and web tools on a folder")
+    p.add_argument("--checkpoint", required=True)
+    p.add_argument("--workspace", required=True, help="the only folder its file tools may touch")
+    p.add_argument("--without", nargs="*", choices=("files", "python", "calc", "web", "fun"),
+                   help="tool groups to leave off")
+    p.add_argument("--prompt", default=None)
+    p.add_argument("--max-calls", type=int, default=6)
+    p.add_argument("--max-new-tokens", type=int, default=200)
+    p.add_argument("--temperature", type=float, default=0.3)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--device", default="auto")
+    p.add_argument("--precision", default="auto")
+    p.set_defaults(func=cmd_agent)
+
+    p = sub.add_parser("battery", help="graded test: facts, held-out sums and code, agent tasks, media")
+    p.add_argument("--checkpoint", required=True)
+    p.add_argument("--seeds", type=int, default=3)
+    p.add_argument("--device", default="cpu")
+    p.add_argument("--out", default=None, help="also write the scores as JSON")
+    p.set_defaults(func=cmd_battery)
+
+    p = sub.add_parser("export", help="strip a training checkpoint to inference weights")
+    p.add_argument("--checkpoint", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--weights", choices=("ema", "raw"), default="ema")
+    p.set_defaults(func=cmd_export)
 
     p = sub.add_parser("presets", help="the ready-to-train presets and free-tier estimates")
     p.add_argument("name", nargs="?", help="show one preset in detail")

@@ -120,8 +120,17 @@ def conversation_spans(
     """
     spans: list[Span] = [_control(BOS)]
     for turn in turns:
-        spans.append(_control(ROLE_TOKEN[turn.role]))
         supervised = supervise_assistant and turn.role in _MODEL_TURNS
+        if turn.role == "tool_call":
+            # Generation is asked for every reply by an open ASSISTANT marker
+            # and reads a tool call from its first emitted id, so that id has
+            # to be a trained target right after the same marker. Without this
+            # the model only ever sees text follow ASSISTANT and can never
+            # choose to call a tool.
+            spans.append(_control(ASSISTANT))
+            spans.append(_control(TOOL_CALL, supervised=supervised))
+        else:
+            spans.append(_control(ROLE_TOKEN[turn.role]))
         if turn.text:
             spans.append(text_span(turn.text, supervised=supervised,
                                    offset=TEXT_OFFSET, tokenizer=tokenizer))

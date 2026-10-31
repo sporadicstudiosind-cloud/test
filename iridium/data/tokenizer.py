@@ -455,7 +455,10 @@ def tokenizer_for(
     if fast:
         n_docs = max(n_docs, 20_000)
     kind = "hf" if fast else "bpe"
-    path = cache_dir / f"{kind}_v{vocab_size}_s{seed}_n{n_docs}.json"
+    # A different source mix is a different vocabulary, so it needs its own file.
+    tag = "" if not sources else "_" + hashlib.blake2b(
+        json.dumps(sorted(sources.items())).encode(), digest_size=4).hexdigest()
+    path = cache_dir / f"{kind}_v{vocab_size}_s{seed}_n{n_docs}{tag}.json"
     if path.exists():
         return from_state(json.loads(path.read_text()))
     try:

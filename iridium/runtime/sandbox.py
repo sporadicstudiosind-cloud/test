@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import json
 import os
-import resource
 import shutil
 import signal
 import subprocess
@@ -42,6 +41,11 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Sequence
+
+try:
+    import resource
+except ImportError:          # Windows: no rlimits; ``isolation`` records that
+    resource = None
 
 DEFAULT_ENV_ALLOWLIST = ("PATH", "LANG", "LC_ALL", "PYTHONHASHSEED")
 
@@ -135,23 +139,32 @@ class Sandbox:
 
     def _environment(self, workdir: Path) -> dict[str, str]:
         env = {k: os.environ[k] for k in self.env_allowlist if k in os.environ}
-        env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+        env.setdefault("PATH", os.defpath)
+        if os.name == "nt" and "SYSTEMROOT" in os.environ:
+            env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]   # Python cannot start without it
         env["HOME"] = str(workdir)
         env["TMPDIR"] = str(workdir)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         return env
 
-    def run(self, code: str, *, timeout: Optional[float] = None) -> SandboxResult:
-        """Execute ``code``. It may write a JSON dict to ``$IRIDIUM_RESULT``."""
+    def run(self, code: str, *, timeout: Optional[float] = None,
+            cwd: Optional[Path] = None, prelude: str = "") -> SandboxResult:
+        """Execute ``code``. It may write a JSON dict to ``$IRIDIUM_RESULT``.
+
+        ``cwd`` runs the program in that directory instead of a private
+        temporary one (its own script and result still live in the temporary
+        one, and only that is removed). ``prelude`` is Python placed ahead of
+        the program.
+        """
         import time
 
         wall = timeout if timeout is not None else self.limits.wall_seconds
         network_isolated = not self.allow_network and unshare_available()
         isolation = {
-            "separate_process_group": True,
-            "resource_limits": True,
+            "separate_process_group": resource is not None,
+            "resource_limits": resource is not None,
             "scrubbed_environment": True,
-            "private_workdir": True,
+            "private_workdir": cwd is None,
             "network_isolated": network_isolated,
             "filesystem_namespace": False,
             "seccomp": False,
@@ -161,7 +174,7 @@ class Sandbox:
         try:
             script = workdir / "program.py"
             result_path = workdir / "result.json"
-            script.write_text(_PRELUDE + code, encoding="utf-8")
+            script.write_text(_PRELUDE + prelude + code, encoding="utf-8")
             env = self._environment(workdir)
             env["IRIDIUM_RESULT"] = str(result_path)
 
@@ -178,12 +191,14 @@ class Sandbox:
             try:
                 proc = subprocess.Popen(
                     argv,
-                    cwd=str(workdir),
+                    cwd=str(cwd or workdir),
                     env=env,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    preexec_fn=self._preexec(),
+                    encoding="utf-8",
+                    errors="replace",
+                    preexec_fn=self._preexec() if resource is not None else None,
                 )
             except OSError as exc:
                 return SandboxResult(
@@ -230,6 +245,9 @@ class Sandbox:
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
+    if resource is None:
+        proc.kill()
+        return
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError):

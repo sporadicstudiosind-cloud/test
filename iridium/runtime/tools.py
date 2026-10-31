@@ -386,9 +386,13 @@ def run_tool_loop(
     max_seq_len = model.cfg.max_seq_len
 
     for _ in range(max_calls):
-        context = fit_to_budget(turns, max_bytes)
-        while context and context[0].role == "assistant":
+        system = [t for t in turns[:1] if t.role == "system"]
+        spare = max_bytes - sum(len(t.text.encode("utf-8")) + 2 for t in system)
+        context = fit_to_budget(turns[len(system):], spare)
+        # A result needs its call, and a reply needs what came before it.
+        while context and context[0].role not in ("user", "tool_call"):
             context = context[1:]
+        context = system + context
         sample = conversation_sample(context, supervise_assistant=False, open_for_reply=True,
                                      tokenizer=tokenizer)
         budget = params["max_new_tokens"]

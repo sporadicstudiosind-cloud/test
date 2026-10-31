@@ -517,6 +517,152 @@ def build_studio(target: str, title: str, default_preset: str) -> list[dict]:
     return b.cells
 
 
+def build_kaggle_50m() -> list[dict]:
+    """The Kaggle flow for iridium-50m: one notebook, re-run across sessions.
+
+    A run takes several sessions, so every cell works out where the run is from
+    what is on disk and in the attached inputs, rather than being edited.
+    """
+    b = Builder()
+    b.md("""
+    # Iridium-50m on Kaggle
+
+    The model is untrained until this finishes. Expect several sessions, and
+    run each one with **Save Version -> Save & Run All**: a session that is not
+    saved as a version loses its output.
+
+    | Session | Accelerator | What it does | About |
+    |---|---|---|---|
+    | 1 | None (CPU, spends no GPU quota) | Downloads and tokenizes the data | up to 12 h |
+    | 2, 3, ... | GPU, with internet on | Trains, stops itself before the 12 h limit | ~11 h each |
+
+    **Between sessions:** Add Input -> Notebook Output -> this notebook's latest
+    version with output. Attach the data version and the newest training
+    version. The notebook finds them itself.
+
+    The hours are estimates. Nothing has measured this model's speed yet, so
+    read the tokens-per-second lines in the first training session. Sessions
+    can be repeated until the last cell reports the run finished.
+    """)
+    b.md("## 1. Source (private repo)\n\nNeeds a Kaggle secret named `GITHUB_TOKEN`; it is never printed or stored.")
+    b.code(private_clone_cell("kaggle"))
+    b.md("## 2. Install and cost the run")
+    b.code(install_cell("kaggle"))
+    b.code("""
+    import time
+    SESSION_STARTED = time.monotonic()
+
+    import torch
+    from iridium.presets import get_preset, preset_table
+    from iridium.runtime.device import detect
+    from iridium.training.run_preset import dry_run
+
+    info = detect()
+    DEVICE = info.device
+    print(info.describe())
+    HAS_GPU = torch.cuda.is_available()
+    if HAS_GPU:
+        print('GPU:', torch.cuda.get_device_name(0))
+
+    PRESET = 'iridium-50m'
+    preset = get_preset(PRESET)
+    print(preset_table())
+    result = dry_run(preset)
+    if not result['match']:
+        raise RuntimeError(f"parameter count mismatch: {result}; do not train until this reconciles")
+    """)
+    b.md("## 3. Find earlier sessions' work")
+    b.code("""
+    import re, shutil
+    from pathlib import Path
+
+    OUT_DIR = Path('/kaggle/working/iridium-runs')
+    RUN_DIR = OUT_DIR / PRESET
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    INPUTS = Path('/kaggle/input')
+
+    def attached(pattern):
+        return sorted(INPUTS.rglob(pattern)) if INPUTS.is_dir() else []
+
+    def round_of(path):
+        found = re.search(r'-round(\\d+)\\.pt$', path.name)
+        return int(found.group(1)) if found else -1
+
+    data_marks = attached(f'{PRESET}/prepared.json')
+    DATA_DIR = data_marks[0].parent.parent if data_marks else OUT_DIR / 'data'
+    print('data:', DATA_DIR, '(attached)' if data_marks else '(not attached)')
+
+    # Copy only the newest checkpoint: inputs are read-only, and disk is limited.
+    if not list(RUN_DIR.glob('*-round*.pt')):
+        earlier = max(attached(f'{PRESET}-round*.pt'), key=round_of, default=None)
+        if earlier is not None:
+            print('resuming from', earlier)
+            shutil.copy2(earlier, RUN_DIR / earlier.name)
+        else:
+            print('no earlier checkpoint attached: this run starts from step 0')
+    """)
+    b.md("## 4. Prepare data\n\nSkipped when shards are already here. Writes about 7.5 GB.")
+    b.code("""
+    from iridium.training.prepare import prepare
+
+    if not (DATA_DIR / PRESET / 'prepared.json').exists():
+        if HAS_GPU:
+            print('WARNING: preparing data with a GPU attached spends GPU quota. A CPU session is free.')
+        prepare(preset, DATA_DIR)
+        print('data written to', DATA_DIR)
+    if not HAS_GPU:
+        print('Data is ready. Saved as this version\\'s output: attach it and rerun with a GPU.')
+    """)
+    b.md("""
+    ## 5. Train
+
+    Resumes from the newest checkpoint and stops before the session limit.
+    `val_*_bpb` should fall over time. Lower is better.
+    """)
+    b.code("""
+    from iridium.training.run_preset import train_preset
+
+    SESSION_LIMIT_HOURS = 11.0     # Kaggle kills a session at 12 h and may lose its output
+
+    checkpoint = None
+    if HAS_GPU:
+        used = (time.monotonic() - SESSION_STARTED) / 3600
+        checkpoint = train_preset(
+            preset, device=DEVICE, out=str(OUT_DIR), data=str(DATA_DIR), resume='auto', seed=0,
+            time_budget_hours=SESSION_LIMIT_HOURS - used, keep_rounds=1,
+        )
+        print('newest checkpoint:', checkpoint)
+    """)
+    b.md("## 6. If it finished: export and grade")
+    b.code("""
+    import json, subprocess, sys
+
+    state = json.loads((RUN_DIR / 'preset.json').read_text()) if (RUN_DIR / 'preset.json').exists() else {}
+    if not state.get('trained'):
+        print('Not finished yet: at step', state.get('completed_steps', 0), 'of', preset.steps,
+              '- attach this version and run another GPU session.')
+    else:
+        weights = OUT_DIR / f'{PRESET}-inference.pt'
+        subprocess.run([sys.executable, '-m', 'iridium', 'export', '--checkpoint', str(checkpoint),
+                        '--out', str(weights)], check=True)
+        subprocess.run([sys.executable, '-m', 'iridium', 'battery', '--checkpoint', str(weights),
+                        '--device', DEVICE, '--out', str(OUT_DIR / 'battery.json')], check=True)
+        print('Download', weights, 'and battery.json from this version\\'s output.')
+    """)
+    b.md("""
+    ## 7. On your own machine
+
+    ```bash
+    python -m iridium chat --checkpoint iridium-50m-inference.pt
+    python -m iridium agent --checkpoint iridium-50m-inference.pt --workspace ./sandbox
+    python -m iridium agent --checkpoint iridium-50m-inference.pt --workspace ./sandbox --without web python
+    ```
+
+    See `docs/iridium-50m.md` for the tools and what they can and cannot do.
+    """)
+    return b.cells
+
+
 def build_colab_redirect() -> list[dict]:
     b = Builder()
     b.md(f"""
@@ -687,8 +833,11 @@ def build_tpu() -> list[dict]:
 
 def main() -> None:
     for target, name in GENERATED_STUDIO.items():
-        title_prefix = {"colab": "Google Colab", "kaggle": "Kaggle", "jupyter": "Jupyter"}[target]
-        default_preset = {"colab": "chat-34m", "kaggle": "chat-36m", "jupyter": "chat-100m"}[target]
+        if target == "kaggle":
+            write(name, build_kaggle_50m())
+            continue
+        title_prefix = {"colab": "Google Colab", "jupyter": "Jupyter"}[target]
+        default_preset = {"colab": "chat-34m", "jupyter": "chat-100m"}[target]
         cells = build_studio(target, f"Iridium 1.0 Studio -- {title_prefix}", default_preset)
         write(name, cells)
 

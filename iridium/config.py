@@ -582,6 +582,14 @@ class CodecConfig:
     #: being drowned by them within a layer or two.
     #: Off by default: it changes what an existing checkpoint computes.
     embed_scale: bool = False
+    #: Which continuous modalities have an input encoder. ``None`` keeps every
+    #: one. A text model that only needs to look at an image or listen to a
+    #: clip names those here and pays for nothing else.
+    input_media: Optional[tuple[str, ...]] = None
+    #: Whether continuous modalities get output heads. Off means the model can
+    #: read media and answer about it in text, but cannot generate media; the
+    #: flow heads are most of a small model's media parameters.
+    emit_media: bool = True
 
     def __post_init__(self) -> None:
         # Validated here rather than in the module, because an unknown value
@@ -615,7 +623,7 @@ class CodecConfig:
             )
 
     def continuous_dims(self) -> dict[str, int]:
-        return {
+        dims = {
             "image": self.image_channels * self.image_patch ** 2,
             "video": self.image_channels * self.video_patch_t * self.image_patch ** 2,
             "audio": self.audio_mels * self.audio_frames,
@@ -623,6 +631,9 @@ class CodecConfig:
             "geometry": self.point_features,
             "quantity": 3 + self.quantity_roles,
         }
+        if self.input_media is not None:
+            dims = {k: v for k, v in dims.items() if k in self.input_media}
+        return dims
 
     def _flow_head_params(self, d: int, d_out: int) -> int:
         """FlowMatchingHead: norm, tau/x/condition projections, mixer, output.
@@ -666,6 +677,8 @@ class CodecConfig:
         }
         for name, dim in dims.items():
             out[f"{name}_encoder"] = dim * d + d
+            if not self.emit_media:
+                continue
             if name == "quantity":
                 # A quantity decodes to one number - its log magnitude - not to
                 # a patch, and it is a regression rather than a flow: there is
@@ -1054,6 +1067,7 @@ class IridiumConfig:
         spec = stacks.get("specializations") or ()
         stacks["specializations"] = tuple(spec)
         stacks["layer_pattern"] = tuple(stacks.get("layer_pattern") or ())
+        stacks["spectral_stacks"] = tuple(stacks.get("spectral_stacks") or ())
         core = dict(data["core"])
         # JSON has no tuples; a list here would make the frozen config unhashable.
         core["layer_pattern"] = tuple(core.get("layer_pattern") or ())
@@ -1064,7 +1078,10 @@ class IridiumConfig:
             router=RouterConfig(**data.get("router", {})),
             codecs=CodecConfig(**{**data.get("codecs", {}),
                                   **({"ngram_orders": tuple(data["codecs"]["ngram_orders"])}
-                                     if "ngram_orders" in data.get("codecs", {}) else {})}),
+                                     if "ngram_orders" in data.get("codecs", {}) else {}),
+                                  **({"input_media": tuple(data["codecs"]["input_media"])}
+                                     if data.get("codecs", {}).get("input_media") is not None
+                                     else {})}),
             max_seq_len=data.get("max_seq_len", 4096),
             dropout=data.get("dropout", 0.0),
             controller_mode=data.get("controller_mode", False),

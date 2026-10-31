@@ -95,6 +95,11 @@ class Preset:
     #: means the module defaults. See iridium.data.text_corpus / chat_corpus.
     text_mix: Optional[dict[str, float]] = None
     chat_mix: Optional[dict[str, float]] = None
+    #: Distinct tokens to write to shards when fewer than ``tokens``: training
+    #: then repeats them. Free storage, not free compute, is often the limit.
+    prepare_tokens: Optional[int] = None
+    #: Text the subword vocabulary learns from; ``None`` is the module default.
+    tokenizer_sources: Optional[dict[str, float]] = None
 
     @property
     def tokens(self) -> int:
@@ -123,10 +128,10 @@ def _chat_36m(chat34: IridiumConfig) -> Preset:
     """chat-34m rebuilt around what the trained run showed.
 
     The chat-34m run (20k steps, 330M tokens) put 24.4M of its 30M body in
-    four superstacks and 5.6M in the core every token shares; the router
-    spread tokens evenly over all four (usage entropy 1.38 of a possible
-    1.39), so the stacks never specialised, and stack 0 carried spectral
-    (Fourier) blocks no text token uses. Here the shared core is the larger
+    four superstacks and 5.6M in the core every token shares, and stack 0
+    carried spectral (Fourier) blocks no text token uses. Even stack usage
+    (entropy 1.38 of 1.39) is what the balance loss asks for; it does not show
+    whether the stacks specialised, which that run never measured. Here the shared core is the larger
     half, three plain stacks of four layers are routed top-2, and the
     embedding side is grown Gemma-style, off the compute path: a sqrt(d)
     scaled tied token table plus Gemma 3n per-layer embeddings. Body 35.8M,
@@ -161,6 +166,57 @@ def _chat_36m(chat34: IridiumConfig) -> Preset:
               "for an overtrained run across several sessions.")
 
 
+#: Iridium-50m's token split. Sums to 1; see docs/iridium-50m.md for why.
+_IRIDIUM50_MIX = {
+    "science_text": 0.16, "science_qa": 0.06,
+    "math_text": 0.09, "math_qa": 0.05, "arithmetic_drill": 0.04,
+    "writing_text": 0.12, "writing_qa": 0.07,
+    "code_qa": 0.05, "code_exec": 0.06, "agent_episode": 0.15,
+    "chat_general": 0.11, "unknowable": 0.02,
+    "image_foundation": 0.01, "audio_foundation": 0.01,
+}
+
+
+def _iridium_50m(chat34: IridiumConfig) -> Preset:
+    """A compressed shared core feeding four specialist superstacks.
+
+    Six core layers instead of chat-36m's ten; the rest of the budget goes to
+    stacks whose routing is supervised by subject. Body about 50M. On top of
+    that: embeddings about 9M (they cost memory, not compute) and read-only
+    image and audio encoders about 2M, with no media decoders.
+    """
+    from .config import CoreConfig
+    from .data.domains import SUBJECTS, TOKENIZER_SOURCES
+    d, d_head, d_ff = 384, 64, 1024
+    core = CoreConfig(d_model=d, n_layers=6, n_query_heads=d // d_head, n_kv_heads=2,
+                      d_head=d_head, d_ff=d_ff)
+    stacks = replace(chat34.stacks, n_stacks=len(SUBJECTS), n_layers=6, d_model=d, core_d_model=d,
+                     n_query_heads=d // d_head, n_kv_heads=2, d_head=d_head, d_ff=d_ff,
+                     spectral_stacks=(), spectral_stride=0, min_depth=2,
+                     specializations=SUBJECTS)
+    vocab = 16_384
+    cfg = replace(chat34, name="iridium-50m", core=core, stacks=stacks,
+                  router=replace(chat34.router, top_k=2), ple_dim=16,
+                  perception_layers=6, perception_rank=192,
+                  text_vocab_size=vocab,
+                  codecs=replace(chat34.codecs, embed_scale=True, vocab_size=vocab + TEXT_ID_OFFSET,
+                                 input_media=("image", "audio"), emit_media=False),
+                  notes="Body ~50M + embeddings + 2M read-only media; see presets._iridium_50m.")
+    batch, window = 64, 1024
+    tokens = 5_000_000_000
+    return Preset(
+        "iridium-50m", 1,
+        "Science, maths, writing and code on specialist stacks, with file, code and web "
+        "tool use and basic image and audio input.",
+        cfg, dict(_IRIDIUM50_MIX), steps=tokens // (batch * window), batch_size=batch,
+        window=window, lr=1.5e-3, rounds=30, free_tier="kaggle_p100",
+        prepare_tokens=2_500_000_000, tokenizer_sources=dict(TOKENIZER_SOURCES),
+        notes="5B tokens, ~100 per body parameter: ~20 GPU-hours if it matches chat-36m's "
+              "measured 68k tok/s, which its similar active size suggests but nothing has "
+              "measured. Fits Kaggle's 30 h/week over three sessions. 2.5B distinct tokens "
+              "are written (about 7.5 GB), so the mix is seen about twice.")
+
+
 def _presets() -> dict[str, Preset]:
     nano, n100 = get_config("nano"), get_config("nano100m")
     out: dict[str, Preset] = {}
@@ -176,6 +232,7 @@ def _presets() -> dict[str, Preset]:
               "optimal for 36M params: roughly one free Colab session, optimistically.")
 
     out["chat-36m"] = _chat_36m(chat34)
+    out["iridium-50m"] = _iridium_50m(chat34)
 
     chat100 = replace(_with_vocab(n100, 16_384), name="iridium-1-chat-100m", max_seq_len=2048)
     out["chat-100m"] = Preset(

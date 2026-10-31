@@ -21,9 +21,10 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from ..data.domains import DOMAIN_FAMILIES
 from ..presets import Preset
 
-SHARDED_FAMILIES = ("text_lm", "chat", "tools")
+SHARDED_FAMILIES = ("text_lm", "chat", "tools", *DOMAIN_FAMILIES)
 _CHUNK = 4096
 
 
@@ -36,7 +37,7 @@ def plan(preset: Preset, tokens: Optional[int] = None) -> dict[str, int]:
     """
     from .datasets import allocate_mixture
 
-    sequences = math.ceil((tokens or preset.tokens) / preset.window)
+    sequences = math.ceil((tokens or preset.prepare_tokens or preset.tokens) / preset.window)
     quotas = allocate_mixture(sequences, preset.mixture)
     return {k: v for k, v in quotas.items() if k in SHARDED_FAMILIES and v > 0}
 
@@ -52,7 +53,8 @@ def prepare(preset: Preset, out: str | Path = "data", *, tokens: Optional[int] =
 
     cfg = preset.config
     out_dir = Path(out) / preset.name
-    tokenizer = tokenizer_for_config(cfg)
+    extra = {"sources": preset.tokenizer_sources} if preset.tokenizer_sources else {}
+    tokenizer = tokenizer_for_config(cfg, **extra)
     manifest = tokenizer_manifest(tokenizer, cfg)
     if manifest.get("fell_back"):
         raise RuntimeError("the preset's subword tokenizer could not be trained (no network "
@@ -76,9 +78,10 @@ def prepare(preset: Preset, out: str | Path = "data", *, tokens: Optional[int] =
     # often. Tools are exactly graded elsewhere, so only language is held out.
     held_out = {}
     for family, need in plan(preset, tokens).items():
-        if family in ("text_lm", "chat"):
-            held_out[family] = _write_family(family, "test", min(max(need // 200, 64), 1024),
-                                             **ctx)
+        if family != "tools":
+            meta = _write_family(family, "test", min(max(need // 200, 64), 1024), **ctx)
+            if meta["items"]:       # a very small source may have nothing held out
+                held_out[family] = meta
     (out_dir / "prepared.json").write_text(json.dumps(
         {"preset": preset.name, "split": split, "tokens_planned": tokens or preset.tokens,
          "families": written, "held_out": held_out, "id_offset": TEXT_ID_OFFSET},
@@ -95,6 +98,11 @@ def _write_family(family, split, need, *, out_dir, rows, tokenizer, window, text
     from ..data.tokenization import as_tokenizer
 
     tok = as_tokenizer(tokenizer)
+    domain = DOMAIN_FAMILIES.get(family)
+    if domain is not None:
+        text_mix, chat_mix = domain.text_mix, domain.chat_mix
+    is_text = family == "text_lm" or bool(domain and domain.text_mix)
+    is_chat = family == "chat" or bool(domain and domain.chat_mix)
     prefix = out_dir / f"{family}-{split}"
     started = time.time()
     meta = {**base_meta, "split": split}
@@ -108,7 +116,7 @@ def _write_family(family, split, need, *, out_dir, rows, tokenizer, window, text
             text_tokens += len(t)
             n_bytes += len(tok.decode(t).encode("utf-8"))
 
-    if family == "text_lm":
+    if is_text:
         meta["sources"] = [SOURCES[k].as_dict() for k in text_mix]
         w = ShardWriter(prefix, family, rows, meta)
         seen: set[int] = set()
@@ -129,13 +137,13 @@ def _write_family(family, split, need, *, out_dir, rows, tokenizer, window, text
         w.meta["duplicates_dropped"] = dropped
         inner = w
     else:
-        if family == "chat":
+        if is_chat:
             meta.update(sources=[CHAT_SOURCES[k].as_dict() for k in chat_mix], max_data=max_data)
         inner = ShardWriter(prefix, family, rows, meta)
         w = PackingWriter(inner, window)
 
         def stream():
-            if family == "chat":
+            if is_chat:
                 yield from iter_chat_items(chat_mix, seed=seed, max_bytes=chat_bytes, split=split,
                                            tokenizer=tokenizer, max_tokens=window)
                 return
@@ -161,7 +169,7 @@ def _write_family(family, split, need, *, out_dir, rows, tokenizer, window, text
                   f"windows; training repeats them ({need / max(inner.n_items, 1):.1f} epochs)",
                   file=sys.stderr)
     if measure:
-        (w if family == "text_lm" else inner).meta.update(
+        (w if is_text else inner).meta.update(
             text_tokens=text_tokens, utf8_bytes=n_bytes)
     return w.close()
 
