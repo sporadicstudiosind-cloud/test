@@ -39,6 +39,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Optional
 
+from ..data.domains import DOMAIN_FAMILIES
+
 __all__ = ["BudgetReport", "audit", "tokens_for", "REFERENCE_RATIOS"]
 
 
@@ -57,7 +59,8 @@ REFERENCE_RATIOS: dict[str, float] = {
 #: of natural language a language model could learn prose from. Everything not
 #: listed is a synthetic structured family: valuable for what it teaches, and
 #: no substitute for text when the complaint is "it does not talk properly".
-NATURAL_LANGUAGE_FAMILIES = frozenset({"text_lm", "chat", "tools"})
+NATURAL_LANGUAGE_FAMILIES = frozenset({"text_lm", "chat", "tools", *DOMAIN_FAMILIES,
+                                       "arithmetic_drill", "code_exec", "agent_episode"})
 
 
 @dataclass(frozen=True)

@@ -66,7 +66,7 @@ def dry_run(preset: Preset) -> dict:
     with torch.device("meta"):
         model = Iridium1(preset.config)
     built = sum(p.numel() for p in model.parameters())
-    report = audit(preset.config, preset.tokens // preset.window, preset.steps,
+    report = audit(preset.config, (preset.prepare_tokens or preset.tokens) // preset.window, preset.steps,
                    preset.batch_size, window=preset.window, mixture=preset.mixture)
     print(describe(preset))
     print(report.describe())

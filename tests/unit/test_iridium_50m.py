@@ -76,6 +76,15 @@ def test_every_family_in_the_mix_has_a_source():
             assert not CHAT_SOURCES[key].opt_in
 
 
+def test_budget_audit_counts_the_subject_families_as_language():
+    from iridium.training.budget import audit
+    report = audit(CFG, PRESET.prepare_tokens // PRESET.window, PRESET.steps, PRESET.batch_size,
+                   window=PRESET.window, mixture=PRESET.mixture)
+    assert report.natural_language_fraction > 0.9
+    assert not any("natural-language" in w for w in report.warnings)
+    assert report.epochs == pytest.approx(2.0, rel=0.01)
+
+
 def test_tool_choice_is_a_trained_target_where_generation_asks_for_it():
     spans = conversation_spans([Turn("user", "hi"), Turn("tool_call", "{}"),
                                 Turn("tool_result", "{}"), Turn("assistant", "ok")])
