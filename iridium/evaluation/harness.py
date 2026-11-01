@@ -1,0 +1,351 @@
+"""Grading: what fraction of held-out items the model actually gets right.
+
+Loss is not accuracy and accuracy is not competence, but graded accuracy on
+items whose answers come from an independent computation is the strongest of
+the three and the only one worth quoting. Every number this module returns is
+produced by free-running generation and checked against the analytic law, the
+deterministic solver or the environment's goal predicate.
+
+Baselines are reported alongside every score, because a number with no baseline
+cannot be interpreted. For the numeric families the baseline is the corpus
+median answer — the best a model can do by ignoring the input entirely.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional, Sequence
+
+import numpy as np
+import torch
+
+from ..codecs.bank import TensorBatch, continuous_dims
+from ..codecs.spans import MODALITY_INDEX, Sample, collate
+from ..runtime.device import device_of
+from ..runtime.generate import generate
+from ..training.tasks import Item
+
+
+@dataclass
+class FamilyResult:
+    family: str
+    n: int
+    correct: int
+    baseline_correct: int = 0
+    extra: dict[str, float] = field(default_factory=dict)
+    examples: list[dict[str, str]] = field(default_factory=list)
+
+    @property
+    def accuracy(self) -> float:
+        return self.correct / self.n if self.n else 0.0
+
+    @property
+    def baseline(self) -> float:
+        return self.baseline_correct / self.n if self.n else 0.0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "family": self.family, "n": self.n,
+            "accuracy": round(self.accuracy, 4),
+            "baseline": round(self.baseline, 4),
+            **{k: round(v, 6) for k, v in self.extra.items()},
+        }
+
+
+def prompt_only(item: Item) -> Sample:
+    """Drop every supervised span: what the model is actually given."""
+    spans = [s for s in item.sample.spans if not s.supervised]
+    return Sample(spans or item.sample.spans[:1], meta=item.sample.meta)
+
+
+@torch.no_grad()
+def grade_text_family(
+    model, items: Sequence[Item], max_new_tokens: int = 16,
+    n_loops: int = 1, keep_examples: int = 3,
+) -> FamilyResult:
+    if not items:
+        return FamilyResult(family="empty", n=0, correct=0)
+    family = items[0].family
+    result = FamilyResult(family=family, n=len(items), correct=0)
+
+    median_answer = _median_answer(items)
+    for i, item in enumerate(items):
+        out = generate(model, prompt_only(item), max_new_tokens=max_new_tokens,
+                       n_loops=n_loops)
+        ok = item.grade(out.text)
+        result.correct += int(ok)
+        if median_answer is not None:
+            result.baseline_correct += int(item.grade(median_answer))
+        if i < keep_examples:
+            result.examples.append(
+                {"prompt": item.prompt, "target": item.answer,
+                 "produced": out.text, "correct": str(ok)}
+            )
+    return result
+
+
+def _median_answer(items: Sequence[Item]) -> Optional[str]:
+    values = []
+    for item in items:
+        try:
+            values.append(float(item.answer.split("|")[0]))
+        except (ValueError, IndexError):
+            return None
+    if not values:
+        return None
+    return f"{float(np.median(values)):.4f}"
+
+
+@torch.no_grad()
+def grade_field_family(
+    model, items: Sequence[Item], n_loops: int = 1, flow_steps: int = 16
+) -> FamilyResult:
+    """NRMSE of the emitted next frame against the solver's frame.
+
+    The persistence baseline — emit the input frame unchanged — is the number
+    that matters. A field model that cannot beat persistence has learned
+    nothing about the dynamics, only about the field's marginal statistics.
+    """
+    if not items:
+        return FamilyResult(family="field_rollout", n=0, correct=0)
+    dims = continuous_dims(model.cfg.codecs)
+    errors, persistence = [], []
+    for item in items:
+        sample = prompt_only(item)
+        batch = TensorBatch(collate([sample], dims), device=device_of(model))
+        from ..runtime.decode import atomic_chunks, slice_batch
+
+        cache: dict = {}
+        hidden = None
+        for lo, hi in atomic_chunks(batch, int(batch.modality.shape[1])):
+            out = model(slice_batch(batch, lo, hi), n_loops=n_loops, cache=cache)
+            hidden = out.hidden
+        target = np.asarray(item.truth["target"], dtype=np.float64)
+        n_patch = target.shape[0]
+        pred = model.codecs.decode_continuous(
+            hidden[:, -1:], "field", steps=flow_steps
+        )[0, 0].detach().cpu().numpy().astype(np.float64)
+        # One emitted patch is compared against the mean target patch: the
+        # rollout head emits patch-by-patch, and grading the first emission
+        # keeps the comparison honest about what was actually produced.
+        tgt = target.mean(axis=0)
+        scale = float(np.sqrt(np.mean(tgt ** 2))) + 1e-12
+        errors.append(float(np.sqrt(np.mean((pred - tgt) ** 2))) / scale)
+        source = np.asarray(
+            [s.payload for s in item.sample.spans if s.modality == "field"][0],
+            dtype=np.float64,
+        ).mean(axis=0)
+        persistence.append(float(np.sqrt(np.mean((source - tgt) ** 2))) / scale)
+    result = FamilyResult(family="field_rollout", n=len(items), correct=0)
+    result.extra = {
+        "nrmse": float(np.mean(errors)),
+        "nrmse_persistence_baseline": float(np.mean(persistence)),
+        "beats_persistence": float(np.mean(np.array(errors) < np.array(persistence))),
+    }
+    result.correct = int(np.sum(np.array(errors) < np.array(persistence)))
+    return result
+
+
+@torch.no_grad()
+def _prompt_hidden(model, item, n_loops: int = 1):
+    """Run the prompt spans and return the hidden state at the last position."""
+    from ..runtime.decode import atomic_chunks, slice_batch
+
+    dims = continuous_dims(model.cfg.codecs)
+    batch = TensorBatch(collate([prompt_only(item)], dims), device=device_of(model))
+    cache: dict = {}
+    hidden = None
+    for lo, hi in atomic_chunks(batch, int(batch.modality.shape[1])):
+        hidden = model(slice_batch(batch, lo, hi), n_loops=n_loops, cache=cache).hidden
+    return hidden
+
+
+@torch.no_grad()
+def grade_quantity_family(model, items, n_loops: int = 1, tolerance: float = 0.02,
+                          keep_examples: int = 3) -> FamilyResult:
+    """Read the quantity head and compare the number, not the spelling.
+
+    The comparison is relative error against the analytic value, with the same
+    2% tolerance the task's own checker uses. The baseline is the corpus median
+    answer — what a model scores by ignoring its inputs entirely.
+    """
+    if not items:
+        return FamilyResult(family="empty", n=0, correct=0)
+    family = items[0].family
+    result = FamilyResult(family=family, n=len(items), correct=0)
+    truths = [it.truth["value"] for it in items]
+    median = float(np.median(truths))
+    errors = []
+    for i, item in enumerate(items):
+        hidden = _prompt_hidden(model, item, n_loops)
+        log10_value = float(
+            model.codecs.decode_continuous(hidden[:, -1:], "quantity")[0, 0, 0]
+        )
+        predicted = 10.0 ** log10_value
+        truth = item.truth["value"]
+        rel = abs(predicted - truth) / max(abs(truth), 1e-12)
+        errors.append(rel)
+        result.correct += int(rel <= tolerance)
+        result.baseline_correct += int(
+            abs(median - truth) / max(abs(truth), 1e-12) <= tolerance
+        )
+        if i < keep_examples:
+            result.examples.append({
+                "prompt": item.prompt, "target": f"{truth:.4f}",
+                "produced": f"{predicted:.4f}",
+                "correct": str(rel <= tolerance),
+            })
+    result.extra = {
+        "median_relative_error": float(np.median(errors)),
+        "mean_relative_error": float(np.mean(errors)),
+        "p90_relative_error": float(np.percentile(errors, 90)),
+        "tolerance": tolerance,
+    }
+    return result
+
+
+@torch.no_grad()
+def grade_verdict_family(model, items, n_loops: int = 1) -> FamilyResult:
+    """The verdict is one control token; grade the token, not a sentence."""
+    from ..training.tasks import VERDICT_FALSE, VERDICT_TRUE
+
+    result = FamilyResult(family="false_premise", n=len(items), correct=0)
+    true_hits = false_hits = n_true = n_false = 0
+    for item in items:
+        hidden = _prompt_hidden(model, item, n_loops)
+        logits = model.codecs.text_head(hidden[:, -1:])[0, 0]
+        choice = VERDICT_TRUE if logits[VERDICT_TRUE] > logits[VERDICT_FALSE] else VERDICT_FALSE
+        want = item.truth["verdict_token"]
+        ok = choice == want
+        result.correct += int(ok)
+        if want == VERDICT_TRUE:
+            n_true += 1; true_hits += int(ok)
+        else:
+            n_false += 1; false_hits += int(ok)
+    # A model that always says FALSE looks good on a false-premise set and is
+    # useless; report both directions so that cannot hide.
+    result.baseline_correct = max(n_true, n_false)
+    result.extra = {
+        "accuracy_on_true_claims": true_hits / max(n_true, 1),
+        "accuracy_on_false_claims": false_hits / max(n_false, 1),
+        "always_one_answer_baseline": max(n_true, n_false) / max(len(items), 1),
+    }
+    return result
+
+
+@torch.no_grad()
+def grade_text_lm(model, items, n_loops: int = 1,
+                  family: str = "text_lm") -> FamilyResult:
+    """Bits per byte on held-out real text.
+
+    There is no exact checker here — the target is a likelihood, not an answer.
+    The baseline is the entropy of a uniform byte model, 8 bits per byte, which
+    is what "learned nothing about language" looks like.
+    """
+    import torch.nn.functional as F
+    from ..codecs.spans import MODALITY_INDEX
+
+    if not items:
+        return FamilyResult(family=family, n=0, correct=0)
+    dims = continuous_dims(model.cfg.codecs)
+    total_bits = 0.0
+    total_bytes = 0
+    device = device_of(model)
+    for item in items:
+        batch = TensorBatch(collate([item.sample], dims), device=device)
+        out = model(batch, n_loops=n_loops)
+        h = out.hidden[:, :-1]
+        target = batch.discrete[:, 1:]
+        mask = (batch.supervised[:, 1:] & batch.valid[:, 1:]
+                & (batch.modality[:, 1:] == MODALITY_INDEX["text"]))
+        if not bool(mask.any()):
+            continue
+        logits = model.codecs.text_head(h)
+        nll = F.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]),
+            target.reshape(-1).clamp(0, logits.shape[-1] - 1),
+            reduction="none",
+        ).view_as(mask)
+        total_bits += float((nll * mask).sum()) / np.log(2.0)
+        total_bytes += int(mask.sum())
+    bpb = total_bits / max(total_bytes, 1)
+    result = FamilyResult(family=family, n=len(items), correct=0)
+    # Fraction of a uniform byte model's entropy this model removes. There is no
+    # exact checker here, so this stands in the accuracy column, and it is scaled
+    # rather than thresholded deliberately: a binary "did it beat 8 bits" reports
+    # 1.000 next to families where 1.000 means every answer was right, and 7.9
+    # bits per byte — which is very nearly knowing nothing — then reads as a
+    # perfect score. The scaled figure cannot be misread that way.
+    reduction = max(0.0, min(1.0, 1.0 - bpb / 8.0))
+    result.extra = {
+        "bits_per_byte": bpb,
+        "uniform_baseline_bits_per_byte": 8.0,
+        "entropy_reduction": reduction,
+        "bytes_scored": float(total_bytes),
+    }
+    result.correct = int(round(len(items) * reduction))
+    return result
+
+
+def evaluate(
+    model, corpus, max_per_family: int = 40, n_loops: int = 1,
+    max_new_tokens: int = 16,
+) -> dict[str, Any]:
+    model.eval()
+    results: dict[str, Any] = {}
+    for family, items in corpus.by_family().items():
+        subset = items[:max_per_family]
+        if family == "field_rollout":
+            results[family] = grade_field_family(model, subset, n_loops).as_dict()
+        elif family == "scene_goal":
+            results[family] = _grade_scene(model, subset, n_loops).as_dict()
+        elif family in ("text_lm", "chat"):
+            # Both are scored by likelihood on their supervised bytes: for chat
+            # that is the assistant's turns only, which is the measurement that
+            # answers "is it learning to reply" rather than "is it learning to
+            # continue text".
+            results[family] = grade_text_lm(model, subset, n_loops,
+                                            family=family).as_dict()
+        elif family == "false_premise":
+            results[family] = grade_verdict_family(model, subset, n_loops).as_dict()
+        elif subset and "value" in subset[0].truth:
+            results[family] = grade_quantity_family(model, subset, n_loops).as_dict()
+        else:
+            results[family] = grade_text_family(
+                model, subset, max_new_tokens, n_loops
+            ).as_dict()
+    return results
+
+
+@torch.no_grad()
+def _grade_scene(model, items, n_loops: int = 1) -> FamilyResult:
+    """Opcode accuracy on the first emitted action, plus goal satisfaction."""
+    from ..agency.actions import Action, Op
+    from ..agency.scene import SceneEditor
+
+    result = FamilyResult(family="scene_goal", n=len(items), correct=0)
+    dims = continuous_dims(model.cfg.codecs)
+    device = device_of(model)
+    op_hits = 0
+    for item in items:
+        batch = TensorBatch(collate([prompt_only(item)], dims), device=device)
+        from ..runtime.decode import atomic_chunks, slice_batch
+
+        cache: dict = {}
+        hidden = None
+        for lo, hi in atomic_chunks(batch, int(batch.modality.shape[1])):
+            hidden = model(slice_batch(batch, lo, hi), n_loops=n_loops, cache=cache).hidden
+        op_logits, scalars = model.codecs.action_head(hidden[:, -1:])
+        op = int(op_logits[0, 0].argmax())
+        want = item.truth["actions"][0]
+        op_hits += int(op == int(want.op))
+        try:
+            produced = Action(Op(op), tuple(float(v) for v in scalars[0, 0][:4]))
+        except (ValueError, KeyError):
+            continue
+        editor = SceneEditor(resolution=8)
+        editor.reset()
+        editor.run([produced])
+        result.correct += int(item.truth["goal"].satisfied(editor.state))
+    result.extra = {"first_opcode_accuracy": op_hits / max(len(items), 1)}
+    return result

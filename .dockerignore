@@ -1,0 +1,10 @@
+runs/
+experiments/results/*.npy
+web/
+tests/
+docs/history/
+.git/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/

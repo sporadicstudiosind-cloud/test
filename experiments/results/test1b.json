@@ -1,0 +1,517 @@
+{
+  "config": "iridium-1-test1b",
+  "parameters": {
+    "total": 1001730811,
+    "formula": 1001730811,
+    "delta": 0,
+    "parts": {
+      "control_core": 100690177,
+      "superstacks": 866858887,
+      "router": 9218,
+      "codec.text_embedding": 25165824,
+      "codec.modality_embedding": 6144,
+      "codec.image_encoder": 148224,
+      "codec.image_decoder": 1576896,
+      "codec.video_encoder": 295680,
+      "codec.video_decoder": 1872000,
+      "codec.audio_encoder": 197376,
+      "codec.audio_decoder": 1675264,
+      "codec.field_encoder": 197376,
+      "codec.field_decoder": 1675264,
+      "codec.geometry_encoder": 8448,
+      "codec.geometry_decoder": 1297162,
+      "codec.action_encoder": 23808,
+      "codec.action_head": 23838,
+      "codec.slot_type_head": 6920,
+      "codec.confidence_head": 1537,
+      "codec.text_head": 768
+    },
+    "active_min": 154181377,
+    "active_max": 474901761,
+    "gflops_per_token_min": 0.308362754,
+    "gflops_per_token_max": 2.849410566
+  },
+  "geometry": {
+    "core_layers": 16,
+    "core_d_model": 768,
+    "n_superstacks": 5,
+    "superstack_layers": 26,
+    "top_k": 2,
+    "max_loops": 3,
+    "specializations": [
+      "science_physics_simulation",
+      "mathematics_symbolic_proof",
+      "code_systems_tools",
+      "language_reasoning_intent",
+      "perception_geometry_action"
+    ]
+  },
+  "build_seconds": 15.983286380767822,
+  "torch": "2.14.0+cpu",
+  "threads": 4,
+  "forward": {
+    "tokens": 94,
+    "loops_1": {
+      "seconds": 0.38585853576660156,
+      "tokens_per_second": 243.61259707070158,
+      "expected_loops": 1.0,
+      "mean_focus": 0.7495520710945129
+    },
+    "loops_2": {
+      "seconds": 0.8495068550109863,
+      "tokens_per_second": 110.65243257958682,
+      "expected_loops": 1.7012704610824585,
+      "mean_focus": 0.7495520710945129
+    },
+    "loops_3": {
+      "seconds": 1.303126573562622,
+      "tokens_per_second": 72.13420546172509,
+      "expected_loops": 2.234961748123169,
+      "mean_focus": 0.7495520710945129
+    }
+  },
+  "routing": {
+    "tokens_per_stack": [
+      0,
+      0,
+      94,
+      94,
+      0
+    ],
+    "expected_depth_per_stack": [
+      0.0,
+      0.0,
+      5.39,
+      6.33,
+      0.0
+    ],
+    "grid_intact_fraction": 1.0,
+    "specializations": [
+      "science_physics_simulation",
+      "mathematics_symbolic_proof",
+      "code_systems_tools",
+      "language_reasoning_intent",
+      "perception_geometry_action"
+    ]
+  },
+  "cache_parity": {
+    "max_abs_delta_fp32": 3.814697265625e-06,
+    "bit_exact": false,
+    "note": "fp32 here; the float64 gate in tests/integration runs at `tiny`"
+  },
+  "generation": {
+    "seconds": 1.1248419284820557,
+    "tokens": 8,
+    "seconds_per_token": 0.14060524106025696,
+    "text": "",
+    "mean_focus": 0.4966167025268078
+  },
+  "lora": {
+    "steps": 70,
+    "seconds": 129.2809247970581,
+    "adapted_modules": 390,
+    "adapter_parameters": 8785920,
+    "adapter_fraction": 0.008770739507582143,
+    "frozen_parameters": 1001730811,
+    "loss_first_quarter": 11.52478941749124,
+    "loss_last_quarter": 8.924111871158376,
+    "loss_fell": true,
+    "routing_after": {
+      "tokens_per_stack": [
+        246,
+        1107,
+        245,
+        19,
+        1031
+      ],
+      "share": [
+        0.0929,
+        0.4181,
+        0.0925,
+        0.0072,
+        0.3894
+      ],
+      "stacks_used": 5,
+      "entropy_nats": 1.208277760124524,
+      "max_entropy_nats": 1.6094379124341003
+    },
+    "router_parameters": 9218,
+    "history": [
+      {
+        "step": 0,
+        "total": 11.323454856872559,
+        "text": 10.810576438903809
+      },
+      {
+        "step": 1,
+        "total": 13.455316543579102,
+        "text": 10.517595291137695
+      },
+      {
+        "step": 2,
+        "total": 12.104620933532715,
+        "text": 10.29228687286377
+      },
+      {
+        "step": 3,
+        "total": 14.871973991394043,
+        "text": 10.397262573242188
+      },
+      {
+        "step": 4,
+        "total": 13.869688034057617,
+        "text": 10.191039085388184
+      },
+      {
+        "step": 5,
+        "total": 10.66389274597168,
+        "text": 10.30218505859375
+      },
+      {
+        "step": 6,
+        "total": 10.604949951171875,
+        "text": 10.288500785827637
+      },
+      {
+        "step": 7,
+        "total": 9.745784759521484,
+        "text": 9.503171920776367
+      },
+      {
+        "step": 8,
+        "total": 13.435327529907227,
+        "text": 9.217292785644531
+      },
+      {
+        "step": 9,
+        "total": 9.260200500488281,
+        "text": 9.09008502960205
+      },
+      {
+        "step": 10,
+        "total": 11.450871467590332,
+        "text": 9.960270881652832
+      },
+      {
+        "step": 11,
+        "total": 9.674210548400879,
+        "text": 9.527510643005371
+      },
+      {
+        "step": 12,
+        "total": 16.373857498168945,
+        "text": 8.290716171264648
+      },
+      {
+        "step": 13,
+        "total": 8.233142852783203,
+        "text": 8.058737754821777
+      },
+      {
+        "step": 14,
+        "total": 11.052766799926758,
+        "text": 7.491943359375
+      },
+      {
+        "step": 15,
+        "total": 11.246435165405273,
+        "text": 9.29018497467041
+      },
+      {
+        "step": 16,
+        "total": 8.554925918579102,
+        "text": 6.953680038452148
+      },
+      {
+        "step": 17,
+        "total": 10.658238410949707,
+        "text": 7.16519832611084
+      },
+      {
+        "step": 18,
+        "total": 9.639124870300293,
+        "text": 9.409089088439941
+      },
+      {
+        "step": 19,
+        "total": 8.826004981994629,
+        "text": 8.57951831817627
+      },
+      {
+        "step": 20,
+        "total": 10.114280700683594,
+        "text": 6.972346305847168
+      },
+      {
+        "step": 21,
+        "total": 8.9804048538208,
+        "text": 7.28004264831543
+      },
+      {
+        "step": 22,
+        "total": 7.477581024169922,
+        "text": 7.254818916320801
+      },
+      {
+        "step": 23,
+        "total": 7.804620742797852,
+        "text": 7.584499359130859
+      },
+      {
+        "step": 24,
+        "total": 12.49573802947998,
+        "text": 8.778697967529297
+      },
+      {
+        "step": 25,
+        "total": 8.301487922668457,
+        "text": 6.528903961181641
+      },
+      {
+        "step": 26,
+        "total": 7.072612285614014,
+        "text": 6.873880863189697
+      },
+      {
+        "step": 27,
+        "total": 10.005364418029785,
+        "text": 6.425711631774902
+      },
+      {
+        "step": 28,
+        "total": 9.843076705932617,
+        "text": 6.306856155395508
+      },
+      {
+        "step": 29,
+        "total": 7.230312824249268,
+        "text": 7.026949405670166
+      },
+      {
+        "step": 30,
+        "total": 11.839417457580566,
+        "text": 8.76438045501709
+      },
+      {
+        "step": 31,
+        "total": 8.00439167022705,
+        "text": 6.140044689178467
+      },
+      {
+        "step": 32,
+        "total": 6.9974870681762695,
+        "text": 6.788452625274658
+      },
+      {
+        "step": 33,
+        "total": 6.672530174255371,
+        "text": 6.4644455909729
+      },
+      {
+        "step": 34,
+        "total": 9.507608413696289,
+        "text": 6.093078136444092
+      },
+      {
+        "step": 35,
+        "total": 7.737897872924805,
+        "text": 6.441270351409912
+      },
+      {
+        "step": 36,
+        "total": 8.673896789550781,
+        "text": 8.462349891662598
+      },
+      {
+        "step": 37,
+        "total": 6.3242998123168945,
+        "text": 6.131319999694824
+      },
+      {
+        "step": 38,
+        "total": 6.364124774932861,
+        "text": 6.169113636016846
+      },
+      {
+        "step": 39,
+        "total": 7.22563362121582,
+        "text": 7.031243324279785
+      },
+      {
+        "step": 40,
+        "total": 10.545502662658691,
+        "text": 9.165139198303223
+      },
+      {
+        "step": 41,
+        "total": 10.214118003845215,
+        "text": 6.260951519012451
+      },
+      {
+        "step": 42,
+        "total": 8.439377784729004,
+        "text": 8.258447647094727
+      },
+      {
+        "step": 43,
+        "total": 6.930708885192871,
+        "text": 6.746527194976807
+      },
+      {
+        "step": 44,
+        "total": 5.810125827789307,
+        "text": 5.630482196807861
+      },
+      {
+        "step": 45,
+        "total": 5.874145030975342,
+        "text": 5.696043968200684
+      },
+      {
+        "step": 46,
+        "total": 8.191609382629395,
+        "text": 6.439431190490723
+      },
+      {
+        "step": 47,
+        "total": 9.194990158081055,
+        "text": 5.826651096343994
+      },
+      {
+        "step": 48,
+        "total": 12.308504104614258,
+        "text": 6.387881278991699
+      },
+      {
+        "step": 49,
+        "total": 5.5289530754089355,
+        "text": 5.33545446395874
+      },
+      {
+        "step": 50,
+        "total": 11.033913612365723,
+        "text": 9.091352462768555
+      },
+      {
+        "step": 51,
+        "total": 7.9249138832092285,
+        "text": 6.329719066619873
+      },
+      {
+        "step": 52,
+        "total": 7.406009674072266,
+        "text": 7.191697120666504
+      },
+      {
+        "step": 53,
+        "total": 8.658823013305664,
+        "text": 8.427836418151855
+      },
+      {
+        "step": 54,
+        "total": 6.995973110198975,
+        "text": 6.802382469177246
+      },
+      {
+        "step": 55,
+        "total": 5.695132255554199,
+        "text": 5.50653076171875
+      },
+      {
+        "step": 56,
+        "total": 8.143211364746094,
+        "text": 5.003660202026367
+      },
+      {
+        "step": 57,
+        "total": 12.998457908630371,
+        "text": 6.310113430023193
+      },
+      {
+        "step": 58,
+        "total": 6.169186592102051,
+        "text": 5.98960542678833
+      },
+      {
+        "step": 59,
+        "total": 11.970292091369629,
+        "text": 9.998035430908203
+      },
+      {
+        "step": 60,
+        "total": 6.658205986022949,
+        "text": 6.486006736755371
+      },
+      {
+        "step": 61,
+        "total": 11.239790916442871,
+        "text": 9.700407028198242
+      },
+      {
+        "step": 62,
+        "total": 8.944143295288086,
+        "text": 5.739579200744629
+      },
+      {
+        "step": 63,
+        "total": 8.601202011108398,
+        "text": 8.431999206542969
+      },
+      {
+        "step": 64,
+        "total": 9.336509704589844,
+        "text": 6.0057806968688965
+      },
+      {
+        "step": 65,
+        "total": 9.160611152648926,
+        "text": 8.981392860412598
+      },
+      {
+        "step": 66,
+        "total": 6.5925822257995605,
+        "text": 6.412512302398682
+      },
+      {
+        "step": 67,
+        "total": 9.273555755615234,
+        "text": 9.091167449951172
+      },
+      {
+        "step": 68,
+        "total": 10.965277671813965,
+        "text": 6.645975589752197
+      },
+      {
+        "step": 69,
+        "total": 10.306946754455566,
+        "text": 5.360939025878906
+      }
+    ],
+    "memory_argument": {
+      "fp32_weights_gb": 4.006923244,
+      "full_adam_state_gb": 16.027692976,
+      "lora_adam_state_gb": 0.14057472,
+      "machine_ram_gb": 15.0
+    },
+    "routing_before": {
+      "tokens_per_stack": [
+        0,
+        1200,
+        1269,
+        136,
+        43
+      ],
+      "share": [
+        0.0,
+        0.4532,
+        0.4792,
+        0.0514,
+        0.0162
+      ],
+      "stacks_used": 4,
+      "entropy_nats": 0.9305783604497259,
+      "max_entropy_nats": 1.6094379124341003
+    }
+  }
+}
