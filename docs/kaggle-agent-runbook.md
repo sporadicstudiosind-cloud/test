@@ -42,7 +42,11 @@ CLI field names change between versions, so trust `kaggle kernels push --help` o
    about 7.5 GB of shards to its output. If it hits the time limit before finishing,
    report that to the human.
 2. **First training session.** Set `enable_gpu: true`, and add the data version to
-   `kernel_sources`. Push. It stops itself after about 11 hours.
+   `kernel_sources`. The accelerator must be **GPU T4 x2**: training uses both cards
+   and is about twice as fast as on one. If your CLI version cannot choose the
+   accelerator, ask the human to set it once in the notebook editor; it is remembered.
+   Push. It stops itself after about 11 hours. The log should say
+   `training on 2 GPUs at once`; if it does not, report that.
 3. **Later sessions.** Add the newest training version to `kernel_sources` too. Push again.
    Repeat until the log says the run finished.
 4. Poll with `kaggle kernels status` every 15-30 minutes, not more often.
@@ -52,8 +56,8 @@ CLI field names change between versions, so trust `kaggle kernels push --help` o
 ## Report to the human
 
 - Status, step reached, and the latest `val_*_bpb` lines (lower is better).
-- Tokens per second from the first training session. The ~20 GPU-hour figure is an
-  estimate, and this is the number that tests it.
+- The `tok/s` figure from the first training session's log lines. The ~15 hour figure
+  is an estimate, and this is the number that tests it.
 - The contents of `battery.json`, if it exists.
 - Any error text, verbatim, without guessing at the cause.
 

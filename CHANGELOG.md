@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased: two-GPU training and trained thinking loops
+
+- **Both Kaggle T4s train at once.** `iridium train --gpus auto` (the default) starts
+  one process per GPU and averages their gradients each step
+  (`iridium/training/parallel.py`). Same batch, same schedule, about half the time per
+  step. Verified on CPU with two processes ending on identical weights; not yet timed
+  on a GPU.
+- **Thinking loops are trained.** `loop_probs` samples 1, 2 or 3 ponder loops per step
+  (70/20/10 for iridium-50m, whose `max_loops` is now 3 and which now tags each pass).
+  Multi-loop steps split their batch so they need no more memory.
+- **Less waiting on the CPU.** Batches are built on a background thread; iridium-50m
+  runs 32 sequences per forward pass instead of 8; router diagnostics are computed only
+  on logged steps; validation runs under mixed precision. Log lines report `tok/s`.
+- `iridium train` gained `--gpus`, `--time-budget-hours`, `--keep-rounds`, `--micro-batch`.
+- The Kaggle notebook trains through that command and asks for **GPU T4 x2**.
+
 ## Unreleased
 
 ### `iridium-50m`: specialist stacks, agent tools, rebuilt Kaggle notebook

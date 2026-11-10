@@ -61,7 +61,7 @@ FREE_TIERS: dict[str, dict] = {
     "kaggle_p100": {"label": "Kaggle P100",         "peak": 9.3e12,  "memory_gb": 16, "precision": "fp32",
                     "quota": "30 GPU-h/week, 12 h sessions"},
     "kaggle_2xt4": {"label": "Kaggle 2xT4",         "peak": 16.2e12, "memory_gb": 30, "precision": "fp32",
-                    "quota": "30 GPU-h/week; needs the multi-GPU placement path"},
+                    "quota": "30 GPU-h/week; both cards train at once (`--gpus auto`)"},
     "tpu_v5e1":   {"label": "Colab free TPU v5e-1", "peak": 197e12, "memory_gb": 16, "precision": "bf16",
                    "quota": "availability varies; XLA path (Kaggle's is v5e-8, 20 h/week)"},
 }
@@ -88,6 +88,9 @@ class Preset:
     #: accumulation. 8 x 1024 tokens of a ~100M routed model fits a 15-16 GB
     #: card with room for the ponder loop; the trainer halves it on OOM anyway.
     micro_batch: int = 8
+    #: Probability of training a step at 1, 2, ... ponder loops (see
+    #: ``TrainConfig.loop_probs``); empty trains every step at one loop.
+    loop_probs: tuple[float, ...] = ()
     free_tier: Optional[str] = "kaggle_p100"
     status: str = "verified in theory"
     notes: str = ""
@@ -196,8 +199,11 @@ def _iridium_50m(chat34: IridiumConfig) -> Preset:
                      specializations=SUBJECTS)
     vocab = 16_384
     cfg = replace(chat34, name="iridium-50m", core=core, stacks=stacks,
-                  router=replace(chat34.router, top_k=2), ple_dim=16,
+                  router=replace(chat34.router, top_k=2, max_loops=3), ple_dim=16,
                   perception_layers=6, perception_rank=192,
+                  # Loops are trained here (loop_probs below), so the core is
+                  # told which pass it is on, as Universal Transformers do.
+                  loop_identity=True,
                   text_vocab_size=vocab,
                   codecs=replace(chat34.codecs, embed_scale=True, vocab_size=vocab + TEXT_ID_OFFSET,
                                  input_media=("image", "audio"), emit_media=False),
@@ -209,7 +215,8 @@ def _iridium_50m(chat34: IridiumConfig) -> Preset:
         "Science, maths, writing and code on specialist stacks, with file, code and web "
         "tool use and basic image and audio input.",
         cfg, dict(_IRIDIUM50_MIX), steps=tokens // (batch * window), batch_size=batch,
-        window=window, lr=1.5e-3, rounds=30, free_tier="kaggle_p100",
+        window=window, lr=1.5e-3, rounds=30, free_tier="kaggle_2xt4",
+        micro_batch=32, loop_probs=(0.7, 0.2, 0.1),
         prepare_tokens=2_500_000_000, tokenizer_sources=dict(TOKENIZER_SOURCES),
         notes="5B tokens, ~100 per body parameter: ~20 GPU-hours if it matches chat-36m's "
               "measured 68k tok/s, which its similar active size suggests but nothing has "

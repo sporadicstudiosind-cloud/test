@@ -22,15 +22,24 @@ are worth it, so compare it with chat-36m on the battery rather than assuming.
 router (`subject_routing` loss). `iridium.evaluation.routing` measures whether routing
 actually depends on the subject.
 
-**Thinking loops** are still trained at one loop, so more loops at inference are
-untested and off by default.
+**Thinking loops** are trained: 70% of steps run one loop, 20% two and 10% three
+(`loop_probs`), and the core is told which pass it is on. That costs about 1.4x the
+compute of one-loop training. Loops beyond three at inference are still extrapolation.
 
 ## Training budget
 
-5B tokens, about 100 per body parameter (chat-36m had 20). If it matches chat-36m's
-measured 68k tokens/s that is about 20 GPU-hours. Its active size is similar, but this
-speed is an assumption until the first session measures it. 2.5B distinct tokens are
+5B tokens, about 100 per body parameter (chat-36m had 20). 2.5B distinct tokens are
 stored, so most data is seen about twice.
+
+**Speed.** Choose Kaggle's **GPU T4 x2**. Training runs one process per GPU and
+averages their gradients every step (`iridium/training/parallel.py`), so the batch and
+schedule are the same as on one GPU and each step takes about half as long. Batches are
+built on a background thread, and each forward pass carries 32 sequences instead of 8.
+
+None of this has been timed on a GPU. The estimate: chat-36m measured 68k tokens/s on
+one GPU; if this model matches it, two T4s give roughly 120-130k tokens/s, and the
+trained loops cost 1.4x, so the run is about 15 hours, or two Kaggle sessions. The
+`tok/s` figure on each log line in the first session is the number that tests this.
 
 | Share | Family | Source |
 |---:|---|---|
@@ -107,6 +116,6 @@ Anywhere else:
 
 ```bash
 python -m iridium data prepare --preset iridium-50m
-python -m iridium train --preset iridium-50m --data data --resume auto
+python -m iridium train --preset iridium-50m --data data --resume auto   # uses every GPU; --gpus 1 for one
 python -m iridium battery --checkpoint runs/iridium-50m/iridium-50m-final.pt
 ```

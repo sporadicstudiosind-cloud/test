@@ -101,6 +101,14 @@ class TrainConfig:
     #: post-hoc EMA), because the raw weights at any single step carry the
     #: last few updates' noise straight into the samples. 0.999 is typical.
     ema_decay: float = 0.0
+    #: Probability of training a step with 1, 2, ... ponder loops; empty means
+    #: always ``n_loops``. A model only ever trained at one loop has never
+    #: produced a second-loop state, so "think longer" at inference would be
+    #: extrapolation. Sampling keeps most steps at one loop (the cheap case)
+    #: while every loop count the model may be asked for is trained.
+    loop_probs: tuple[float, ...] = ()
+    #: Batches built ahead of the GPU by a background thread (0 disables).
+    prefetch: int = 4
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -177,6 +185,94 @@ def _fsync(path: Path) -> None:
         os.close(fd)
 
 
+class Prefetcher:
+    """Builds batches on a background thread so the GPU never waits for them.
+
+    Collating a batch, and for generated families building its items, is
+    Python and NumPy work. Done inline it sits between two GPU steps; here it
+    overlaps them (the main thread releases the GIL while it waits on CUDA).
+    ``depth`` 0 is the inline behaviour.
+    """
+
+    _END = object()
+
+    def __init__(self, source, depth: int) -> None:
+        import queue
+        import threading
+        self.source, self.depth = source, depth
+        self.error: Optional[BaseException] = None
+        self._stop = threading.Event()
+        self._queue: "queue.Queue" = queue.Queue(maxsize=max(depth, 1))
+        self._thread = None
+        if depth > 0:
+            self._thread = threading.Thread(target=self._fill, daemon=True)
+            self._thread.start()
+
+    def _fill(self) -> None:
+        import queue
+        try:
+            for item in self.source:
+                while not self._stop.is_set():
+                    try:
+                        self._queue.put(item, timeout=0.1)
+                        break
+                    except queue.Full:
+                        continue
+                if self._stop.is_set():
+                    return
+        except BaseException as exc:                      # re-raised by __next__
+            self.error = exc
+        self._queue.put(self._END)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._thread is None:
+            return next(self.source)
+        item = self._queue.get()
+        if item is self._END:
+            if self.error is not None:
+                raise self.error
+            raise StopIteration
+        return item
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            while self._thread.is_alive():
+                try:
+                    self._queue.get_nowait()
+                except Exception:
+                    pass
+                self._thread.join(timeout=0.05)
+
+
+def split_batch(batch, parts: int) -> list:
+    """Split a :class:`~iridium.codecs.bank.TensorBatch` into ``parts`` along
+    the batch axis (fewer when it has fewer rows)."""
+    import copy
+
+    rows = batch.modality.shape[0]
+    parts = max(1, min(parts, rows))
+    if parts == 1:
+        return [batch]
+    bounds = [round(i * rows / parts) for i in range(parts + 1)]
+    out = []
+    for lo, hi in zip(bounds, bounds[1:]):
+        piece = copy.copy(batch)
+        for name, value in vars(batch).items():
+            if torch.is_tensor(value) and value.dim() and value.shape[0] == rows:
+                setattr(piece, name, value[lo:hi])
+        piece.continuous = {k: v[lo:hi] for k, v in batch.continuous.items()}
+        piece.grids = [(b - lo, start, shape) for b, start, shape in batch.grids if lo <= b < hi]
+        piece.meta = list(batch.meta[lo:hi])
+        if hasattr(batch, "n_tokens"):
+            piece.n_tokens = int(piece.valid.sum())
+        out.append(piece)
+    return out
+
+
 class Trainer:
     def __init__(
         self,
@@ -186,7 +282,16 @@ class Trainer:
         weights: Optional[LossWeights] = None,
         out_dir: Optional[Path] = None,
         device: str = "cpu",
+        rank: int = 0,
+        world: int = 1,
     ) -> None:
+        self.rank, self.world = rank, world
+        if cfg.loop_probs:
+            if len(cfg.loop_probs) > model.cfg.router.max_loops or min(cfg.loop_probs) < 0 \
+                    or abs(sum(cfg.loop_probs) - 1.0) > 1e-6:
+                raise ValueError("loop_probs must be probabilities for 1..max_loops loops")
+        if world > 1 and len(cfg.devices) > 1:
+            raise ValueError("data-parallel ranks each use one device")
         if min(cfg.steps, cfg.batch_size, cfg.accumulate, cfg.log_every) < 1:
             raise ValueError("steps, batch size, accumulation and log interval must be positive")
         if not train_corpus.items:
@@ -211,8 +316,12 @@ class Trainer:
             raise RuntimeError("This training path requires PyTorch 2.3+ with torch.amp.GradScaler")
         self.loader = BatchLoader(
             train_corpus, model.cfg.codecs, cfg.batch_size, cfg.seed, device=device,
-            max_length=cfg.max_length or model.cfg.max_seq_len
+            max_length=cfg.max_length or model.cfg.max_seq_len, shard=(rank, world),
         )
+        self.group = None
+        if world > 1:
+            from .parallel import Group
+            self.group = Group(rank, world, device)
         self.history: list[dict[str, Any]] = []
         self._apply_freeze()
         from ..runtime.memory import build_optimizer, decay_groups
@@ -252,7 +361,7 @@ class Trainer:
         self.ema: Optional[dict[str, torch.Tensor]] = (
             {k: v.detach().clone().float() for k, v in model.state_dict().items()
              if v.is_floating_point()}
-            if cfg.ema_decay else None)
+            if cfg.ema_decay and rank == 0 else None)
         from ..runtime.device import generator_for
         self.generator = generator_for(device, cfg.seed)
         cuda = str(device).startswith("cuda")
@@ -278,6 +387,7 @@ class Trainer:
             corpus, self.model.cfg.codecs, self.loader.batch_size,
             self.cfg.seed + self.completed_steps, device=self.device,
             max_length=self.cfg.max_length or self.model.cfg.max_seq_len,
+            shard=(self.rank, self.world),
         )
 
     def _apply_freeze(self) -> None:
@@ -308,9 +418,17 @@ class Trainer:
         self.model.train()
         step = self.completed_steps
         started = time.time()
-        stream = self._infinite_batches()
-        overflow_retries = 0
+        self._stream = self._infinite_batches()
         stop = self.cfg.steps if until is None else min(until, self.cfg.steps)
+        try:
+            return self._train_loop(step, stop, started, on_eval)
+        finally:
+            self._stream.close()
+
+    def _train_loop(self, step, stop, started, on_eval):
+        primary = self.rank == 0
+        overflow_retries = 0
+        mark_time, mark_tokens = time.time(), 0
         while step < stop:
             lr = learning_rate(step, self.cfg)
             for group in self.optimizer.param_groups:
@@ -318,7 +436,9 @@ class Trainer:
             # An OOM restarts the entire update, never an individual forward.
             # Catch outside the helper frame so failed graphs can be released.
             try:
-                report, diagnostics, norm, updated = self._update(stream)
+                want_log = step % self.cfg.log_every == 0 or step == self.cfg.steps - 1
+                report, diagnostics, norm, updated, tokens = self._update(
+                    self._stream, self._loops_for(step), want_log and primary)
             except (torch.cuda.OutOfMemoryError, RuntimeError) as err:
                 # CPU and ROCm allocators raise a plain RuntimeError; anything
                 # else that is a RuntimeError is a real bug and re-raised.
@@ -340,7 +460,8 @@ class Trainer:
                 scale_state = self.scaler.state_dict()
                 self.scaler = torch.amp.GradScaler("cuda", enabled=self.precision == "fp16")
                 self.scaler.load_state_dict(scale_state)
-                stream = self._infinite_batches()  # discard old prebuilt groups
+                self._stream.close()
+                self._stream = self._infinite_batches()  # discard old prebuilt groups
                 import gc
                 gc.collect()
                 for device in self.devices:
@@ -358,9 +479,14 @@ class Trainer:
                 continue
             overflow_retries = 0
             self.completed_steps = step + 1
-            if step % self.cfg.log_every == 0 or step == self.cfg.steps - 1:
+            mark_tokens += tokens * self.world
+            if want_log and primary:
                 from ..runtime.placement import memory_snapshot
+                now = time.time()
+                rate = mark_tokens / max(now - mark_time, 1e-9)
+                mark_time, mark_tokens = now, 0
                 record = {
+                    "tokens_per_second": rate,
                     "gpu_memory": memory_snapshot(self.devices),
                     "step": step,
                     "lr": lr,
@@ -377,6 +503,7 @@ class Trainer:
                 and step
                 and step % self.cfg.eval_every == 0
                 and on_eval is not None
+                and primary
             ):
                 self.model.eval()
                 metrics = on_eval(step)
@@ -388,35 +515,63 @@ class Trainer:
                 self.cfg.checkpoint_every
                 and step
                 and step % self.cfg.checkpoint_every == 0
+                and primary
             ):
                 self.save(f"step{step}")
             step += 1
         return self.history
 
-    def _update(self, stream):
+    def _loops_for(self, step: int) -> int:
+        """Ponder loops for ``step``: fixed, or drawn from ``loop_probs``.
+
+        Seeded by the step alone, so every data-parallel rank draws the same
+        count and a resumed run repeats the schedule it would have followed.
+        """
+        if not self.cfg.loop_probs:
+            return self.cfg.n_loops
+        rng = np.random.default_rng([self.cfg.seed, 0x100b5, step])
+        return 1 + int(rng.choice(len(self.cfg.loop_probs), p=self.cfg.loop_probs))
+
+    def _update(self, stream, n_loops: Optional[int] = None, want_diagnostics: bool = True):
+        n_loops = n_loops or self.cfg.n_loops
         self.optimizer.zero_grad(set_to_none=True)
         report = {}
         diagnostics = {}
+        tokens = 0
         for _ in range(self.cfg.accumulate):
             batch, _items = next(stream)
-            with torch.autocast(device_type="cuda" if str(self.device).startswith("cuda") else "cpu",
-                                dtype=self.amp_dtype, enabled=self.precision != "fp32"):
-                losses, out = self.model.losses(batch, n_loops=self.cfg.n_loops,
-                                                generator=self.generator)
-                total, micro_report = combine(self.balancer(losses), self.weights)
-                if self.balancer.mode != "none":
-                    # Balanced terms sit near 1 by construction; log the raw
-                    # values too, or the log hides whether anything is learning.
-                    micro_report.update({f"raw.{k}": float(v.detach()) for k, v in losses.items()})
-            if not bool(torch.isfinite(total)):
-                raise FloatingPointError("non-finite loss; optimizer update cancelled")
-            self.scaler.scale(total / self.cfg.accumulate).backward()
-            for key, value in micro_report.items():
-                report[key] = report.get(key, 0.0) + value / self.cfg.accumulate
-            diagnostics = self._router_diagnostics(out)
-            del losses, out, total, batch
+            tokens += getattr(batch, "n_tokens", 0)
+            # A step with L loops holds L passes of activations. Splitting the
+            # micro-batch L ways keeps peak memory where a one-loop step has
+            # it, so a rare deep step cannot OOM a batch size chosen for the
+            # common case. The gradient is the same sum either way.
+            rows = batch.modality.shape[0]
+            pieces = split_batch(batch, min(n_loops, rows)) if n_loops > 1 else [batch]
+            for piece in pieces:
+                share = piece.modality.shape[0] / rows
+                with torch.autocast(device_type="cuda" if str(self.device).startswith("cuda") else "cpu",
+                                    dtype=self.amp_dtype, enabled=self.precision != "fp32"):
+                    losses, out = self.model.losses(piece, n_loops=n_loops,
+                                                    generator=self.generator)
+                    total, micro_report = combine(self.balancer(losses), self.weights)
+                    if self.balancer.mode != "none":
+                        # Balanced terms sit near 1 by construction; log the raw
+                        # values too, or the log hides whether anything is learning.
+                        micro_report.update({f"raw.{k}": float(v.detach()) for k, v in losses.items()})
+                if not bool(torch.isfinite(total)):
+                    raise FloatingPointError("non-finite loss; optimizer update cancelled")
+                self.scaler.scale(total * share / self.cfg.accumulate).backward()
+                for key, value in micro_report.items():
+                    report[key] = report.get(key, 0.0) + value * share / self.cfg.accumulate
+                if want_diagnostics:
+                    diagnostics = self._router_diagnostics(out)
+                del losses, out, total
+            del batch, pieces
+        trainable = [p for p in self.model.parameters() if p.requires_grad]
+        if self.group is not None:
+            self.group.average_gradients(trainable)
         self.scaler.unscale_(self.optimizer)
-        params = [p for p in self.model.parameters() if p.grad is not None]
+        params = [p for p in trainable if p.grad is not None]
         # foreach=None lets torch fuse the norm reduction and the rescale across
         # the whole parameter list. Pinning it False issued two kernels per
         # tensor every single step, on a model that has thousands of them.
@@ -444,7 +599,7 @@ class Trainer:
         updated = self.scaler.get_scale() >= previous_scale
         if self.ema is not None and updated:
             self._update_ema()
-        return report, diagnostics, float(norm), updated
+        return report, diagnostics, float(norm), updated, tokens
 
     @torch.no_grad()
     def _update_ema(self) -> None:
@@ -463,9 +618,11 @@ class Trainer:
         return {k: (self.ema[k].to(v.dtype) if k in self.ema else v) for k, v in live.items()}
 
     def _infinite_batches(self):
-        while True:
-            for batch, items in self.loader.batches():
-                yield batch, items
+        def forever():
+            while True:
+                for batch, items in self.loader.batches():
+                    yield batch, items
+        return Prefetcher(forever(), self.cfg.prefetch)
 
     @staticmethod
     def _router_diagnostics(out) -> dict[str, float]:
@@ -496,6 +653,8 @@ class Trainer:
         parts.append(f"depth={record.get('mean_depth', 0):.2f}")
         parts.append(f"|g|={record.get('grad_norm', 0):.2f}")
         parts.append(f"{record.get('elapsed', 0):.0f}s")
+        if record.get("tokens_per_second"):
+            parts.append(f"{record['tokens_per_second'] / 1000:.1f}k tok/s")
         for device, memory in record.get('gpu_memory', {}).items():
             parts.append(f"{device}={memory['allocated_gb']:.2f}GB")
         return "  ".join(parts)

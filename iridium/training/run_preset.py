@@ -20,7 +20,9 @@ prints the data-budget audit and the free-tier time estimates.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import math
 import sys
 from dataclasses import replace
@@ -98,7 +100,8 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
                  device: Optional[str] = None, out: str = "runs", init: Optional[str] = None,
                  resume: Optional[str] = None, seed: int = 0, max_data: bool = False,
                  data: Optional[str] = None, time_budget_hours: Optional[float] = None,
-                 keep_rounds: Optional[int] = None) -> Path:
+                 keep_rounds: Optional[int] = None, rank: int = 0, world: int = 1,
+                 micro_batch: Optional[int] = None) -> Path:
     """Train ``preset``; returns the newest checkpoint path.
 
     ``time_budget_hours`` stops cleanly after the last round that fits, so a
@@ -124,6 +127,12 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
     from .tokenizer_bridge import tokenizer_for_config, tokenizer_manifest
     from .trainer import TrainConfig, Trainer
 
+    primary = rank == 0
+    if not primary:
+        # Only rank 0 reports; the other ranks would print the same lines.
+        sys.stdout = open(os.devnull, "w")
+    if world > 1 and device is None:
+        device = f"cuda:{rank}" if torch.cuda.is_available() else "cpu"
     if not preset.trainable_on_free_tier:
         print(f"warning: {preset.name} is costed for larger hardware than a free tier",
               file=sys.stderr)
@@ -139,6 +148,9 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
         from .prepare import prepare
         data = str(Path(out) / "data")
         if not (Path(data) / preset.name / "prepared.json").exists():
+            if world > 1:
+                raise RuntimeError("prepare the data first (`iridium data prepare`); "
+                                   "parallel ranks must not all write the same shards")
             prepare(preset, data, seed=seed)
 
     shard_dir = None
@@ -204,9 +216,17 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
                             text_mix=text_mix, chat_mix=chat_mix,
                             chat_max_bytes=chat_max_bytes)
 
-    micro = max(1, min(preset.micro_batch, preset.batch_size))
+    # Each rank carries an equal share of the batch, so the global batch, the
+    # step count and the schedule are the same however many GPUs run it.
+    if preset.batch_size % world:
+        raise ValueError(f"batch size {preset.batch_size} does not divide over {world} GPUs")
+    rank_batch = preset.batch_size // world
+    micro = max(1, min(micro_batch or preset.micro_batch, rank_batch))
+    while rank_batch % micro:
+        micro -= 1
     tcfg = TrainConfig(
-        steps=steps, batch_size=micro, accumulate=math.ceil(preset.batch_size / micro),
+        steps=steps, batch_size=micro, accumulate=rank_batch // micro,
+        loop_probs=tuple(preset.loop_probs),
         lr=preset.lr, seed=seed,
         optimizer=preset.optimizer, schedule=preset.schedule, ema_decay=preset.ema_decay,
         loss_balance=preset.loss_balance, max_length=min(preset.window, cfg.max_seq_len),
@@ -223,15 +243,28 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
                                    shard_dir, seed=seed, tokenizer=tokenizer)
         corpus_for = lambda r: corpus  # noqa: E731
     on_eval = None
-    if shard_dir is not None:
-        on_eval = held_out_evaluator(shard_dir, cfg, info.device, micro, preset.window)
-    trainer = Trainer(model, corpus_for(0), tcfg, out_dir=out_dir, device=info.device)
+    if shard_dir is not None and primary:
+        on_eval = held_out_evaluator(shard_dir, cfg, info.device, min(micro, 8), preset.window,
+                                     max_batches=8)
+    trainer = Trainer(model, corpus_for(0), tcfg, out_dir=out_dir if primary else None,
+                      device=info.device, rank=rank, world=world)
+    group = trainer.group
     if on_eval is not None:
         on_eval.model = trainer.model
+        on_eval.autocast = lambda: torch.autocast(
+            device_type="cuda" if str(info.device).startswith("cuda") else "cpu",
+            dtype=trainer.amp_dtype, enabled=trainer.precision != "fp32")
+    if world > 1:
+        print(f"data-parallel: {world} processes, {rank_batch} sequences each per step "
+              f"({micro} per forward pass)")
     start_round = 0
     if resume == "auto":
         resume = find_latest(out_dir)
         print(f"auto-resume: {resume or 'nothing to resume, starting fresh'}")
+    if group is not None:
+        # Every rank loaded the same file or built from the same seed; this
+        # makes that a fact rather than an assumption.
+        group.sync_from_primary(trainer.model.parameters())
     if resume:
         trainer.resume(resume)
         start_round = min(rounds - 1, trainer.completed_steps * rounds // steps)
@@ -248,15 +281,25 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
             trainer.set_corpus(corpus_for(r))
         until = steps if r == rounds - 1 else (r + 1) * steps // rounds
         trainer.train(until=until, on_eval=on_eval)
-        path = trainer.save(f"round{r}", extra={"preset": preset.name, "round": r,
-                                                "tokenizer": manifest, "sources": sources})
-        print(f"round {r + 1}/{rounds} done at step {trainer.completed_steps}: {path}",
-              flush=True)
-        if keep_rounds:
-            _prune_rounds(out_dir, keep_rounds)
+        if group is not None:
+            drift = group.total(group.sync_from_primary(trainer.model.parameters()))
+            if drift > 1e-3:
+                print(f"warning: ranks had drifted by {drift:.2e} before resync", flush=True)
+        if primary:
+            path = trainer.save(f"round{r}", extra={"preset": preset.name, "round": r,
+                                                    "tokenizer": manifest, "sources": sources})
+            print(f"round {r + 1}/{rounds} done at step {trainer.completed_steps}: {path}",
+                  flush=True)
+            if keep_rounds:
+                _prune_rounds(out_dir, keep_rounds)
         slowest = max(slowest, time.monotonic() - round_started)
-        if (time_budget_hours and r < rounds - 1
-                and time.monotonic() - started + 1.1 * slowest > time_budget_hours * 3600):
+        out_of_time = bool(time_budget_hours and r < rounds - 1
+                           and time.monotonic() - started + 1.1 * slowest > time_budget_hours * 3600)
+        if group is not None:
+            out_of_time = group.decide(out_of_time)
+        if out_of_time:
+            if not primary:
+                return path
             (out_dir / "preset.json").write_text(json.dumps(
                 {"preset": preset.name, "steps": steps, "rounds": rounds, "status": preset.status,
                  "trained": False, "completed_steps": trainer.completed_steps,
@@ -264,6 +307,8 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
             print(f"time budget reached after round {r + 1}/{rounds}; run again to continue",
                   flush=True)
             return path
+    if not primary:
+        return path
     final = trainer.save("final", extra={"preset": preset.name, "tokenizer": manifest,
                                          "sources": sources})
     (out_dir / "preset.json").write_text(json.dumps(
@@ -314,7 +359,9 @@ def held_out_evaluator(shard_dir, cfg, device, batch_size: int, window: int,
             for i, (batch, _) in enumerate(loader.batches()):
                 if i >= max_batches:
                     break
-                losses, _ = evaluate.model.losses(batch)
+                with (evaluate.autocast() if getattr(evaluate, "autocast", None)
+                      else contextlib.nullcontext()):
+                    losses, _ = evaluate.model.losses(batch)
                 total += float(losses["text"])
                 count += 1
             loss = total / max(count, 1)

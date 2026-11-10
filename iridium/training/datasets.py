@@ -194,7 +194,12 @@ class BatchLoader:
         bucket: bool = False,
         device: str = "cpu",
         max_length: Optional[int] = None,
+        shard: tuple[int, int] = (0, 1),
     ) -> None:
+        #: ``(rank, world)``: this loader yields every ``world``-th item of the
+        #: shuffled order starting at ``rank``. Loaders that share a seed then
+        #: cover the corpus between them with no item in two of them.
+        self.shard = shard
         self.corpus = corpus
         self.dims = continuous_dims(codecs)
         self.n_scalars = codecs.action_scalars
@@ -210,6 +215,9 @@ class BatchLoader:
     def batches(self) -> Iterator[tuple[TensorBatch, list[Item]]]:
         order = np.arange(len(self.corpus))
         self.rng.shuffle(order)
+        rank, world = self.shard
+        if world > 1:
+            order = order[rank::world]
         if self.bucket:
             order = sorted(order, key=lambda i: len(self.corpus.items[i].sample))
             groups = [
@@ -229,7 +237,9 @@ class BatchLoader:
             )
             if not (batch.valid[:, 1:] & batch.supervised[:, 1:]).any(axis=1).all():
                 raise ValueError("example has no targets within context; shorten/rebuild the corpus")
-            yield TensorBatch(batch, device=self.device), items
+            tensors = TensorBatch(batch, device=self.device)
+            tensors.n_tokens = int(batch.valid.sum())
+            yield tensors, items
 
 
 def describe(corpus: Corpus) -> str:

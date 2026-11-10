@@ -534,14 +534,16 @@ def build_kaggle_50m() -> list[dict]:
     | Session | Accelerator | What it does | About |
     |---|---|---|---|
     | 1 | None (CPU, spends no GPU quota) | Downloads and tokenizes the data | up to 12 h |
-    | 2, 3, ... | GPU, with internet on | Trains, stops itself before the 12 h limit | ~11 h each |
+    | 2, 3, ... | **GPU T4 x2**, with internet on | Trains on both GPUs at once, stops itself before the 12 h limit | ~11 h each |
 
     **Between sessions:** Add Input -> Notebook Output -> this notebook's latest
     version with output. Attach the data version and the newest training
     version. The notebook finds them itself.
 
+    Pick **GPU T4 x2**, not P100: training runs one process per GPU and
+    averages their gradients, so two T4s do each step in about half the time.
     The hours are estimates. Nothing has measured this model's speed yet, so
-    read the tokens-per-second lines in the first training session. Sessions
+    read the `tok/s` figure on the log lines in the first training session. Sessions
     can be repeated until the last cell reports the run finished.
     """)
     b.md("## 1. Source (private repo)\n\nNeeds a Kaggle secret named `GITHUB_TOKEN`; it is never printed or stored.")
@@ -562,7 +564,10 @@ def build_kaggle_50m() -> list[dict]:
     print(info.describe())
     HAS_GPU = torch.cuda.is_available()
     if HAS_GPU:
-        print('GPU:', torch.cuda.get_device_name(0))
+        names = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
+        print('GPUs:', names)
+        if len(names) < 2:
+            print('NOTE: one GPU. Settings -> Accelerator -> GPU T4 x2 trains about twice as fast.')
 
     PRESET = 'iridium-50m'
     preset = get_preset(PRESET)
@@ -620,17 +625,23 @@ def build_kaggle_50m() -> list[dict]:
     `val_*_bpb` should fall over time. Lower is better.
     """)
     b.code("""
-    from iridium.training.run_preset import train_preset
+    import subprocess, sys
+    from iridium.training.run_preset import find_latest
 
     SESSION_LIMIT_HOURS = 11.0     # Kaggle kills a session at 12 h and may lose its output
 
     checkpoint = None
     if HAS_GPU:
         used = (time.monotonic() - SESSION_STARTED) / 3600
-        checkpoint = train_preset(
-            preset, device=DEVICE, out=str(OUT_DIR), data=str(DATA_DIR), resume='auto', seed=0,
-            time_budget_hours=SESSION_LIMIT_HOURS - used, keep_rounds=1,
-        )
+        # A separate process per GPU (`--gpus auto`), started from the shell so
+        # this kernel never holds GPU memory the trainers need.
+        subprocess.run([
+            sys.executable, '-m', 'iridium', 'train', '--preset', PRESET,
+            '--out', str(OUT_DIR), '--data', str(DATA_DIR), '--resume', 'auto',
+            '--gpus', 'auto', '--keep-rounds', '1',
+            '--time-budget-hours', f'{SESSION_LIMIT_HOURS - used:.2f}',
+        ], check=True)
+        checkpoint = find_latest(RUN_DIR)
         print('newest checkpoint:', checkpoint)
     """)
     b.md("## 6. If it finished: export and grade")

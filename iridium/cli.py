@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -539,6 +540,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--init", default=None, help="start from a checkpoint (e.g. chat -> tools)")
     p.add_argument("--resume", default=None, help="continue from a round checkpoint, or 'auto' for the newest one in the run dir")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--gpus", default="auto",
+                   help="'auto' trains on every visible GPU at once (data-parallel, one "
+                        "process each); 1 forces a single process")
+    p.add_argument("--time-budget-hours", type=float, default=None,
+                   help="stop cleanly after the last round that fits; run again to continue")
+    p.add_argument("--keep-rounds", type=int, default=None,
+                   help="keep only the newest N round checkpoints")
+    p.add_argument("--micro-batch", type=int, default=None,
+                   help="sequences per forward pass (default: the preset's; halved on OOM)")
     p.add_argument("--dry-run", action="store_true",
                    help="build on the meta device, audit and estimate; no network, no training")
     p.add_argument("--max-data", action="store_true",
@@ -607,7 +617,7 @@ def cmd_data(args) -> int:
     return 0
 
 
-def cmd_train(args) -> int:
+def cmd_train(args, argv=None) -> int:
     from .training import run_preset
     try:
         preset = _budgeted_preset(args)
@@ -617,9 +627,24 @@ def cmd_train(args) -> int:
     if args.dry_run:
         result = run_preset.dry_run(preset)
         return 0 if result["match"] else 1
+    from .training import parallel
+    rank, world = parallel.world_from_env()
+    if world == 1 and "RANK" not in os.environ:
+        gpus = parallel.gpu_count() if args.gpus == "auto" else int(args.gpus)
+        gpus = min(gpus, max(parallel.gpu_count(), 1)) if args.gpus == "auto" else gpus
+        while gpus > 1 and preset.batch_size % gpus:
+            gpus -= 1
+        if gpus > 1:
+            # One process per GPU, each re-running this same command.
+            print(f"training on {gpus} GPUs at once (one process each)", flush=True)
+            return parallel.launch(sys.argv[1:] if argv is None else list(argv), gpus,
+                                   log_dir=Path(args.out) / preset.name)
     run_preset.train_preset(preset, steps=args.steps, rounds=args.rounds, device=args.device,
                             out=args.out, init=args.init, resume=args.resume, seed=args.seed,
-                            max_data=args.max_data, data=args.data)
+                            max_data=args.max_data, data=args.data,
+                            time_budget_hours=args.time_budget_hours,
+                            keep_rounds=args.keep_rounds, rank=rank, world=world,
+                            micro_batch=args.micro_batch)
     return 0
 
 
