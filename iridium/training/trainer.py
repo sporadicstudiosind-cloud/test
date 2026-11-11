@@ -668,11 +668,17 @@ class Trainer:
             raise ValueError("resume model config differs")
         if blob["manifest"]["train_config"]["optimizer"] != self.cfg.optimizer:
             raise ValueError("resume optimizer differs")
-        if blob["manifest"].get("precision") != self.precision:
-            raise ValueError("resume precision differs")
+        saved_precision = blob["manifest"].get("precision")
+        if saved_precision != self.precision:
+            # Weights and optimizer state are fp32 under every setting (mixed
+            # precision is autocast only), so a run can move between a T4
+            # (fp16) and a bf16 card. Only the fp16 loss scale does not carry.
+            print(f"[trainer] resuming a {saved_precision} run in {self.precision}; "
+                  "loss scale starts fresh", flush=True)
         self.model.load_state_dict(blob["state_dict"])
         self.optimizer.load_state_dict(blob["optimizer"])
-        self.scaler.load_state_dict(blob["scaler"])
+        if saved_precision == self.precision:
+            self.scaler.load_state_dict(blob["scaler"])
         if self.ema is not None and blob.get("ema_state_dict") is not None:
             self.ema = {k: v.detach().clone().float() for k, v in blob["ema_state_dict"].items()
                         if k in self.ema}
