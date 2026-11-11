@@ -260,6 +260,7 @@ class Iridium1(nn.Module):
         stats["core_dispatch"] = []
         stats["subject_loss"] = h.sum() * 0
         prev_pick: Optional[torch.Tensor] = None
+        curriculum = self._routing_curriculum(batch) if self.training else None
         for loop in range(n_loops):
             start = 0 if loop == 0 else self.cfg.router.loop_entry
             h1 = (self.core._run(h, core_positions, keep, range(self.cfg.core.n_layers), loop,
@@ -316,6 +317,8 @@ class Iridium1(nn.Module):
                         decision.stack_index[row] = index
                         decision.stack_weight[row] = 1. / decision.stack_index.shape[-1]
                         decision.valid[row] = mask
+            if curriculum is not None and not self.cfg.controller_mode:
+                self._apply_curriculum(decision, curriculum)
             decisions.append(decision)
 
             # The bridge reads the core's *loop-0* stage-I states for the
@@ -445,6 +448,53 @@ class Iridium1(nn.Module):
         else:
             valid = batch.valid
         return keep & valid.view(b, 1, 1, -1)
+
+    def _routing_curriculum(self, batch: TensorBatch):
+        """Per-window draws for the specialist curriculum (``RouterConfig``).
+
+        Drawn once per forward pass, so every ponder loop of a window follows
+        the same plan. Returns ``None`` when the curriculum is off.
+        """
+        r = self.cfg.router
+        if not (r.subject_force or r.solo_p or r.any_p):
+            return None
+        device = batch.modality.device
+        b = batch.modality.shape[0]
+        names = self.cfg.stacks.specializations
+        subject = torch.tensor(
+            [names.index(m.get("subject")) if m.get("subject") in names else -1
+             for m in batch.meta], device=device, dtype=torch.long)
+        u = torch.rand(b, device=device)
+        solo = u < r.solo_p
+        anyone = (u >= r.solo_p) & (u < r.solo_p + r.any_p)
+        random_stack = torch.randint(self.cfg.stacks.n_stacks, (b,), device=device)
+        return subject, solo, anyone, random_stack
+
+    def _apply_curriculum(self, decision, curriculum) -> None:
+        subject, solo, anyone, random_stack = curriculum
+        index, probs = decision.stack_index, decision.gate_probs
+        b, t, k = index.shape
+        col = lambda v: v.view(b, 1).expand(b, t)                     # noqa: E731
+        labelled = col(subject >= 0)
+        first, second = index[..., 0], index[..., min(1, k - 1)]
+        if self.cfg.router.subject_force:
+            own = col(subject.clamp_min(0))
+            # Keep the router's best stack that is not the subject's as partner.
+            partner = torch.where(first == own, second, first)
+            first = torch.where(labelled, own, first)
+            second = torch.where(labelled, partner, second)
+        primary = torch.where(col(anyone), col(random_stack), first)
+        single = col(solo | anyone)
+        second = torch.where(single, primary, second)
+        new = index.clone()
+        new[..., 0] = primary
+        if k > 1:
+            new[..., 1] = second
+        chosen = torch.gather(probs, -1, new).to(decision.stack_weight.dtype)
+        weight = chosen / chosen.sum(-1, keepdim=True).clamp_min(1e-9)
+        # One stack in every slot: equal shares sum to the whole weight.
+        weight = torch.where(single.unsqueeze(-1), torch.full_like(weight, 1.0 / k), weight)
+        decision.stack_index, decision.stack_weight = new, weight
 
     # -- convenience ------------------------------------------------------
 

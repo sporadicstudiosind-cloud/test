@@ -495,6 +495,17 @@ class RouterConfig:
     ponder_beta: float = 1e-2
     depth_prior_p_stop: float = 0.25
     depth_beta: float = 1e-2
+    #: Specialist curriculum, applied per training window (never at inference).
+    #: ``subject_force``: a window with a subject label always visits that
+    #: subject's stack, from the first step, instead of waiting for the router
+    #: to learn to send it there; the other slot stays the router's choice.
+    #: ``solo_p``: this share of windows visit *only* their primary stack, so a
+    #: specialist has to do its subject without a partner covering for it.
+    #: ``any_p``: this share visit one stack chosen at random, so every stack
+    #: stays able to handle every subject. Together: general, but best at one.
+    subject_force: bool = False
+    solo_p: float = 0.0
+    any_p: float = 0.0
     capacity_factor: float = 0.0   # 0 disables token dropping (see docs)
     router_temperature: float = 1.0
 
@@ -510,6 +521,8 @@ class RouterConfig:
             raise ConfigError("max_loops must be >= 1")
         if self.extra_loops < 0:
             raise ConfigError("extra_loops must be >= 0")
+        if min(self.solo_p, self.any_p) < 0 or self.solo_p + self.any_p > 1:
+            raise ConfigError("solo_p and any_p must be probabilities summing to at most 1")
         if not 0.0 < self.ponder_prior_p_stop <= 1.0:
             raise ConfigError("ponder_prior_p_stop must lie in (0, 1]")
 

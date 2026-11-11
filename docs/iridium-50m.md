@@ -22,6 +22,19 @@ are worth it, so compare it with chat-36m on the battery rather than assuming.
 router (`subject_routing` loss). `iridium.evaluation.routing` measures whether routing
 actually depends on the subject.
 
+**Specialist curriculum** (training only). A window with a subject always visits that
+subject's stack, plus the router's best other stack. 20% of windows visit only their
+primary stack, so a specialist must manage alone; 10% visit one random stack, so every
+stack stays able to handle every subject.
+
+A small CPU experiment (four synthetic subjects, 1,000 steps, two seeds each) is the
+only evidence so far. Loss with normal routing was the same with or without the
+curriculum (1.21). Loss when a subject was sent to the *wrong* stack fell from 2.05 to
+1.22. So in that toy it bought generality at no cost, and did not make specialists
+better at their own subject. Forcing the subject stack without the solo and random
+windows made wrong-stack loss worse (2.47). Whether this holds at 50M on real text is
+untested. Single-stack windows also skip one stack, saving roughly 10% of compute.
+
 **Thinking loops** are trained: 70% of steps run one loop, 20% two and 10% three
 (`loop_probs`), and the core is told which pass it is on. That costs about 1.4x the
 compute of one-loop training. Loops beyond three at inference are still extrapolation.

@@ -10,6 +10,10 @@
 - **Thinking loops are trained.** `loop_probs` samples 1, 2 or 3 ponder loops per step
   (70/20/10 for iridium-50m, whose `max_loops` is now 3 and which now tags each pass).
   Multi-loop steps split their batch so they need no more memory.
+- **Specialist curriculum** (`subject_force`, `solo_p`, `any_p` on the router; on for
+  iridium-50m). Labelled windows always visit their subject's stack; some windows visit
+  one stack only. In a toy experiment this left normal loss unchanged and cut
+  wrong-stack loss from 2.05 to 1.22; see docs/iridium-50m.md.
 - **Less waiting on the CPU.** Batches are built on a background thread; iridium-50m
   runs 32 sequences per forward pass instead of 8; router diagnostics are computed only
   on logged steps; validation runs under mixed precision. Log lines report `tok/s`.
