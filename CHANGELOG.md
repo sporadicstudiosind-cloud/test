@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- iridium-50m checkpoints every ~250 steps (`rounds` 30 -> 300): a session cut off by
+  the weekly GPU quota lost everything since its last round, up to ~5 hours.
+
 ### Fixes from a repository-wide bug hunt
 Training (these affect the live iridium-50m run):
 - **Each round reshuffled the data**, so a 30-round run drew with replacement: about a

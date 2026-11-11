@@ -225,7 +225,10 @@ def _iridium_50m(chat34: IridiumConfig) -> Preset:
         "Maths, chat, code and science on specialist stacks, with file, code and web "
         "tool use and basic image and audio input.",
         cfg, dict(_IRIDIUM50_MIX), steps=tokens // (batch * window), batch_size=batch,
-        window=window, lr=1.5e-3, rounds=30, free_tier="kaggle_2xt4",
+        window=window, lr=1.5e-3,
+        # A checkpoint every ~250 steps (about 15-30 minutes on two T4s), so a
+        # session ended by the weekly quota, not the 12 h limit, loses little.
+        rounds=300, free_tier="kaggle_2xt4",
         micro_batch=16, loop_probs=(0.7, 0.2, 0.1),
         prepare_tokens=2_500_000_000, tokenizer_sources=dict(TOKENIZER_SOURCES),
         notes="5B tokens, ~100 per body parameter. About 15 hours on Kaggle's two T4s, "
