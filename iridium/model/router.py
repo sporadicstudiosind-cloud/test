@@ -298,10 +298,17 @@ def geometric_prior(
     return prior
 
 
-def ponder_kl(p: torch.Tensor, prior: torch.Tensor, dim: int = -1) -> torch.Tensor:
-    """``KL(p || prior)`` averaged over everything but ``dim``."""
+def ponder_kl(p: torch.Tensor, prior: torch.Tensor, dim: int = -1,
+              valid: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """``KL(p || prior)`` averaged over everything but ``dim``; with ``valid``
+    (the other dims' shape), over valid positions only, so padding neither
+    receives the penalty nor dilutes it."""
     p = (p if p.dtype == torch.float64 else p.float()).clamp_min(1e-9)
     shape = [1] * p.dim()
     shape[dim] = -1
     q = prior.view(shape).clamp_min(1e-9)
-    return (p * (p.log() - q.log())).sum(dim=dim).mean()
+    kl = (p * (p.log() - q.log())).sum(dim=dim)
+    if valid is None:
+        return kl.mean()
+    weight = valid.to(kl.dtype)
+    return (kl * weight).sum() / weight.sum().clamp_min(1.0)

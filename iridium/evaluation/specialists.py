@@ -48,7 +48,10 @@ def specialist_matrix(model, batches: dict[str, list], autocast=None) -> dict:
                 total = 0.0
                 for batch in group:
                     with (autocast() if autocast else contextlib.nullcontext()):
-                        total += float(model.losses(batch)[0]["text"])
+                        # In controller mode the last loop never dispatches, so one loop
+                        # would score the core under every route; two always route.
+                        loops = 2 if getattr(model.cfg, "controller_mode", False) else 1
+                        total += float(model.losses(batch, n_loops=loops)[0]["text"])
                 row[route] = round(total / len(group), 4)
             rivals = {r: v for r, v in row.items() if r not in ("routed", subject)}
             best_rival = min(rivals, key=rivals.get)

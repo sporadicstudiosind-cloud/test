@@ -555,7 +555,7 @@ def _take(key, quota, seed, split, max_bytes, lo, hi, seen, items, tokenizer,
     budget = int(np.ceil(8 * quota * 100 / (hi - lo))) + 64
     for turns in CONVERSATION_LOADERS[key](limit=budget, seed=seed):
         joined = "\n".join(t.text for t in turns)
-        if not in_split(joined, split):
+        if not in_split(_split_key(key, turns, joined), split):
             continue
         fingerprint = hash(joined)
         if fingerprint in seen:
@@ -588,6 +588,16 @@ def _take(key, quota, seed, split, max_bytes, lo, hi, seen, items, tokenizer,
     return got
 
 
+#: Chat sources built from a dataset the text corpus also reads. Their split is
+#: decided by the shared text (the reply) alone, so a held-out story request is
+#: never also a training story in ``writing_text`` (81% of them were).
+_SHARED_WITH_TEXT = {"story_requests"}
+
+
+def _split_key(key: str, turns, joined: str) -> str:
+    return turns[-1].text if key in _SHARED_WITH_TEXT and turns else joined
+
+
 def iter_chat_items(mix: Optional[dict[str, float]] = None, seed: int = 0,
                     max_bytes: int = 1024, split: str = "train", tokenizer=None,
                     max_tokens: Optional[int] = None):
@@ -605,7 +615,7 @@ def iter_chat_items(mix: Optional[dict[str, float]] = None, seed: int = 0,
 
     def source(i, key):
         for turns in CONVERSATION_LOADERS[key](limit=None, seed=seed + i):
-            if not in_split("\n".join(t.text for t in turns), split):
+            if not in_split(_split_key(key, turns, "\n".join(t.text for t in turns)), split):
                 continue
             turns = fit_to_budget(turns, max_bytes)
             while turns and turns[0].role == "assistant":

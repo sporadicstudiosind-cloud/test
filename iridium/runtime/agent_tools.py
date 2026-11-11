@@ -223,6 +223,11 @@ def _inside(path, roots):
     except TypeError:
         return True      # an open file descriptor
     return any(full == r or full.startswith(r + _os.sep) for r in roots)
+#: Audit events that change the filesystem, and how many leading arguments are paths.
+_WRITES = {"os.remove": 1, "os.rmdir": 1, "os.mkdir": 1, "shutil.rmtree": 1, "os.truncate": 1,
+           "os.chmod": 1, "os.chown": 1, "os.utime": 1, "os.chflags": 1, "os.lchflags": 1,
+           "os.rename": 2, "os.link": 2, "os.symlink": 2, "shutil.copyfile": 2,
+           "shutil.copytree": 2, "shutil.move": 2, "os.setxattr": 1, "os.removexattr": 1}
 def _guard(event, args):
     if event == "open":
         mode = args[1] if len(args) > 1 and isinstance(args[1], str) else "r"
@@ -230,8 +235,15 @@ def _guard(event, args):
         roots = [_ROOT, _SCRIPT] if writing else _ALLOWED + [_SCRIPT]
         if isinstance(args[0], (str, bytes, _os.PathLike)) and not _inside(args[0], roots):
             raise PermissionError(f"outside the workspace: {args[0]!r}")
-    elif event in ("os.remove", "os.rename", "os.rmdir", "os.mkdir", "shutil.rmtree"):
-        if args and isinstance(args[0], (str, bytes, _os.PathLike)) and not _inside(args[0], [_ROOT, _SCRIPT]):
+    elif event in _WRITES:
+        # Every path argument, not only the first: os.rename and os.link take a
+        # destination too, and checking the source alone let code move or
+        # hard-link files out of (or into) the workspace.
+        for arg in args[:_WRITES[event]]:
+            if isinstance(arg, (str, bytes, _os.PathLike)) and not _inside(arg, [_ROOT, _SCRIPT]):
+                raise PermissionError(f"outside the workspace: {arg!r}")
+    elif event in ("os.listdir", "os.scandir"):
+        if args and isinstance(args[0], (str, bytes, _os.PathLike)) and not _inside(args[0], _ALLOWED + [_SCRIPT]):
             raise PermissionError(f"outside the workspace: {args[0]!r}")
     elif event in ("subprocess.Popen", "os.system", "os.exec", "os.spawn", "os.posix_spawn",
                    "socket.connect", "socket.bind", "socket.getaddrinfo", "ctypes.dlopen"):

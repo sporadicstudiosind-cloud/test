@@ -168,4 +168,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import argparse
+    argparse.ArgumentParser(description="Regenerate web/data.json from the live configs "
+                            "(overwrites it).").parse_args()
     raise SystemExit(main())

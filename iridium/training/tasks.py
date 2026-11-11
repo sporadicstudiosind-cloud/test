@@ -413,8 +413,8 @@ def unknowable_item(rng: np.random.Generator, split: str = "train") -> Item:
     "I don't know" (:mod:`iridium.runtime.abstain`); without it, nothing in
     the data ever rewards saying so.
     """
-    offset = 0 if split == "train" else len(_KEYS) // 2       # held-out keys differ
-    pool = _KEYS[offset:] + _KEYS[:offset]
+    half = len(_KEYS) // 2                                    # held-out keys differ
+    pool = _KEYS[:half] if split == "train" else _KEYS[half:]
     n = int(rng.integers(2, 7))
     chosen = [pool[int(i)] for i in rng.choice(len(pool), size=n + 1, replace=False)]
     facts = {k: int(rng.integers(0, 1000)) for k in chosen[:n]}
@@ -423,9 +423,15 @@ def unknowable_item(rng: np.random.Generator, split: str = "train") -> Item:
     context = "; ".join(f"{k} = {v}" for k, v in facts.items())
     prompt = f"facts: {context}. what is {key}?"
     target = [encode_text(str(facts[key]))] if answerable else [control_span(UNKNOWN)]
+    # The chat layout, because that is what reads it: the runtime asks for a reply
+    # with an open ASSISTANT marker and abstains when the first id is UNKNOWN
+    # (runtime.abstain). Trained as BOS text SEP target, the signal never
+    # followed ASSISTANT anywhere in the data, so it could not fire in chat.
+    from ..runtime.chat import ASSISTANT, USER
     return Item(
-        sample=Sample([control_span(BOS, supervised=False), encode_text(prompt, supervised=False),
-                       control_span(SEP, supervised=False), *target, control_span(EOS)],
+        sample=Sample([control_span(BOS, supervised=False), control_span(USER, supervised=False),
+                       encode_text(prompt, supervised=False),
+                       control_span(ASSISTANT, supervised=False), *target, control_span(EOS)],
                       meta={"family": "unknowable", "split": split}),
         family="unknowable",
         answer=str(facts[key]) if answerable else "UNKNOWN",

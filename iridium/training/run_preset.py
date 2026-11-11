@@ -267,7 +267,11 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
         group.sync_from_primary(trainer.model.parameters())
     if resume:
         trainer.resume(resume)
-        start_round = min(rounds - 1, trainer.completed_steps * rounds // steps)
+        # The first round not yet finished. A plain completed*rounds//steps
+        # floors back into the round just finished, which then re-ran.
+        start_round = next((r for r in range(rounds)
+                            if (steps if r == rounds - 1 else (r + 1) * steps // rounds)
+                            > trainer.completed_steps), rounds - 1)
         print(f"resumed at step {trainer.completed_steps} (round {start_round})")
         if start_round and shard_dir is None:
             trainer.set_corpus(corpus_for(start_round))

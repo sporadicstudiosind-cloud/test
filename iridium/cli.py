@@ -429,7 +429,15 @@ def cmd_evaluate(args) -> int:
     results = {}
     for split in ("test", "extrapolation"):
         corpus = build_corpus(args.items, seed=1234, split=split)
-        results[split] = evaluate(model, corpus, args.per_family)
+        try:
+            results[split] = evaluate(model, corpus, args.per_family)
+        except ValueError as exc:
+            # The default families include fields and images; a model whose
+            # codecs lack those inputs (iridium-50m, chat presets) cannot be fed
+            # them. Its graded test is the battery.
+            print(f"evaluate: this checkpoint cannot read the default families ({exc}). "
+                  "Use `python -m iridium battery --checkpoint ...` instead.", file=sys.stderr)
+            return 2
     print(json.dumps(results, indent=2))
     return 0
 
@@ -607,7 +615,13 @@ def cmd_presets(args) -> int:
     from .presets import get_preset, preset_table
     from .training.run_preset import describe
     if args.name:
-        print(describe(get_preset(args.name)))
+        try:
+            preset = get_preset(args.name)
+        except KeyError:
+            from .presets import PRESETS
+            print(f"no preset {args.name!r}; known: {', '.join(sorted(PRESETS))}", file=sys.stderr)
+            return 2
+        print(describe(preset))
     else:
         print(preset_table())
     return 0

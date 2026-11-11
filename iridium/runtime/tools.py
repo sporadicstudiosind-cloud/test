@@ -325,7 +325,7 @@ class ToolLoopResult:
     answer: str
     turns: list[Turn]
     calls: list[dict] = field(default_factory=list)   # [{"name", "arguments", "result"|"error"}]
-    stopped: str = "answer"                            # "answer" | "max_calls"
+    stopped: str = "answer"                  # "answer" | "max_calls" | "context_full"
 
 
 def run_tool_loop(
@@ -385,19 +385,21 @@ def run_tool_loop(
     calls: list[dict] = []
     max_seq_len = model.cfg.max_seq_len
 
-    for _ in range(max_calls):
+    # One generation per allowed call, plus one to answer from the last result.
+    for attempt in range(max_calls + 1):
         system = [t for t in turns[:1] if t.role == "system"]
         spare = max_bytes - sum(len(t.text.encode("utf-8")) + 2 for t in system)
-        context = fit_to_budget(turns[len(system):], spare)
-        # A result needs its call, and a reply needs what came before it.
-        while context and context[0].role not in ("user", "tool_call"):
-            context = context[1:]
-        context = system + context
-        sample = conversation_sample(context, supervise_assistant=False, open_for_reply=True,
-                                     tokenizer=tokenizer)
-        budget = params["max_new_tokens"]
-        if len(sample) + budget > max_seq_len:
-            budget = max(1, max_seq_len - len(sample))
+        floor = min(params["max_new_tokens"], 32)
+        for _shrink in range(12):
+            context = system + _fit_agent_context(turns[len(system):], spare)
+            sample = conversation_sample(context, supervise_assistant=False,
+                                         open_for_reply=True, tokenizer=tokenizer)
+            if len(sample) + floor <= max_seq_len:
+                break
+            spare = int(spare * 0.75)
+        else:
+            return ToolLoopResult(answer="", turns=turns, calls=calls, stopped="context_full")
+        budget = min(params["max_new_tokens"], max_seq_len - len(sample))
         step_params = dict(params, max_new_tokens=budget)
         out = generate_fn(model, sample, **step_params)
         params["seed"] = params.get("seed", seed) + 1  # vary sampling call to call
@@ -408,6 +410,8 @@ def run_tool_loop(
             turns = [*context, Turn("assistant", answer)]
             return ToolLoopResult(answer=answer, turns=turns, calls=calls, stopped="answer")
 
+        if attempt == max_calls:
+            break                               # out of calls: do not run this one
         turns = [*context, Turn("tool_call", call_text)]
         try:
             name, arguments = parse_tool_call(call_text)
@@ -417,7 +421,8 @@ def run_tool_loop(
             result = registry.call(name, arguments)
             record = {"name": name, "arguments": arguments, "result": result}
             result_text = json.dumps({"ok": True, "result": result}, separators=(",", ":"))
-        except (ToolCallError, jsonschema.ValidationError, KeyError, RuntimeError) as exc:
+        except (ToolCallError, jsonschema.ValidationError, KeyError, RuntimeError,
+                _workspace_error()) as exc:
             record = {"name": None, "arguments": None, "error": str(exc)}
             result_text = json.dumps({"ok": False, "error": str(exc)}, separators=(",", ":"))
         except Exception as exc:  # the tool's own fn raised something else
@@ -427,3 +432,45 @@ def run_tool_loop(
         turns = [*turns, Turn("tool_result", result_text)]
 
     return ToolLoopResult(answer="", turns=turns, calls=calls, stopped="max_calls")
+
+
+def _workspace_error():
+    """The file tools' error type, worded in results exactly as training shows it
+    (``agent_corpus._Episode.call``): the message alone, no type prefix."""
+    try:
+        from .agent_tools import WorkspaceError
+    except ImportError:                     # file tools not installed
+        return ToolCallError
+    return WorkspaceError
+
+
+def _fit_agent_context(rest: list[Turn], spare: int) -> list[Turn]:
+    """The conversation after the system turn, within ``spare`` bytes.
+
+    The latest user request and everything after it are always kept: dropping
+    whole turns from the front (``fit_to_budget``) once threw away the question
+    and the file just read whenever one tool result was larger than the budget,
+    leaving the model the system prompt alone. Tool results are shortened
+    instead, the longest first, and older history fills what room is left.
+    """
+    def cost(ts):
+        return sum(len(t.text.encode("utf-8")) + 2 for t in ts)
+
+    users = [i for i, t in enumerate(rest) if t.role == "user"]
+    start = users[-1] if users else 0
+    head, tail = list(rest[:start]), list(rest[start:])
+    while cost(tail) > spare:
+        long = [i for i, t in enumerate(tail) if t.role == "tool_result" and len(t.text) > 80]
+        if not long:
+            break
+        i = max(long, key=lambda j: len(tail[j].text))
+        text = tail[i].text
+        tail[i] = Turn("tool_result", text[:max(64, len(text) // 2)] + " ...[truncated]")
+    room = spare - cost(tail)
+    earlier = fit_to_budget(head, room) if head and room > 0 else []
+    # A result needs its call, and a reply needs what came before it.
+    while earlier and earlier[0].role not in ("user", "tool_call"):
+        earlier = earlier[1:]
+    if cost(earlier) > room:
+        earlier = []
+    return earlier + tail

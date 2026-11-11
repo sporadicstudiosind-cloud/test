@@ -208,11 +208,36 @@ class BatchLoader:
         self.device = device
         self.max_length = max_length
         self.rng = np.random.default_rng(seed)
+        self.seed = seed
+        #: Items of this shard's stream already handed out, across epochs. Each
+        #: epoch is one fixed permutation (a function of seed and epoch alone),
+        #: so a new ``batches()`` call -- every round, every resume, every OOM
+        #: retry -- continues where the last left off instead of drawing a new
+        #: shuffle. Redrawing per round sampled with replacement: about a third
+        #: of a 30-round run's data was never seen while the rest repeated.
+        self.position = 0
+
+    def _epoch_order(self, epoch: int) -> np.ndarray:
+        order = np.random.default_rng([self.seed, 0x5EED, epoch]).permutation(len(self.corpus))
+        rank, world = self.shard
+        return order[rank::world] if world > 1 else order
 
     def __len__(self) -> int:
         return (len(self.corpus) + self.batch_size - 1) // self.batch_size
 
     def batches(self) -> Iterator[tuple[TensorBatch, list[Item]]]:
+        """The rest of the current epoch, from ``position``."""
+        if not self.bucket:
+            per_epoch = len(self._epoch_order(0))
+            if per_epoch == 0:
+                return
+            epoch, offset = divmod(self.position, per_epoch)
+            order = self._epoch_order(epoch)
+            for start in range(offset, per_epoch, self.batch_size):
+                group = order[start:start + self.batch_size]
+                self.position = epoch * per_epoch + start + len(group)
+                yield self._make(group)
+            return
         order = np.arange(len(self.corpus))
         self.rng.shuffle(order)
         rank, world = self.shard
@@ -231,15 +256,18 @@ class BatchLoader:
                 for i in range(0, len(order), self.batch_size)
             ]
         for group in groups:
-            items = [self.corpus.items[int(i)] for i in group]
-            batch = collate(
-                [it.sample for it in items], self.dims, self.n_scalars, self.max_length
-            )
-            if not (batch.valid[:, 1:] & batch.supervised[:, 1:]).any(axis=1).all():
-                raise ValueError("example has no targets within context; shorten/rebuild the corpus")
-            tensors = TensorBatch(batch, device=self.device)
-            tensors.n_tokens = int(batch.valid.sum())
-            yield tensors, items
+            yield self._make(group)
+
+    def _make(self, group) -> tuple[TensorBatch, list[Item]]:
+        items = [self.corpus.items[int(i)] for i in group]
+        batch = collate(
+            [it.sample for it in items], self.dims, self.n_scalars, self.max_length
+        )
+        if not (batch.valid[:, 1:] & batch.supervised[:, 1:]).any(axis=1).all():
+            raise ValueError("example has no targets within context; shorten/rebuild the corpus")
+        tensors = TensorBatch(batch, device=self.device)
+        tensors.n_tokens = int(batch.valid.sum())
+        return tensors, items
 
 
 def describe(corpus: Corpus) -> str:

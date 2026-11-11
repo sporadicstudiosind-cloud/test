@@ -344,19 +344,27 @@ class Iridium1(nn.Module):
             #    never computes, and the parity gate would fail — which is
             #    exactly how this was found.
             if loop == 0:
+                # The bridge mask is by position, and padding has position 0, so
+                # without this every real token could read the padding slots'
+                # core states -- which had attended to the whole row, future
+                # tokens included. A position no query reaches hides them.
+                positions_for_bridge = positions.masked_fill(
+                    ~batch.valid, torch.iinfo(positions.dtype).max // 2
+                ) if not positions.is_floating_point() else positions.masked_fill(
+                    ~batch.valid, float("inf"))
                 if cache is not None:
                     bridge_states = (
                         h1 if core_states_cache is None
                         else torch.cat([core_states_cache, h1], dim=1)
                     )
                     bridge_positions = (
-                        positions if core_pos_cache is None
-                        else torch.cat([core_pos_cache, positions], dim=1)
+                        positions_for_bridge if core_pos_cache is None
+                        else torch.cat([core_pos_cache, positions_for_bridge], dim=1)
                     )
                     cache[("bridge", "states")] = bridge_states
                     cache[("bridge", "positions")] = bridge_positions
                 else:
-                    bridge_states, bridge_positions = h1, positions
+                    bridge_states, bridge_positions = h1, positions_for_bridge
 
             stack_out, stack_stats = self.bank(
                 h1,
@@ -435,7 +443,8 @@ class Iridium1(nn.Module):
         prior = geometric_prior(
             ran, self.cfg.router.ponder_prior_p_stop, h.device, loop_p.dtype
         )
-        stats["loop_kl"] = ponder_kl(loop_p, prior) if ran > 1 else h.new_zeros(())
+        stats["loop_kl"] = (ponder_kl(loop_p, prior, valid=batch.valid)
+                           if ran > 1 else h.new_zeros(()))
         stats.setdefault("halted_at", ran)
 
         if cache is not None:

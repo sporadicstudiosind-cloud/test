@@ -291,8 +291,21 @@ def _search(rng, system):
     return e.reply(f"{hit} mentions it.")
 
 
+def _operands(rng, op: str, lo: int, hi: int) -> tuple[int, int]:
+    """Two operands that are never one of the battery's held-out sums.
+
+    ``held_out_arithmetic`` holds out pairs by ``is_test_pair``; an episode that
+    supervised one of them (as these once did) would turn that score into a
+    memory test.
+    """
+    while True:
+        a, b = int(rng.integers(lo, hi)), int(rng.integers(lo, hi))
+        if not is_test_pair(op, a, b):
+            return a, b
+
+
 def _run_code(rng, system):
-    a, b = int(rng.integers(2, 200)), int(rng.integers(2, 200))
+    a, b = _operands(rng, "*", 2, 200)
     e = _Episode(system, f"Use Python to multiply {a} by {b}.", MemoryFS())
     e.stub("run_python", {"code": f"print({a} * {b})"}, {"ok": True, "stdout": f"{a * b}\n"})
     return e.reply(f"{a} x {b} = {a * b}.")
@@ -300,7 +313,7 @@ def _run_code(rng, system):
 
 def _fix_bug(rng, system):
     path = f"{_FILES[int(rng.integers(len(_FILES)))]}.py"
-    a, b = int(rng.integers(2, 50)), int(rng.integers(2, 50))
+    a, b = _operands(rng, "+", 2, 50)
     broken = f"print({a} + {b}"
     e = _Episode(system, f"{path} crashes. Fix it and run it.", MemoryFS({path: broken + "\n"}))
     e.call("read_file", path=path)

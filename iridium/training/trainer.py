@@ -185,6 +185,17 @@ def _fsync(path: Path) -> None:
         os.close(fd)
 
 
+class _PeerOutOfMemory(RuntimeError):
+    """Raised on a rank whose peer ran out of memory, so all ranks retry together."""
+
+
+def _is_oom(err: BaseException) -> bool:
+    # CPU and ROCm allocators raise a plain RuntimeError; anything else that is
+    # a RuntimeError is a real bug and is re-raised by the callers.
+    return (isinstance(err, (torch.cuda.OutOfMemoryError, _PeerOutOfMemory))
+            or (isinstance(err, RuntimeError) and "allocate memory" in str(err)))
+
+
 class Prefetcher:
     """Builds batches on a background thread so the GPU never waits for them.
 
@@ -318,6 +329,10 @@ class Trainer:
             train_corpus, model.cfg.codecs, cfg.batch_size, cfg.seed, device=device,
             max_length=cfg.max_length or model.cfg.max_seq_len, shard=(rank, world),
         )
+        #: Training items this rank has drawn over the whole run (checkpointed),
+        #: and the count when the current corpus was installed.
+        self.items_consumed = 0
+        self._corpus_base = 0
         self.group = None
         if world > 1:
             from .parallel import Group
@@ -389,6 +404,7 @@ class Trainer:
             max_length=self.cfg.max_length or self.model.cfg.max_seq_len,
             shard=(self.rank, self.world),
         )
+        self._corpus_base = self.items_consumed
 
     def _apply_freeze(self) -> None:
         if not self.cfg.freeze:
@@ -442,8 +458,7 @@ class Trainer:
             except (torch.cuda.OutOfMemoryError, RuntimeError) as err:
                 # CPU and ROCm allocators raise a plain RuntimeError; anything
                 # else that is a RuntimeError is a real bug and re-raised.
-                if not isinstance(err, torch.cuda.OutOfMemoryError) \
-                        and "allocate memory" not in str(err):
+                if not _is_oom(err):
                     raise
                 self.optimizer.zero_grad(set_to_none=True)
                 if not self.cfg.oom_retry or self.loader.batch_size <= 1:
@@ -538,9 +553,43 @@ class Trainer:
         report = {}
         diagnostics = {}
         tokens = 0
+        oom = None
+        try:
+            self._accumulate(stream, n_loops, want_diagnostics, report, diagnostics_box := [{}],
+                             tokens_box := [0])
+        except (torch.cuda.OutOfMemoryError, RuntimeError) as err:
+            if not _is_oom(err):
+                raise
+            oom = err
+        if self.group is not None:
+            # Every rank must agree before anyone retries: a rank that retried
+            # alone would run one collective ahead of the other for the rest of
+            # the run and pair gradients from different steps, then hang.
+            if self.group.total(1.0 if oom is not None else 0.0) > 0:
+                raise oom if oom is not None else _PeerOutOfMemory(
+                    "another rank failed to allocate memory; retrying this update together")
+        elif oom is not None:
+            raise oom
+        diagnostics, tokens = diagnostics_box[0], tokens_box[0]
+        trainable = [p for p in self.model.parameters() if p.requires_grad]
+        if self.group is not None:
+            self.group.average_gradients(trainable)
+        try:
+            return self._apply_update(trainable, report, diagnostics, tokens)
+        except (torch.cuda.OutOfMemoryError, RuntimeError) as exc:
+            if self.group is None or not _is_oom(exc):
+                raise
+            # After the gradients were exchanged a retry on one rank cannot be
+            # matched by the others; stop loudly instead of hanging.
+            raise RuntimeError("out of GPU memory after gradients were synchronised; "
+                               "restart from the last checkpoint with --micro-batch smaller") from exc
+
+    def _accumulate(self, stream, n_loops, want_diagnostics, report, diagnostics_box,
+                    tokens_box) -> None:
         for _ in range(self.cfg.accumulate):
             batch, _items = next(stream)
-            tokens += getattr(batch, "n_tokens", 0)
+            self.items_consumed += len(_items)
+            tokens_box[0] += getattr(batch, "n_tokens", 0)
             # A step with L loops holds L passes of activations. Splitting the
             # micro-batch L ways keeps peak memory where a one-loop step has
             # it, so a rare deep step cannot OOM a batch size chosen for the
@@ -564,12 +613,11 @@ class Trainer:
                 for key, value in micro_report.items():
                     report[key] = report.get(key, 0.0) + value * share / self.cfg.accumulate
                 if want_diagnostics:
-                    diagnostics = self._router_diagnostics(out)
+                    diagnostics_box[0] = self._router_diagnostics(out)
                 del losses, out, total
             del batch, pieces
-        trainable = [p for p in self.model.parameters() if p.requires_grad]
-        if self.group is not None:
-            self.group.average_gradients(trainable)
+
+    def _apply_update(self, trainable, report, diagnostics, tokens):
         self.scaler.unscale_(self.optimizer)
         params = [p for p in trainable if p.grad is not None]
         # foreach=None lets torch fuse the norm reduction and the rescale across
@@ -618,6 +666,9 @@ class Trainer:
         return {k: (self.ema[k].to(v.dtype) if k in self.ema else v) for k, v in live.items()}
 
     def _infinite_batches(self):
+        # Batches are built ahead by a thread, so the loader's own position runs
+        # ahead of training; restart it from what training actually consumed.
+        self.loader.position = self.items_consumed - self._corpus_base
         def forever():
             while True:
                 for batch, items in self.loader.batches():
@@ -685,6 +736,10 @@ class Trainer:
         if blob.get("loss_balancer") is not None:
             self.balancer.load_state_dict(blob["loss_balancer"])
         self.completed_steps = blob["completed_steps"]
+        # Older checkpoints did not record it; every step draws one per-rank batch.
+        self.items_consumed = blob.get(
+            "items_consumed", self.completed_steps * self.cfg.batch_size * self.cfg.accumulate)
+        self._corpus_base = 0
         self.history = blob.get("history", [])
         torch.set_rng_state(blob["torch_rng"].cpu())
         if self.generator is not None and blob.get("generator_rng") is not None:
@@ -692,7 +747,7 @@ class Trainer:
         self.loader.rng.bit_generator.state = blob["loader_rng"]
         if blob.get("cuda_rng") is not None and torch.cuda.is_available():
             torch.cuda.set_rng_state_all([v.cpu() for v in blob["cuda_rng"]])
-        # A resumed loader starts a new shuffle; this is not bit-exact replay.
+        # The loader continues its epoch from items_consumed (see _infinite_batches).
 
     def manifest(self, extra: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         inventory = self.model.parameter_inventory()
@@ -737,6 +792,7 @@ class Trainer:
                 "ema_state_dict": self.ema_state_dict(),
                 "loss_balancer": self.balancer.state_dict(),
                 "completed_steps": self.completed_steps,
+                "items_consumed": self.items_consumed,
                 "torch_rng": torch.get_rng_state(),
                 "generator_rng": self.generator.get_state() if self.generator is not None else None,
                 "loader_rng": self.loader.rng.bit_generator.state,

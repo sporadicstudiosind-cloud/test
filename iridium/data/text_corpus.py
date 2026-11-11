@@ -442,7 +442,9 @@ def stream_documents(
         text = row.get(spec.text_field)
         if not isinstance(text, str) or not text.strip():
             continue
-        if split is not None and not in_split(text, split):
+        # Stripped, so a chat source built from the same rows (story_requests)
+        # hashes the same string and lands in the same split.
+        if split is not None and not in_split(text.strip(), split):
             continue
         yield clean(text)
         produced += 1

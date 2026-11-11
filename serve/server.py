@@ -584,13 +584,15 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError) as exc:
             return self._json(400, {"error": f"bad JSON: {exc}"})
 
+        if not isinstance(payload, dict):
+            return self._json(400, {"error": "body must be a JSON object"})
         prompt = str(payload.get("prompt", "")).strip()
         if not prompt:
             return self._json(400, {"error": "prompt is required"})
         if len(prompt) > MAX_PROMPT:
             return self._json(400, {"error": f"prompt exceeds {MAX_PROMPT} characters"})
         name = payload.get("model", "nano-trained")
-        if name not in CATALOG or (name == "test1b-untrained" and not ENABLE_1B):
+        if not isinstance(name, str) or name not in CATALOG or (name == "test1b-untrained" and not ENABLE_1B):
             return self._json(400, {"error": f"unknown model {name!r}"})
         try:
             history = parse_chat_history(payload.get("history")) if route == "/api/chat" else []

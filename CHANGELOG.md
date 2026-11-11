@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### Fixes from a repository-wide bug hunt
+Training (these affect the live iridium-50m run):
+- **Each round reshuffled the data**, so a 30-round run drew with replacement: about a
+  third of the corpus was never seen while the rest repeated. The loader now walks one
+  permutation per epoch and continues from the items already consumed, across rounds,
+  resumes and OOM retries; the count is checkpointed (older checkpoints derive it).
+- **An out-of-memory retry on one GPU desynchronised the two and hung the job.** Ranks
+  now agree before retrying; an OOM after the gradient exchange stops with a message.
+- Resume re-ran the round that had just finished.
+- **The stacks could read padding through the bridge**, whose core states had seen the
+  whole row, so short rows trained with future-token leakage. Padding is now hidden.
+- The loop-count penalty averaged over padding too.
+Data:
+- The battery's held-out sums appeared in agent episodes (3-45 times each per run).
+- `unknowable` trained "I don't know" outside the chat layout the runtime reads, so it
+  could never fire in chat; its held-out split also reused the training keys.
+- 81% of held-out story requests were training stories in `writing_text` (different
+  split hashes for the same rows). Takes effect when data is next prepared.
+Agent and tools:
+- After reading a file over ~1.9 KB the agent lost the question and the file; it now
+  keeps the latest request and shortens tool results instead.
+- The agent could not answer after its last allowed tool call.
+- A context longer than the model's window crashed instead of being shortened.
+- `run_python` could rename, hard-link, truncate or list files outside the workspace.
+- Tool errors are worded the same at runtime as in training.
+Smaller: `iridium evaluate` and `iridium presets <unknown>` fail with a message, not a
+traceback; the server rejects non-object JSON; `build_web_data.py --help` no longer
+overwrites `web/data.json` (regenerated, it was stale); `specialists` scores routes
+correctly in controller mode. `tests/unit/test_bug_hunt_regressions.py` covers these.
+
 ### Fix: iridium-50m used far too much GPU memory per step
 - The first Kaggle session ran at about 7.8 s a step (~165 h for the run) and had to
   drop to 4 sequences per pass. Not a leak: allocated memory between steps was flat.

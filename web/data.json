@@ -3,16 +3,16 @@
   {
    "rung": "tiny",
    "name": "iridium-1-tiny",
-   "params": 1516830,
+   "params": 1518688,
    "core_params": 185025,
    "stack_params": 425050,
-   "codec_params": 906241,
+   "codec_params": 908099,
    "active_min": 243585,
    "active_max": 399889,
    "gflops_min": 0.00048717,
    "gflops_max": 0.001599556,
-   "bf16_bytes": 3033660.0,
-   "mxfp4_bytes": 805815.9375,
+   "bf16_bytes": 3037376.0,
+   "mxfp4_bytes": 806803.0,
    "kv_bytes_per_token": 1536,
    "core_layers": 4,
    "core_d_model": 64,
@@ -35,16 +35,16 @@
   {
    "rung": "nano",
    "name": "iridium-1-nano",
-   "params": 34028056,
+   "params": 34035482,
    "core_params": 5640961,
    "stack_params": 24443044,
-   "codec_params": 3941489,
+   "codec_params": 3948915,
    "active_min": 8789249,
-   "active_max": 18698241,
+   "active_max": 18137985,
    "gflops_min": 0.017578498,
-   "gflops_max": 0.074792964,
-   "bf16_bytes": 68056112.0,
-   "mxfp4_bytes": 18077404.75,
+   "gflops_max": 0.07255194,
+   "bf16_bytes": 68070964.0,
+   "mxfp4_bytes": 18081349.8125,
    "kv_bytes_per_token": 8192,
    "core_layers": 8,
    "core_d_model": 256,
@@ -69,16 +69,16 @@
   {
    "rung": "test1b",
    "name": "iridium-1-test1b",
-   "params": 1001730811,
+   "params": 1001753085,
    "core_params": 100690177,
    "stack_params": 866858887,
-   "codec_params": 34172529,
+   "codec_params": 34194803,
    "active_min": 154181377,
-   "active_max": 474901761,
+   "active_max": 457708289,
    "gflops_min": 0.308362754,
-   "gflops_max": 2.849410566,
-   "bf16_bytes": 2003461622.0,
-   "mxfp4_bytes": 532169493.34375,
+   "gflops_max": 2.746249734,
+   "bf16_bytes": 2003506170.0,
+   "mxfp4_bytes": 532181326.40625,
    "kv_bytes_per_token": 102400,
    "core_layers": 16,
    "core_d_model": 768,
@@ -102,18 +102,88 @@
    "notes": "1.00 B test rung: 5 general superstacks, full mechanism set. Instantiates and runs on CPU; fp32 Adam does not fit in 15 GB, so it is trained through LoRA adapters."
   },
   {
+   "rung": "nano100m",
+   "name": "iridium-1-nano100m",
+   "params": 104101657,
+   "core_params": 14556673,
+   "stack_params": 79946403,
+   "codec_params": 9592435,
+   "active_min": 25571841,
+   "active_max": 46884481,
+   "gflops_min": 0.051143682,
+   "gflops_max": 0.281306886,
+   "bf16_bytes": 208203314.0,
+   "mxfp4_bytes": 55304005.28125,
+   "kv_bytes_per_token": 15360,
+   "core_layers": 6,
+   "core_d_model": 512,
+   "core_heads": 8,
+   "core_kv_heads": 2,
+   "core_d_ff": 1152,
+   "n_stacks": 5,
+   "stack_layers": 6,
+   "cross_stride": 4,
+   "top_k": 2,
+   "max_loops": 3,
+   "min_depth": 2,
+   "specializations": [
+    "science_physics_simulation",
+    "mathematics_symbolic_proof",
+    "code_systems_tools",
+    "language_reasoning_intent",
+    "perception_geometry_action"
+   ],
+   "built": false,
+   "notes": "~0.1 B trainable-on-CPU rung. The stacks are the same depth as the core rather than deeper: at this width the depth ratio buys less than the steps it costs, and converging is the point."
+  },
+  {
+   "rung": "modern",
+   "name": "iridium-1-modern",
+   "params": 743752454,
+   "core_params": 218342537,
+   "stack_params": 433095171,
+   "codec_params": 92302456,
+   "active_min": 279366921,
+   "active_max": 392424169,
+   "gflops_min": 0.558733842,
+   "gflops_max": 2.354545014,
+   "bf16_bytes": 1487504908.0,
+   "mxfp4_bytes": 395118491.1875,
+   "kv_bytes_per_token": 10240,
+   "core_layers": 16,
+   "core_d_model": 1024,
+   "core_heads": 16,
+   "core_kv_heads": 4,
+   "core_d_ff": 2816,
+   "n_stacks": 5,
+   "stack_layers": 6,
+   "cross_stride": 3,
+   "top_k": 2,
+   "max_loops": 3,
+   "min_depth": 2,
+   "specializations": [
+    "science_physics_simulation",
+    "mathematics_symbolic_proof",
+    "code_systems_tools",
+    "language_reasoning_intent",
+    "perception_geometry_action"
+   ],
+   "built": false,
+   "notes": "Recommended-options rung, untrained: 3:1 DeltaNet:MLA core, mHC x4, 32k BPE, n-gram embeddings, SD3-style flow heads, camera modality."
+  },
+  {
    "rung": "micro",
    "name": "iridium-1-micro",
-   "params": 995764732,
+   "params": 995787006,
    "core_params": 100690177,
    "stack_params": 860890504,
-   "codec_params": 34172529,
+   "codec_params": 34194803,
    "active_min": 154181377,
-   "active_max": 324508417,
+   "active_max": 319581697,
    "gflops_min": 0.308362754,
-   "gflops_max": 1.947050502,
-   "bf16_bytes": 1991529464.0,
-   "mxfp4_bytes": 529000013.875,
+   "gflops_max": 1.917490182,
+   "bf16_bytes": 1991574012.0,
+   "mxfp4_bytes": 529011846.9375,
    "kv_bytes_per_token": 81920,
    "core_layers": 16,
    "core_d_model": 768,
@@ -140,18 +210,58 @@
    "notes": "Single-accelerator rung: the first scale where routing can pay."
   },
   {
+   "rung": "8b",
+   "name": "iridium-1-8b",
+   "params": 8073035416,
+   "core_params": 604058113,
+   "stack_params": 7338434594,
+   "codec_params": 130516595,
+   "active_min": 817995265,
+   "active_max": 2102838529,
+   "gflops_min": 1.63599053,
+   "gflops_max": 12.617031174,
+   "bf16_bytes": 16146070832.0,
+   "mxfp4_bytes": 4288800064.75,
+   "kv_bytes_per_token": 262144,
+   "core_layers": 24,
+   "core_d_model": 1536,
+   "core_heads": 12,
+   "core_kv_heads": 4,
+   "core_d_ff": 4096,
+   "n_stacks": 10,
+   "stack_layers": 28,
+   "cross_stride": 8,
+   "top_k": 2,
+   "max_loops": 3,
+   "min_depth": 4,
+   "specializations": [
+    "fluid_dynamics_navier_stokes",
+    "electrodynamics_plasma",
+    "astrophysics_relativity_nbody",
+    "quantum_chemistry_molecular",
+    "solid_mechanics_elastodynamics",
+    "cellular_biology_genomics",
+    "symbolic_mathematics_pde",
+    "numerical_analysis_solvers",
+    "compilers_systems_code",
+    "software_architecture_api"
+   ],
+   "built": false,
+   "notes": "8.07 B full routed-architecture rung. Full BF16 Adam state is about 120 GiB before activations and requires sharding across multiple accelerators; costed, not trained."
+  },
+  {
    "rung": "small",
    "name": "iridium-1-small",
-   "params": 25776548996,
+   "params": 25776608390,
    "core_params": 1082234881,
    "stack_params": 24509818896,
-   "codec_params": 184448113,
+   "codec_params": 184507507,
    "active_min": 1463953409,
    "active_max": 4214734337,
    "gflops_min": 2.927906818,
    "gflops_max": 25.288406022,
-   "bf16_bytes": 51553097992.0,
-   "mxfp4_bytes": 13693791654.125,
+   "bf16_bytes": 51553216780.0,
+   "mxfp4_bytes": 13693823207.1875,
    "kv_bytes_per_token": 278528,
    "core_layers": 24,
    "core_d_model": 2048,
@@ -188,16 +298,16 @@
   {
    "rung": "base",
    "name": "iridium-1-base",
-   "params": 9038913738324,
+   "params": 9038914154070,
    "core_params": 135293347841,
    "stack_params": 8899564259360,
-   "codec_params": 4055572017,
+   "codec_params": 4055987763,
    "active_min": 204789745665,
    "active_max": 692397717505,
    "gflops_min": 409.57949133,
    "gflops_max": 4154.38630503,
-   "bf16_bytes": 18077827476648.0,
-   "mxfp4_bytes": 4801922923484.625,
+   "bf16_bytes": 18077828308140.0,
+   "mxfp4_bytes": 4801923144349.6875,
    "kv_bytes_per_token": 3211264,
    "core_layers": 64,
    "core_d_model": 14336,
@@ -250,16 +360,16 @@
   {
    "rung": "extreme",
    "name": "iridium-1-extreme",
-   "params": 39531690485516,
+   "params": 39531691020046,
    "core_params": 222870951937,
    "stack_params": 39302849091800,
-   "codec_params": 5969280561,
+   "codec_params": 5969815091,
    "active_min": 337364121601,
    "active_max": 1629057994881,
    "gflops_min": 674.728243202,
    "gflops_max": 9774.347969286,
-   "bf16_bytes": 79063380971032.0,
-   "mxfp4_bytes": 21001210570430.375,
+   "bf16_bytes": 79063382040092.0,
+   "mxfp4_bytes": 21001210854399.438,
    "kv_bytes_per_token": 5382144,
    "core_layers": 64,
    "core_d_model": 18432,
@@ -795,323 +905,7 @@
   }
  },
  "nano": {
-  "loss_curve": [
-   {
-    "step": 0,
-    "total": 9.016,
-    "text": 6.0063
-   },
-   {
-    "step": 13,
-    "total": 8.3396,
-    "text": 5.4568
-   },
-   {
-    "step": 26,
-    "total": 9.1545,
-    "text": 4.9159
-   },
-   {
-    "step": 39,
-    "total": 10.2467,
-    "text": 4.0942
-   },
-   {
-    "step": 52,
-    "total": 6.1312,
-    "text": 3.9749
-   },
-   {
-    "step": 65,
-    "total": 8.0261,
-    "text": 3.4689
-   },
-   {
-    "step": 78,
-    "total": 3.4501,
-    "text": 3.3664
-   },
-   {
-    "step": 91,
-    "total": 5.9573,
-    "text": 2.8035
-   },
-   {
-    "step": 104,
-    "total": 6.2343,
-    "text": 2.2959
-   },
-   {
-    "step": 117,
-    "total": 6.2259,
-    "text": 2.1827
-   },
-   {
-    "step": 130,
-    "total": 5.5921,
-    "text": 2.271
-   },
-   {
-    "step": 143,
-    "total": 6.1,
-    "text": 2.8483
-   },
-   {
-    "step": 156,
-    "total": 4.3926,
-    "text": 1.944
-   },
-   {
-    "step": 169,
-    "total": 4.0051,
-    "text": 1.9216
-   },
-   {
-    "step": 182,
-    "total": 4.0691,
-    "text": 2.729
-   },
-   {
-    "step": 195,
-    "total": 3.313,
-    "text": 1.4961
-   },
-   {
-    "step": 208,
-    "total": 5.0559,
-    "text": 1.2899
-   },
-   {
-    "step": 221,
-    "total": 4.9634,
-    "text": 1.2882
-   },
-   {
-    "step": 234,
-    "total": 4.7854,
-    "text": 1.4333
-   },
-   {
-    "step": 247,
-    "total": 5.4093,
-    "text": 2.256
-   },
-   {
-    "step": 260,
-    "total": 3.2114,
-    "text": 1.6095
-   },
-   {
-    "step": 273,
-    "total": 1.8365,
-    "text": 1.8148
-   },
-   {
-    "step": 286,
-    "total": 3.3835,
-    "text": 0.7261
-   },
-   {
-    "step": 299,
-    "total": 3.1013,
-    "text": 1.3478
-   },
-   {
-    "step": 312,
-    "total": 1.951,
-    "text": 1.0163
-   },
-   {
-    "step": 325,
-    "total": 3.2578,
-    "text": 0.6565
-   },
-   {
-    "step": 338,
-    "total": 3.6722,
-    "text": 0.8567
-   },
-   {
-    "step": 351,
-    "total": 2.3105,
-    "text": 0.7634
-   },
-   {
-    "step": 364,
-    "total": 2.3336,
-    "text": 0.6618
-   },
-   {
-    "step": 377,
-    "total": 2.9539,
-    "text": 1.0215
-   },
-   {
-    "step": 390,
-    "total": 2.4982,
-    "text": 1.1187
-   },
-   {
-    "step": 403,
-    "total": 3.9233,
-    "text": 0.9781
-   },
-   {
-    "step": 416,
-    "total": 1.9256,
-    "text": 0.8679
-   },
-   {
-    "step": 429,
-    "total": 2.9152,
-    "text": 1.2084
-   },
-   {
-    "step": 442,
-    "total": 3.2761,
-    "text": 0.3485
-   },
-   {
-    "step": 455,
-    "total": 2.3724,
-    "text": 0.724
-   },
-   {
-    "step": 468,
-    "total": 3.6736,
-    "text": 0.7171
-   },
-   {
-    "step": 481,
-    "total": 3.7699,
-    "text": 0.6924
-   },
-   {
-    "step": 494,
-    "total": 0.6632,
-    "text": 0.6472
-   },
-   {
-    "step": 507,
-    "total": 1.9642,
-    "text": 1.0284
-   },
-   {
-    "step": 520,
-    "total": 2.2256,
-    "text": 0.9789
-   },
-   {
-    "step": 533,
-    "total": 2.0888,
-    "text": 0.3315
-   },
-   {
-    "step": 546,
-    "total": 2.172,
-    "text": 0.7869
-   },
-   {
-    "step": 559,
-    "total": 2.5137,
-    "text": 0.5245
-   },
-   {
-    "step": 572,
-    "total": 1.5253,
-    "text": 0.2121
-   },
-   {
-    "step": 585,
-    "total": 1.5478,
-    "text": 0.2624
-   },
-   {
-    "step": 598,
-    "total": 1.9473,
-    "text": 0.7162
-   },
-   {
-    "step": 611,
-    "total": 2.3598,
-    "text": 0.9717
-   },
-   {
-    "step": 624,
-    "total": 1.378,
-    "text": 0.2266
-   },
-   {
-    "step": 637,
-    "total": 1.6801,
-    "text": 0.3515
-   },
-   {
-    "step": 650,
-    "total": 1.7884,
-    "text": 0.4826
-   },
-   {
-    "step": 663,
-    "total": 0.4215,
-    "text": 0.4043
-   },
-   {
-    "step": 676,
-    "total": 2.531,
-    "text": 0.3941
-   },
-   {
-    "step": 689,
-    "total": 2.7882,
-    "text": 0.8254
-   },
-   {
-    "step": 702,
-    "total": 2.7813,
-    "text": 0.4755
-   },
-   {
-    "step": 715,
-    "total": 2.4197,
-    "text": 1.0269
-   },
-   {
-    "step": 728,
-    "total": 0.3757,
-    "text": 0.3601
-   },
-   {
-    "step": 741,
-    "total": 1.942,
-    "text": 0.2983
-   },
-   {
-    "step": 754,
-    "total": 0.5017,
-    "text": 0.1064
-   },
-   {
-    "step": 767,
-    "total": 2.2431,
-    "text": 0.4392
-   },
-   {
-    "step": 780,
-    "total": 2.7322,
-    "text": 0.2028
-   },
-   {
-    "step": 793,
-    "total": 2.035,
-    "text": 0.2336
-   },
-   {
-    "step": 799,
-    "total": 1.7236,
-    "text": 0.2859
-   }
-  ],
+  "loss_curve": [],
   "graded": [
    {
     "family": "channel_depth",
