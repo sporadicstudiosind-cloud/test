@@ -4,6 +4,8 @@
 
 | Document | What it is |
 |---|---|
+| [`iridium-50m.md`](iridium-50m.md) | The current target: four specialist stacks, tools, budget, limits, how to check it |
+| [`kaggle-agent-runbook.md`](kaggle-agent-runbook.md) | Step-by-step Kaggle training of `iridium-50m`, written for a small agent |
 | [`free-tier-training.md`](free-tier-training.md) | Presets, free tiers, hour estimates, the training workflow |
 | [`architecture-options.md`](architecture-options.md) | Every architecture option, what it costs, and its evidence |
 | [`small-model-coherence.md`](small-model-coherence.md) | Why small models babble, and what the presets do about it |
@@ -16,6 +18,7 @@
 | [`multirun.md`](multirun.md) | Running several trainings on one device |
 | [`SMALL_CHAT.md`](SMALL_CHAT.md) | The bundled pre-1.0 nano checkpoint: chatting with it, and why it can't chat well |
 | [`training-8b.md`](training-8b.md) | The 8B rung: what it would take (costed, not free) |
+| [`constitution-plan.md`](constitution-plan.md) | Alignment safeguards: what exists (principles, an output screen) and what is only planned |
 
 ## Canonical design and evidence
 

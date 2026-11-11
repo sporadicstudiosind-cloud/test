@@ -181,7 +181,9 @@ returns three independent booleans plus their conjunction:
 separate deliberately, because a model that happens to state the same
 number the tool would have returned is not evidence it can use tools.
 
-Nothing here has been trained; no accuracy number is claimed.
+No tool-calling model has been trained yet; no accuracy number is claimed.
+`iridium-50m` trains tool calls as part of its mixture, and
+`python -m iridium battery` grades them once a checkpoint exists.
 
 ## When the model does not know (`iridium.runtime.abstain`)
 

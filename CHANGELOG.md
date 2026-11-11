@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased: two-GPU training and trained thinking loops
+## Unreleased
+
+### Repository brought up to date
+- README, the doc index, the notebook README and the free-tier guide now describe the
+  code as it is: `iridium-50m` as the target, two-GPU training, `--resume auto`, and
+  the one recorded run (`chat-34m`). They no longer say nothing has been trained.
+- **Corrected:** the docs said T4 and P100 train in fp32. The trainer has used fp16
+  autocast with gradient scaling there; `docs/gpu.md` now says so.
+- **Corrected:** hour estimates were labelled "optimistic". chat-34m's recorded run
+  took about half its figure, so they are now labelled as arithmetic that can miss
+  either way.
+- `chat-34m` is marked as trained once; the capability register lists the 1.0 training
+  path; the stray `gallant-faraday-lhycva/` notebook copy (a Colab save with no results) is removed.
+
+### Two-GPU training and trained thinking loops
 
 - **Both Kaggle T4s train at once.** `iridium train --gpus auto` (the default) starts
   one process per GPU and averages their gradients each step
@@ -21,8 +35,6 @@
   on logged steps; validation runs under mixed precision. Log lines report `tok/s`.
 - `iridium train` gained `--gpus`, `--time-budget-hours`, `--keep-rounds`, `--micro-batch`.
 - The Kaggle notebook trains through that command and asks for **GPU T4 x2**.
-
-## Unreleased
 
 ### `iridium-50m`: specialist stacks, agent tools, rebuilt Kaggle notebook
 - New preset: 6-layer core, four subject-routed stacks (science, math, writing,

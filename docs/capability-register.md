@@ -136,14 +136,32 @@ checked.
 
 ---
 
+## Iridium 1.0 training path
+
+| Capability | Status | Evidence |
+|---|---|---|
+| `chat-34m` text and chat | trained | one recorded run, 20k steps: validation 1.19 bpb text, 0.87 chat (`CHANGELOG.md`). Not evaluated beyond that loss |
+| `iridium-50m` (four specialists, tools, image and audio input) | implemented | `tests/unit/test_iridium_50m.py`; a full-size step runs on CPU. Not trained |
+| One run across several GPUs, gradients averaged | implemented | `test_two_processes_train_in_lockstep` (two CPU processes end on identical weights). Not timed on GPUs |
+| Ponder loops trained at sampled depths | implemented | `test_sampled_loops_follow_the_probabilities_and_train` |
+| Specialist routing curriculum | implemented | `tests/unit/test_specialist_curriculum.py`; a toy CPU experiment in [`iridium-50m.md`](iridium-50m.md). Untested at full size |
+| Check that each stack wins its own subject | implemented | `test_specialist_matrix_overrides_routing_and_restores_it`; `python -m iridium specialists` |
+| Thinking effort within ±10 loops of the user's choice | implemented | `tests/unit/test_loop_spread.py`. Loops past the trained three are extrapolation |
+| Checkpoint per round, safe resume | implemented | `tests/unit/test_checkpointing.py` |
+| Agent tools (files, Python, calculator, web) | implemented | workspace-escape tests; `run_python` is a guard rail, not a security boundary |
+| Constitution: written principles and an output screen | implemented | `iridium/alignment/constitution.py`. No training data and no runtime guard; see [`constitution-plan.md`](constitution-plan.md) |
+| Model council (several instances debating) | specified | design only |
+
+---
+
 ## Summary
 
 | Status | Count (approx.) |
 |---|---|
-| implemented (test-backed) | 28 |
-| trained | 3 |
+| implemented (test-backed) | 37 |
+| trained | 4 |
 | evaluated on held-out data | 3 |
-| specified only | 19 |
+| specified only | 20 |
 | unsupported | 15 |
 
 The gap between "specified" and "trained" is the honest shape of this project. The

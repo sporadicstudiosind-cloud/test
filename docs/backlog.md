@@ -21,7 +21,8 @@ Milestones are dependency gates, not a schedule. Each names the evidence that cl
 
 **M3** — one native continuous head (the diagnostic image) is trained by conditional flow
 matching inside the shared trunk, with a measured quality-versus-steps curve. Text generation
-is not trained; the instruction is consumed, not produced. Image editing and conditioning
+was not trained in that slice (the 1.0 `chat-34m` preset has since been trained on text and
+chat, see `CHANGELOG.md`); there the instruction is consumed, not produced. Image editing and conditioning
 dropout are not implemented.
 
 **M5** — the conservative face-flux correction is trained and its conservation property is

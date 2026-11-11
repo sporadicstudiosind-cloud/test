@@ -134,7 +134,7 @@ def honesty_banner(b: Builder, title: str, default_preset: str) -> None:
     3) before anything trains: it prints `iridium.presets.preset_table()` and
     `iridium.training.run_preset.dry_run()`'s cost/audit report, both computed
     from `estimate_hours` and `iridium.training.budget.audit` -- not measured,
-    arithmetic, and optimistic (see the warning in `iridium/presets.py`). Read
+    arithmetic, and it can miss either way (see `iridium/presets.py`). Read
     those numbers before starting a long run; they tell you honestly whether
     the chosen preset's step budget fits in the quota you have.
 

@@ -4,6 +4,7 @@ import dataclasses
 import json
 import sys
 import textwrap
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -13,6 +14,8 @@ from iridium.presets import get_preset
 from iridium.training import parallel
 from iridium.training.datasets import BatchLoader, build_corpus
 from iridium.training.trainer import Prefetcher, TrainConfig, Trainer, split_batch
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _corpus(n=24):
@@ -87,8 +90,12 @@ def test_sampled_loops_follow_the_probabilities_and_train():
         raise AssertionError("probabilities that do not sum to 1 were accepted")
 
 
+# The worker runs from a temporary folder, so it is told where the checkout is:
+# CI tests an uninstalled checkout, where `import iridium` only works from its root.
 WORKER = """
-import dataclasses, json, sys, torch
+import dataclasses, json, sys
+sys.path.insert(0, sys.argv[2])
+import torch
 from iridium.config import get_config
 from iridium.presets import get_preset
 from iridium.training import parallel, run_preset
@@ -117,7 +124,7 @@ def test_two_processes_train_in_lockstep(tmp_path):
     out = tmp_path / "runs"
     out.mkdir()
     code = parallel.launch([], 2, log_dir=out,
-                           command=[sys.executable, str(script), str(out)])
+                           command=[sys.executable, str(script), str(out), str(REPO_ROOT)])
     assert code == 0, (out / "rank1.log").read_text() if (out / "rank1.log").exists() else ""
     sums = [json.loads((out / f"sum{r}.json").read_text()) for r in range(2)]
     assert sums[0] == sums[1], "ranks ended with different weights"

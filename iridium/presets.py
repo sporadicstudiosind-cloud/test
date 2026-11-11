@@ -2,7 +2,9 @@
 
 The priority order is a product decision and the presets follow it:
 
-1. **talking + reasoning** -- ``chat-34m``, ``chat-100m``
+1. **talking + reasoning** -- ``chat-34m``, ``chat-36m``, ``chat-100m``, and
+   ``iridium-50m`` (four subject specialists, tools, image and audio input;
+   the current target, see docs/iridium-50m.md)
 2. **tool use** -- ``tools-100m``
 3. **omnimodality** -- ``omni-100m``
 4. **physics / STEM** -- ``stem-100m``
@@ -24,13 +26,17 @@ means the configuration builds, its parameter count matches the formula, and
 the invariants in the test suite (cached decoding equals the full forward,
 exact accounting, finite gradients) hold for it. It does **not** mean the
 preset has been trained, or that training it will produce a good model.
-Nothing in this repository has been trained at these recipes yet.
+Only ``chat-34m`` has a recorded full run (20k steps; validation 1.19 bits
+per byte on text, 0.87 on chat). That is a loss, not an evaluation of how
+well it talks.
 
 Time estimates are arithmetic, not measurements: training FLOPs are taken as
 ``3 x`` the config's own forward FLOPs per token (forward plus backward),
-divided by the device's published peak at an *assumed* 30% utilisation. Real
-small-model runs are often worse than that on free GPUs (data loading,
-Python overhead, fp32 on cards without bf16), so read them as optimistic.
+divided by the device's published fp32 peak at an *assumed* 30% utilisation.
+They can miss in either direction. The trainer uses fp16 autocast on a T4 or
+P100, which is faster than the fp32 peak suggests: chat-34m's recorded run
+(44k tokens/s) took about half its estimate. Data loading and Python overhead
+push the other way. The ``tok/s`` on a run's own log lines is the real figure.
 """
 
 from __future__ import annotations
@@ -52,9 +58,9 @@ __all__ = ["Preset", "PRESETS", "get_preset", "with_tokens", "with_reference_hpa
 
 
 #: Published peak dense throughput (FLOP/s) and memory of free-tier devices.
-#: ``precision`` is what the trainer would actually use there: the T4 and P100
-#: have no bf16, and this codebase trains in fp32 rather than fp16 on them
-#: (routed softmaxes overflow fp16; see docs/gpu.md), so the fp32 peak applies.
+#: ``precision`` names the published peak the estimate divides by. The T4 and
+#: P100 have no bf16; the trainer runs them under fp16 autocast with gradient
+#: scaling, but the estimate keeps the fp32 peak (see the module docstring).
 FREE_TIERS: dict[str, dict] = {
     "colab_t4":   {"label": "Colab free T4",        "peak": 8.1e12,  "memory_gb": 15, "precision": "fp32",
                    "quota": "~4-12 h sessions, availability varies"},
@@ -216,16 +222,16 @@ def _iridium_50m(chat34: IridiumConfig) -> Preset:
     tokens = 5_000_000_000
     return Preset(
         "iridium-50m", 1,
-        "Science, maths, writing and code on specialist stacks, with file, code and web "
+        "Maths, chat, code and science on specialist stacks, with file, code and web "
         "tool use and basic image and audio input.",
         cfg, dict(_IRIDIUM50_MIX), steps=tokens // (batch * window), batch_size=batch,
         window=window, lr=1.5e-3, rounds=30, free_tier="kaggle_2xt4",
         micro_batch=32, loop_probs=(0.7, 0.2, 0.1),
         prepare_tokens=2_500_000_000, tokenizer_sources=dict(TOKENIZER_SOURCES),
-        notes="5B tokens, ~100 per body parameter: ~20 GPU-hours if it matches chat-36m's "
-              "measured 68k tok/s, which its similar active size suggests but nothing has "
-              "measured. Fits Kaggle's 30 h/week over three sessions. 2.5B distinct tokens "
-              "are written (about 7.5 GB), so the mix is seen about twice.")
+        notes="5B tokens, ~100 per body parameter. About 15 hours on Kaggle's two T4s, "
+              "or two sessions, if one GPU reaches the 68k tok/s noted for chat-36m; "
+              "nothing has timed this model, so read tok/s in the first session's log. "
+              "2.5B distinct tokens are written (about 7.5 GB), so the mix is seen about twice.")
 
 
 def _presets() -> dict[str, Preset]:
@@ -239,8 +245,10 @@ def _presets() -> dict[str, Preset]:
         chat34, {"text_lm": 0.58, "chat": 0.37, "unknowable": 0.05},
         steps=20_000, batch_size=32, window=512, lr=1.5e-3, free_tier="colab_t4", rounds=5,
         text_mix=_TALK_MIX,
+        status="trained once (val 1.19 bpb text, 0.87 chat); not evaluated",
         notes="The first thing to train. ~330M tokens, about half of compute-"
-              "optimal for 36M params: roughly one free Colab session, optimistically.")
+              "optimal for 36M params. Its recorded run took about 2 GPU-hours at "
+              "44k tok/s: one free session.")
 
     out["chat-36m"] = _chat_36m(chat34)
     out["iridium-50m"] = _iridium_50m(chat34)
@@ -439,5 +447,6 @@ def preset_table() -> str:
             f"{cfg.body_params / 1e6:>6.1f}M {cfg.embedding_params / 1e6:>5.1f}M "
             f"{p.tokens / 1e6:>7.0f}M {p.tokens / max(cfg.body_params, 1):>8.0f}  "
             f"{hours[0]:>6.1f} {hours[1]:>7.1f} {hours[2]:>6.1f}  {p.status}")
-    lines.append(f"(hours assume {ASSUMED_UTILISATION:.0%} of published peak; optimistic)")
+    lines.append(f"(hours are arithmetic at {ASSUMED_UTILISATION:.0%} of published fp32 peak, not "
+                 "measurements; chat-34m's recorded run took about half its figure)")
     return "\n".join(lines)

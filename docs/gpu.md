@@ -76,36 +76,40 @@ whose ISA doesn't actually match the one it's told to impersonate.
 | **`HSA_OVERRIDE_GFX_VERSION`** | unverified, unofficial for consumer cards | see above; unset by default in `Dockerfile.rocm` because a wrong value produces silently wrong kernels rather than an error. |
 | **`ffmpeg`** | fixed here | `iridium/codecs/media.py` shells out to `ffmpeg`/`ffprobe` for every audio/video span; `Dockerfile.rocm` previously did not install it, so any media-bearing sample would raise `RuntimeError: ffmpeg is required...` on first use. Now installed via `apt-get`. |
 | **Device nodes** | operational fact, not code | the container needs `/dev/kfd` and `/dev/dri` plus the `video` group, or `torch.cuda.is_available()` is simply `False` with no explanation. |
-| **Multi-GPU (RCCL)** | unverified, likely fine | ROCm's collective library (RCCL) is a drop-in for NCCL at the API level and PyTorch's distributed backend dispatches to it under the same `"nccl"` backend name — there is no separate `dist.init_process_group("rccl")` to ask for. Nothing in this codebase currently sets up multi-node `torch.distributed`; `placement.py`'s multi-GPU path is single-process, multi-device, not multi-node, so RCCL/NCCL differences may not even be reachable yet. Not exercised here either way. |
+| **Multi-GPU (RCCL)** | unverified, likely fine | ROCm's collective library (RCCL) is a drop-in for NCCL at the API level and PyTorch's distributed backend dispatches to it under the same `"nccl"` backend name — there is no separate `dist.init_process_group("rccl")` to ask for. `iridium/training/parallel.py` now uses `torch.distributed` on one machine (one process per GPU, `all_reduce` of gradients under the `"nccl"` name), so this path is reachable on a multi-GPU ROCm box. Not exercised on ROCm; on CUDA it is tested with CPU processes only. |
 | **Pinned memory** | not used | nothing in this codebase calls `pin_memory=True` on a `DataLoader` or `.pin_memory()` on a tensor, so there's no CUDA-only pinned-allocator behavior to differ on ROCm. Checked by grep, not by assumption. |
 
-## Why fp16 is not offered as a fallback
+## Precision on cards without bf16
 
-On hardware without bf16 this reports **fp32**, not fp16. That is deliberate.
-This is a *routed* model: the gating softmax picks which superstack a token
-visits, and attention logits feed another softmax. Those are exactly where
-fp16's 5-bit exponent overflows — and when it does, the router collapses onto
-one stack and the run looks like a bad hyperparameter choice rather than a
-numerics failure. Half the cost of a wrong answer here is the week spent
-looking in the wrong place. Use bf16 hardware, or fp32.
+**Inference** on hardware without bf16 reports **fp32**, not fp16. This is a
+*routed* model: the gating softmax picks which superstack a token visits, and
+a half-precision overflow there looks like a bad model, not a numerics
+failure.
+
+**Training** on those cards (T4, P100) uses fp16 autocast with gradient
+scaling (`TrainConfig.precision = "auto"`). Autocast keeps softmax and the
+losses in fp32, and a step whose gradient is not finite is skipped by the
+scaler instead of applied. chat-34m's recorded run used this path. Pass
+`precision="fp32"` to the trainer if a run's losses turn non-finite; it costs
+speed and memory, not correctness.
 
 ## NVIDIA
 
 ```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu124
+pip install torch                       # the default Linux wheel is the CUDA build
 python -m iridium.runtime.device        # expect backend: cuda
 ```
 
 bf16 needs compute capability 8.0+ (Ampere and newer). A free Colab **T4 is
-Turing (7.5) and has no bf16** — see above for why that means fp32 there.
+Turing (7.5) and has no bf16** — see above for what runs there instead.
 
 ## Google Colab
 
-[`notebooks/train_iridium_colab.ipynb`](../notebooks/train_iridium_colab.ipynb)
-clones the repo, verifies the parameter accounting and the cache-parity gate
-before spending GPU time, trains, grades against independent computation, and
-serves the probe UI through a forwarded port. Runtime → Change runtime type →
-GPU, then Run all.
+[`notebooks/iridium_studio.ipynb`](../notebooks/iridium_studio.ipynb) clones
+the repo, prints the dry-run cost report before spending GPU time, trains a
+preset in rounds with a checkpoint per round, and chats with the result.
+Runtime → Change runtime type → GPU, then Run all. For Kaggle and two T4s, use
+`iridium_studio_kaggle.ipynb`; see [`../notebooks/README.md`](../notebooks/README.md).
 
 ## The one bug that kills every GPU run
 

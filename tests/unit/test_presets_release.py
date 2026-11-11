@@ -43,7 +43,7 @@ def test_estimates_scale_with_tokens_and_device():
     assert estimate_hours(p, "colab_t4", p.tokens * 2) == pytest.approx(
         2 * estimate_hours(p, "colab_t4"))
     assert estimate_hours(p, "tpu_v5e1") < estimate_hours(p, "colab_t4")
-    assert "optimistic" in preset_table()
+    assert "not measurements" in preset_table()
 
 
 def test_8b_is_not_a_trainable_preset():
