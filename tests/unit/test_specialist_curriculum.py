@@ -86,3 +86,47 @@ def test_bad_probabilities_are_rejected():
         except ConfigError:
             continue
         raise AssertionError(f"accepted {bad}")
+
+
+def test_stack_order_and_every_language_family_has_a_stack():
+    from iridium.data.domains import DOMAIN_FAMILIES, SUBJECTS, subject_of
+    from iridium.presets import get_preset
+
+    assert SUBJECTS == ("math", "chat", "code", "science")
+    preset = get_preset("iridium-50m")
+    assert preset.config.stacks.specializations == SUBJECTS
+    assert preset.config.router.subject_force and preset.config.router.any_p == 0
+    for family in preset.mixture:
+        if family.endswith("_foundation"):
+            assert subject_of(family) is None
+        else:
+            assert subject_of(family) in SUBJECTS, family
+    assert subject_of("chat_general") == subject_of("writing_qa") == "chat"
+    assert all(spec.subject in SUBJECTS for spec in DOMAIN_FAMILIES.values())
+
+
+def test_specialist_matrix_overrides_routing_and_restores_it():
+    from iridium.evaluation.specialists import describe, specialist_matrix
+
+    model, cfg = _model()
+    model.train()
+    batches = {"science": [_batch(cfg, ["science"] * 2)], "math": [_batch(cfg, ["math"] * 2)],
+               "unknown": [_batch(cfg, [None])]}
+    report = specialist_matrix(model, batches)
+    assert set(report["subjects"]) == {"science", "math"}
+    row = report["subjects"]["math"]
+    assert {"routed", "core", "science", "math", "margin", "passes", "best_rival"} <= set(row)
+    assert row["core"] != row["math"], "the core-only route still used a stack"
+    assert row["passes"] == (row["margin"] > 0)
+    assert model.training and model.route_override is None
+    assert "verdict" in describe(report)
+
+    # The override really does send every token to the one stack, or to none.
+    model.eval()
+    batch = _batch(cfg, ["math"])
+    model.route_override = 0
+    stats = model(batch).stats["stack_stats"][0]["per_stack_tokens"]
+    assert stats[0] > 0 and sum(stats[1:]) == 0
+    model.route_override = "core"
+    assert sum(model(batch).stats["stack_stats"][0]["per_stack_tokens"]) == 0
+    model.route_override = None

@@ -658,6 +658,10 @@ def build_kaggle_50m() -> list[dict]:
                         '--out', str(weights)], check=True)
         subprocess.run([sys.executable, '-m', 'iridium', 'battery', '--checkpoint', str(weights),
                         '--device', DEVICE, '--out', str(OUT_DIR / 'battery.json')], check=True)
+        # Is each stack better at its own subject than the core and the other stacks?
+        subprocess.run([sys.executable, '-m', 'iridium', 'specialists', '--checkpoint', str(weights),
+                        '--data', str(DATA_DIR), '--device', DEVICE,
+                        '--out', str(OUT_DIR / 'specialists.json')], check=True)
         print('Download', weights, 'and battery.json from this version\\'s output.')
     """)
     b.md("""

@@ -3,7 +3,7 @@
 Each family is one shard (or one on-demand generator) and belongs to at most one
 subject. A window's subject supervises the router, through the ``subject_routing``
 loss already in :meth:`iridium.model.iridium1.Iridium1.losses`, towards that
-subject's superstack. Plain chat has no subject, so the router chooses freely.
+subject's superstack. Only the media families have no subject.
 
 No torch and no numpy here, so presets can import it with the standard library.
 """
@@ -13,7 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-SUBJECTS = ("science", "math", "writing", "code")
+#: Stack order: 1 maths, 2 chat, 3 code, 4 science. "chat" is everything
+#: conversational and written: stories, how-tos, small talk, saying "I don't know".
+SUBJECTS = ("math", "chat", "code", "science")
 
 
 @dataclass(frozen=True)
@@ -28,16 +30,16 @@ DOMAIN_FAMILIES: dict[str, DomainFamily] = {
     "science_text": DomainFamily("science", text_mix={
         "wikipedia": 0.40, "fineweb_edu": 0.30, "cosmopedia_textbooks": 0.30}),
     "math_text": DomainFamily("math", text_mix={"finemath": 0.70, "openwebmath": 0.30}),
-    "writing_text": DomainFamily("writing", text_mix={
+    "writing_text": DomainFamily("chat", text_mix={
         "cosmopedia_stories": 0.80, "cosmopedia_wikihow": 0.20}),
     # Short questions with short answers are what the chat-36m quiz showed missing.
     "science_qa": DomainFamily("science", chat_mix={
         "nq_open": 0.45, "openstax_requests": 0.45, "arc": 0.10}),
     "math_qa": DomainFamily("math", chat_mix={"openr1_math": 0.85, "gsm8k": 0.15}),
-    "writing_qa": DomainFamily("writing", chat_mix={"story_requests": 1.0}),
+    "writing_qa": DomainFamily("chat", chat_mix={"story_requests": 1.0}),
     "code_qa": DomainFamily("code", chat_mix={
         "self_oss_instruct": 0.55, "tested_python": 0.22, "python_codes": 0.20, "mbpp": 0.03}),
-    "chat_general": DomainFamily(None, chat_mix={
+    "chat_general": DomainFamily("chat", chat_mix={
         "smol_smoltalk": 0.70, "oasst": 0.20, "dolly": 0.10}),
 }
 
@@ -46,6 +48,8 @@ GENERATED_SUBJECT: dict[str, Optional[str]] = {
     "arithmetic_drill": "math",
     "code_exec": "code",
     "agent_episode": "code",
+    "unknowable": "chat",
+    "false_premise": "chat",
     "image_foundation": None,
     "audio_foundation": None,
 }

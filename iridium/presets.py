@@ -202,7 +202,7 @@ def _iridium_50m(chat34: IridiumConfig) -> Preset:
                   router=replace(chat34.router, top_k=2, max_loops=3,
                                  # Specialist curriculum; see RouterConfig and
                                  # docs/iridium-50m.md for the small experiment.
-                                 subject_force=True, solo_p=0.2, any_p=0.1),
+                                 subject_force=True, solo_p=0.5),
                   ple_dim=16,
                   perception_layers=6, perception_rank=192,
                   # Loops are trained here (loop_probs below), so the core is

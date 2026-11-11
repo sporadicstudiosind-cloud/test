@@ -264,6 +264,9 @@ class MixedCorpus:
                     rng = np.random.default_rng([seed, zlib.crc32(family.encode()), i])
                     item = make_item(family, rng, split)
                     item.sample = retokenize(item.sample, tokenizer)
+                    subject = subject_of(family)
+                    if subject and item.sample.meta.get("subject") is None:
+                        item.sample.meta["subject"] = subject
                     return item
                 sources.append(_Source(family, count, synth))
                 continue

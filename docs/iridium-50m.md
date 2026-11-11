@@ -8,7 +8,7 @@ work. `python -m iridium battery` is how to find out once it has been trained.
 | Part | Parameters | Notes |
 |---|---:|---|
 | Control core | 9.4M | 6 layers, down from chat-36m's 10; every token uses it |
-| Superstacks | 40.9M | 4 stacks of 6 layers: science, math, writing, code; each token uses 2 |
+| Superstacks | 40.9M | 4 stacks of 6 layers: maths, chat, code, science; each token uses 1 or 2 |
 | Body total | 50.4M | What token budgets are sized from |
 | Embeddings | 7.9M | 16k token table and per-layer embeddings; memory, not compute |
 | Image and audio input | 2.0M | Encoders only; it cannot generate media |
@@ -22,18 +22,26 @@ are worth it, so compare it with chat-36m on the battery rather than assuming.
 router (`subject_routing` loss). `iridium.evaluation.routing` measures whether routing
 actually depends on the subject.
 
-**Specialist curriculum** (training only). A window with a subject always visits that
-subject's stack, plus the router's best other stack. 20% of windows visit only their
-primary stack, so a specialist must manage alone; 10% visit one random stack, so every
-stack stays able to handle every subject.
+**Four specialists.** Stack 1 is maths, 2 is chat (conversation, stories, how-tos,
+saying "I don't know"), 3 is code (including tool use), 4 is science. Every text family
+belongs to one of them; only the image and audio practice data has no subject.
 
-A small CPU experiment (four synthetic subjects, 1,000 steps, two seeds each) is the
-only evidence so far. Loss with normal routing was the same with or without the
-curriculum (1.21). Loss when a subject was sent to the *wrong* stack fell from 2.05 to
-1.22. So in that toy it bought generality at no cost, and did not make specialists
-better at their own subject. Forcing the subject stack without the solo and random
-windows made wrong-stack loss worse (2.47). Whether this holds at 50M on real text is
-untested. Single-stack windows also skip one stack, saving roughly 10% of compute.
+**How they are made specialists** (training only). A window always visits its
+subject's stack. Half the windows visit that stack alone, so it has to do its subject
+without help; the other half add the router's best other stack as a partner. No stack
+is ever deliberately trained on another stack's subject.
+
+**How to check it.** `python -m iridium specialists --checkpoint MODEL.pt --data data`
+measures, for each subject's held-out text, the loss with each stack alone and with the
+control core alone. A subject passes when its own stack beats every other stack and the
+core. The Kaggle notebook runs this at the end and saves `specialists.json`.
+
+**Evidence so far** is a small CPU experiment only (four synthetic subjects, 1,000
+steps, two seeds). Every stack won its own subject in every run, with and without this
+scheme. The scheme widened the gap to the best rival (about 0.7 loss per token before,
+0.8 with half the windows alone, 1.2 with all of them alone). It did so by making the
+other stacks worse at the subject; the specialist's own loss did not change (1.20).
+Whether any of this holds at 50M on real text is untested.
 
 **Thinking loops** are trained: 70% of steps run one loop, 20% two and 10% three
 (`loop_probs`), and the core is told which pass it is on. That costs about 1.4x the

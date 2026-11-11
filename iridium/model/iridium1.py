@@ -319,6 +319,16 @@ class Iridium1(nn.Module):
                         decision.valid[row] = mask
             if curriculum is not None and not self.cfg.controller_mode:
                 self._apply_curriculum(decision, curriculum)
+            override = getattr(self, "route_override", None)
+            if override is not None:
+                # Evaluation only (see iridium.evaluation.specialists): send
+                # every token to one stack alone, or ("core") to none.
+                if override == "core":
+                    decision.valid = torch.zeros_like(batch.valid)
+                else:
+                    decision.stack_index = torch.full_like(decision.stack_index, int(override))
+                    decision.stack_weight = torch.full_like(
+                        decision.stack_weight, 1.0 / decision.stack_weight.shape[-1])
             decisions.append(decision)
 
             # The bridge reads the core's *loop-0* stage-I states for the

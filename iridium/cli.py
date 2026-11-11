@@ -386,6 +386,24 @@ def cmd_battery(args) -> int:
     return 0
 
 
+def cmd_specialists(args) -> int:
+    """Check that each stack is the best place for its own subject."""
+    from .evaluation.specialists import describe, held_out_batches, specialist_matrix
+    from .training.tokenizer_bridge import tokenizer_from_manifest
+
+    model, manifest = _load_chat_checkpoint(Path(args.checkpoint).expanduser().resolve(), args.device)
+    data = Path(args.data) if args.data else None
+    if data is not None and (data / model.cfg.name).is_dir():
+        data = data / model.cfg.name
+    batches = held_out_batches(data, model.cfg, args.device, window=model.cfg.max_seq_len,
+                               tokenizer=tokenizer_from_manifest(manifest))
+    report = specialist_matrix(model, batches)
+    print(describe(report))
+    if args.out:
+        Path(args.out).write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return 0
+
+
 def cmd_export(args) -> int:
     """Strip a training checkpoint to inference weights, EMA by default."""
     import torch
@@ -520,6 +538,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", default="cpu")
     p.add_argument("--out", default=None, help="also write the scores as JSON")
     p.set_defaults(func=cmd_battery)
+
+    p = sub.add_parser("specialists",
+                       help="is each stack better at its subject than the core and the other stacks?")
+    p.add_argument("--checkpoint", required=True)
+    p.add_argument("--data", default=None, help="prepared shards (held-out text); generated tasks need none")
+    p.add_argument("--device", default="cpu")
+    p.add_argument("--out", default=None, help="also write the matrix as JSON")
+    p.set_defaults(func=cmd_specialists)
 
     p = sub.add_parser("export", help="strip a training checkpoint to inference weights")
     p.add_argument("--checkpoint", required=True)
