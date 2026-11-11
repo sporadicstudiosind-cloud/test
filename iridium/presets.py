@@ -226,7 +226,7 @@ def _iridium_50m(chat34: IridiumConfig) -> Preset:
         "tool use and basic image and audio input.",
         cfg, dict(_IRIDIUM50_MIX), steps=tokens // (batch * window), batch_size=batch,
         window=window, lr=1.5e-3, rounds=30, free_tier="kaggle_2xt4",
-        micro_batch=32, loop_probs=(0.7, 0.2, 0.1),
+        micro_batch=16, loop_probs=(0.7, 0.2, 0.1),
         prepare_tokens=2_500_000_000, tokenizer_sources=dict(TOKENIZER_SOURCES),
         notes="5B tokens, ~100 per body parameter. About 15 hours on Kaggle's two T4s, "
               "or two sessions, if one GPU reaches the 68k tok/s noted for chat-36m; "

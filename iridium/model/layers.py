@@ -189,7 +189,15 @@ def _attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
         # number, then zero the row afterwards. Masking it back out is what
         # keeps this identical to the manual path rather than merely close.
         safe = mask.masked_fill(dead.expand_as(mask) & _first_column(mask), True)
-        if n_rep > 1 and _enable_gqa_supported():
+        if q.is_cuda:
+            _report_cuda_kernel(q, k, v, safe, n_rep)
+        # On CUDA the GQA flag is avoided whenever a mask is given (always,
+        # here): FlashAttention cannot take an arbitrary mask, and on several
+        # torch versions the memory-efficient kernel cannot take enable_gqa, so
+        # the flag silently selected the math fallback, which stores the full
+        # fp32 score matrix per head and layer. Expanding k/v costs a few MB;
+        # the fallback cost gigabytes and most of a T4's time.
+        if n_rep > 1 and _enable_gqa_supported() and not q.is_cuda:
             # Let the kernel broadcast kv heads internally instead of us
             # materializing ``n_rep`` copies of k/v first. repeat_interleave
             # is the correct fallback (below) but it is real memory: at 8 kv
@@ -210,6 +218,34 @@ def _attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     scores = (q @ k.transpose(-2, -1)) / math.sqrt(d_head)
     probs = _masked_softmax(scores, keep)
     return probs @ v
+
+
+_CUDA_KERNEL_REPORTED = False
+
+
+def _report_cuda_kernel(q, k, v, mask, n_rep) -> None:
+    """Say once, in the training log, whether masked attention gets a fused
+    kernel. A silent fallback to the math kernel is the failure this guards."""
+    global _CUDA_KERNEL_REPORTED
+    if _CUDA_KERNEL_REPORTED:
+        return
+    _CUDA_KERNEL_REPORTED = True
+    try:
+        from torch.backends.cuda import SDPAParams, can_use_efficient_attention
+        if n_rep > 1:
+            k = k.repeat_interleave(n_rep, dim=1)
+            v = v.repeat_interleave(n_rep, dim=1)
+        try:
+            params = SDPAParams(q, k, v, mask, 0.0, False, False)
+        except TypeError:                      # torch < 2.5: no enable_gqa argument
+            params = SDPAParams(q, k, v, mask, 0.0, False)
+        ok = can_use_efficient_attention(params, False)
+    except Exception as exc:                  # a diagnostic must never stop training
+        print(f"attention: could not check the CUDA kernel ({exc})", flush=True)
+        return
+    print("attention: memory-efficient kernel" if ok else
+          "attention: WARNING math fallback (slow, memory-hungry); report this line",
+          flush=True)
 
 
 def _first_column(mask: torch.Tensor) -> torch.Tensor:

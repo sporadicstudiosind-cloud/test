@@ -217,8 +217,9 @@ class CodecBank(nn.Module):
             | (tgt["modality"] == MODALITY_INDEX["control"])
         )
         if bool(text_mask.any()):
-            logits = self.text_head(h[text_mask]).float()
-            losses["text"] = (F.cross_entropy(logits, tgt["discrete"][text_mask], reduction="none") * weight[text_mask]).sum() / text_mask.sum()
+            ce_sum, z_sum = _text_loss_sums(self.text_head, h[text_mask],
+                                            tgt["discrete"][text_mask], weight[text_mask])
+            losses["text"] = ce_sum / text_mask.sum()
             # Output z-loss (PaLM §"training instability"). Cross-entropy is
             # invariant to a constant added to every logit, so nothing in the
             # objective stops the whole logit vector from drifting away from
@@ -239,8 +240,7 @@ class CodecBank(nn.Module):
             # exactly when nobody thinks to add it. Reported separately so it can
             # be watched: a z-loss that climbs is the earliest visible sign of
             # the instability it exists to prevent.
-            logz = torch.logsumexp(logits, dim=-1)
-            losses["text_z"] = (logz.square() * weight[text_mask]).sum() / text_mask.sum()
+            losses["text_z"] = z_sum / text_mask.sum()
         else:
             losses["text"] = zero
             losses["text_z"] = zero
@@ -299,3 +299,34 @@ class CodecBank(nn.Module):
         if isinstance(head, FlowMatchingHead):
             return head.sample(hidden, steps=steps, generator=generator)
         return head(hidden)
+
+
+#: Rows of text logits computed at a time in training. A 1024-token window over
+#: a 16k vocabulary is 64 MB of fp32 logits, and autograd kept them (and their
+#: log-softmax) for every sequence and every ponder loop: the largest single
+#: item in a training step's memory. Chunks are recomputed in the backward pass
+#: instead, which costs one extra head matmul and changes no result beyond the
+#: order of a floating-point sum.
+TEXT_LOSS_CHUNK = 512
+
+
+def _text_loss_terms(head, h, targets, weight):
+    logits = head(h).float()
+    ce = F.cross_entropy(logits, targets, reduction="none")
+    logz = torch.logsumexp(logits, dim=-1)
+    return (ce * weight).sum(), (logz.square() * weight).sum()
+
+
+def _text_loss_sums(head, h, targets, weight):
+    """Weighted sums of cross-entropy and z-loss over ``h``'s rows."""
+    if not (torch.is_grad_enabled() and h.requires_grad) or h.shape[0] <= TEXT_LOSS_CHUNK:
+        return _text_loss_terms(head, h, targets, weight)
+    from torch.utils.checkpoint import checkpoint
+    ce_total = z_total = None
+    for start in range(0, h.shape[0], TEXT_LOSS_CHUNK):
+        end = start + TEXT_LOSS_CHUNK
+        ce, z = checkpoint(_text_loss_terms, head, h[start:end], targets[start:end],
+                           weight[start:end], use_reentrant=False)
+        ce_total = ce if ce_total is None else ce_total + ce
+        z_total = z if z_total is None else z_total + z
+    return ce_total, z_total

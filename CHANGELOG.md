@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Fix: iridium-50m used far too much GPU memory per step
+- The first Kaggle session ran at about 7.8 s a step (~165 h for the run) and had to
+  drop to 4 sequences per pass. Not a leak: allocated memory between steps was flat.
+- Masked attention on CUDA passed `enable_gqa=True`. FlashAttention cannot take a mask
+  and, on several torch versions, the memory-efficient kernel cannot take the GQA flag,
+  so attention fell back to the math kernel, which keeps each head's fp32 score matrix.
+  CUDA now expands k/v itself (a few MB) and calls the kernel without the flag. The log
+  states once which kernel is in use. Not yet confirmed on a GPU.
+- The text loss is computed 512 rows at a time and recomputed in the backward pass,
+  instead of keeping all logits for every sequence and loop (~13% of a step's
+  activations on CPU). Same losses and gradients to float rounding
+  (`tests/unit/test_training_memory.py`); costs one extra head matmul.
+- iridium-50m's micro-batch default is 16. The model and optimizer are unchanged, so a
+  round checkpoint from the first session resumes.
+
 ### Repository brought up to date
 - README, the doc index, the notebook README and the free-tier guide now describe the
   code as it is: `iridium-50m` as the target, two-GPU training, `--resume auto`, and
@@ -31,7 +46,7 @@
   on its own subject, from held-out data. In a toy experiment every stack passed; see
   docs/iridium-50m.md for what that does and does not show.
 - **Less waiting on the CPU.** Batches are built on a background thread; iridium-50m
-  runs 32 sequences per forward pass instead of 8; router diagnostics are computed only
+  runs 16 sequences per forward pass instead of 8; router diagnostics are computed only
   on logged steps; validation runs under mixed precision. Log lines report `tok/s`.
 - `iridium train` gained `--gpus`, `--time-budget-hours`, `--keep-rounds`, `--micro-batch`.
 - The Kaggle notebook trains through that command and asks for **GPU T4 x2**.

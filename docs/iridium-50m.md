@@ -55,9 +55,20 @@ stored, so most data is seen about twice.
 **Speed.** Choose Kaggle's **GPU T4 x2**. Training runs one process per GPU and
 averages their gradients every step (`iridium/training/parallel.py`), so the batch and
 schedule are the same as on one GPU and each step takes about half as long. Batches are
-built on a background thread, and each forward pass carries 32 sequences instead of 8.
+built on a background thread, and each forward pass carries 16 sequences (the trainer
+halves that by itself if a card runs out of memory).
 
-None of this has been timed on a GPU. The estimate: chat-36m measured 68k tokens/s on
+**Measured, first session (before the fixes below):** about 7.8 s per step, roughly
+8k tokens/s, with the trainer forced down to 4 sequences per pass. At that speed the
+run is about 165 hours. Memory was not leaking (the logged allocated memory stayed at
+1.25 GB from step 0 to 762); one step simply needed too much. Two fixes followed, neither
+changing what the model computes: masked attention on CUDA no longer passes the GQA flag,
+which on several torch versions excluded the memory-efficient kernel and fell back to
+storing every head's full score matrix; and the text loss is computed in chunks that
+are recomputed in the backward pass, instead of holding 64 MB of logits per sequence
+per loop. The log now says once which attention kernel CUDA can use.
+
+The original estimate, also unmeasured: chat-36m measured 68k tokens/s on
 one GPU; if this model matches it, two T4s give roughly 120-130k tokens/s, and the
 trained loops cost 1.4x, so the run is about 15 hours, or two Kaggle sessions. The
 `tok/s` figure on each log line in the first session is the number that tests this.
