@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iridium.invalid/schemas/event.v1.json",
+  "title": "iridium.event.v1",
+  "description": "Canonical event envelope. Large arrays stay in typed binary storage referenced by payload.uri; they never become decimal prose in the context.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "event_id",
+    "workspace_id",
+    "stream_id",
+    "source_role",
+    "modality",
+    "sequence_number",
+    "event_time_ns",
+    "arrival_time_ns",
+    "clock_id",
+    "payload",
+    "provenance"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "iridium.event.v1" },
+    "event_id": { "type": "string", "minLength": 1 },
+    "workspace_id": { "type": "string", "minLength": 1 },
+    "stream_id": { "type": "string", "minLength": 1 },
+    "scenario_revision": { "type": ["string", "null"] },
+    "source_role": {
+      "enum": ["instruction", "observation", "tool_result", "generated"],
+      "description": "Authority level. Only 'instruction' from an authorized principal may direct action; observed and generated text is data."
+    },
+    "modality": {
+      "enum": ["text", "image", "video", "audio", "field", "table", "math", "scene", "action"]
+    },
+    "sequence_number": { "type": "integer", "minimum": 0 },
+    "event_time_ns": {
+      "type": "integer",
+      "description": "When the event happened, on clock_id."
+    },
+    "arrival_time_ns": {
+      "type": "integer",
+      "description": "When the runtime received it. Distinct from event_time_ns; a live model cannot condition on data that has not arrived."
+    },
+    "clock_id": { "type": "string", "minLength": 1 },
+    "coordinate_frame_id": { "type": ["string", "null"] },
+    "payload": {
+      "type": "object",
+      "required": ["uri", "sha256", "dtype", "shape", "axes"],
+      "additionalProperties": false,
+      "properties": {
+        "uri": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "dtype": {
+          "enum": ["float16", "float32", "float64", "int8", "int16", "int32", "int64", "uint8", "bool", "utf8"]
+        },
+        "shape": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "axes": { "type": "array", "items": { "type": "string" } },
+        "byte_order": { "enum": ["little", "big"] }
+      }
+    },
+    "units": {
+      "description": "null means non-numeric. An empty object means dimensionless. These are different states.",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mass": { "type": ["number", "string"] },
+            "length": { "type": ["number", "string"] },
+            "time": { "type": ["number", "string"] },
+            "current": { "type": ["number", "string"] },
+            "temperature": { "type": ["number", "string"] },
+            "amount": { "type": ["number", "string"] },
+            "luminous_intensity": { "type": ["number", "string"] },
+            "scale": { "type": "number" },
+            "offset": { "type": "number" },
+            "symbol": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "channel_schema": {
+      "description": "Per-channel names, units and dimensions for multi-channel field payloads. A block of velocity, pressure and density MUST NOT carry one dimension vector.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "units"],
+        "properties": {
+          "name": { "type": "string" },
+          "units": {},
+          "conserved": { "type": "boolean" }
+        }
+      }
+    },
+    "validity_mask_uri": { "type": ["string", "null"] },
+    "uncertainty": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["unknown", "none", "gaussian", "interval", "samples"] },
+        "sigma": { "type": ["number", "null"] },
+        "lower": { "type": ["number", "null"] },
+        "upper": { "type": ["number", "null"] }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["producer"],
+      "properties": {
+        "producer": { "type": "string" },
+        "parent_events": { "type": "array", "items": { "type": "string" } },
+        "software_version": { "type": "string" },
+        "rights": { "type": "string" }
+      }
+    }
+  }
+}
