@@ -230,7 +230,9 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
         lr=preset.lr, seed=seed,
         optimizer=preset.optimizer, schedule=preset.schedule, ema_decay=preset.ema_decay,
         loss_balance=preset.loss_balance, max_length=min(preset.window, cfg.max_seq_len),
-        log_every=max(steps // 100, 1), label=preset.name, warmup_ratio=0.02,
+        # At most every 50 steps: 1% of iridium-50m is 762 steps, over an hour of
+        # silence on two T4s, which looks exactly like a hung session.
+        log_every=max(min(steps // 100, 50), 1), label=preset.name, warmup_ratio=0.02,
         eval_every=max(steps // 20, 1) if shard_dir is not None else 0,
     )
     out_dir = Path(out) / preset.name
