@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **About 20% less activation memory per sequence**, aiming to fit 16 sequences per pass
+  instead of 8: RMSNorm keeps only its input and one scalar per row for backward (it kept
+  two to three fp32 copies), and SwiGLU recomputes silu instead of storing it. Gradients
+  match plain autograd (fp64 exactly; the full 50m to 4e-8). Gradient averaging copies
+  back in place instead of holding a third set of gradients. Not yet measured on a GPU.
 - iridium-50m checkpoints every ~250 steps (`rounds` 30 -> 300): a session cut off by
   the weekly GPU quota lost everything since its last round, up to ~5 hours.
 

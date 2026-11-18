@@ -45,3 +45,23 @@ def test_cpu_attention_still_uses_the_gqa_flag_and_matches_manual():
     finally:
         layers.set_attention_backend(previous)
     assert torch.allclose(fused, manual, atol=1e-5)
+
+
+def test_lean_rmsnorm_and_swiglu_match_plain_autograd():
+    torch.manual_seed(0)
+    x = torch.randn(3, 5, 16, dtype=torch.float64, requires_grad=True)
+    w = (torch.randn(16, dtype=torch.float64) + 1).requires_grad_()
+    g = torch.randn(3, 5, 16, dtype=torch.float64)
+    (layers._RMSNormFn.apply(x, w, 1e-5) * g).sum().backward()
+    lean = (x.grad.clone(), w.grad.clone())
+    x.grad = w.grad = None
+    (layers._rms_norm_reference(x, w, 1e-5) * g).sum().backward()
+    assert torch.allclose(lean[0], x.grad, atol=1e-12) and torch.allclose(lean[1], w.grad, atol=1e-12)
+
+    a = torch.randn(4, 9, dtype=torch.float64, requires_grad=True)
+    b = torch.randn(4, 9, dtype=torch.float64, requires_grad=True)
+    (layers.silu_mul(a, b) * g[0, :4, :9]).sum().backward()
+    lean = (a.grad.clone(), b.grad.clone())
+    a.grad = b.grad = None
+    (torch.nn.functional.silu(a) * b * g[0, :4, :9]).sum().backward()
+    assert torch.allclose(lean[0], a.grad, atol=1e-12) and torch.allclose(lean[1], b.grad, atol=1e-12)

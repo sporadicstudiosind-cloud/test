@@ -95,9 +95,13 @@ class Group:
         for p, any_rank in zip(params, present):
             n = p.numel()
             if any_rank:
-                # A copy, not a view: the buffer is reused next step, and the
-                # optimizer may keep a reference to the gradient it was given.
-                p.grad = buf[offset:offset + n].view_as(p).to(p.dtype, copy=True)
+                # Copied, never a view: the buffer is reused next step. Into the
+                # existing gradient where there is one, so the exchange does not
+                # hold a third full set of gradients at its peak.
+                if p.grad is not None and p.grad.shape == p.shape:
+                    p.grad.copy_(buf[offset:offset + n].view_as(p))
+                else:
+                    p.grad = buf[offset:offset + n].view_as(p).to(p.dtype, copy=True)
             else:
                 p.grad = None
             offset += n

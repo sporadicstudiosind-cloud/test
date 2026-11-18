@@ -65,10 +65,78 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if torch.is_grad_enabled() and (x.requires_grad or self.weight.requires_grad):
+            return _RMSNormFn.apply(x, self.weight, self.eps)
+        return _rms_norm_reference(x, self.weight, self.eps)
+
+
+def _rms_norm_reference(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    dtype = x.dtype
+    x32 = at_least_fp32(x)
+    norm = x32.pow(2).mean(-1, keepdim=True).add(eps).rsqrt()
+    return (x32 * norm).to(dtype) * weight.to(dtype)
+
+
+class _RMSNormFn(torch.autograd.Function):
+    """RMSNorm that keeps only its input and one scalar per row for backward.
+
+    Autograd on the plain expression kept the fp32 input, its normalised copy
+    and the product before the weight -- two to three full fp32 copies per norm,
+    and a superstack runs several norms per layer per token. Same forward
+    result; the backward is the closed-form RMSNorm gradient, in fp32.
+    """
+
+    @staticmethod
+    def forward(ctx, x, weight, eps):
         dtype = x.dtype
         x32 = at_least_fp32(x)
-        norm = x32.pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
-        return (x32 * norm).to(dtype) * self.weight.to(dtype)
+        rstd = x32.pow(2).mean(-1, keepdim=True).add(eps).rsqrt()
+        ctx.save_for_backward(x, weight, rstd)
+        return (x32 * rstd).to(dtype) * weight.to(dtype)
+
+    @staticmethod
+    def backward(ctx, grad):
+        x, weight, rstd = ctx.saved_tensors
+        x32 = at_least_fp32(x)
+        xhat = x32 * rstd
+        g32 = at_least_fp32(grad)
+        grad_weight = None
+        if ctx.needs_input_grad[1]:
+            # The forward rounds xhat to x's dtype before the weight multiply.
+            xr = xhat.to(x.dtype)
+            grad_weight = (g32 * at_least_fp32(xr)).reshape(-1, xhat.shape[-1]).sum(0)
+            grad_weight = grad_weight.to(weight.dtype)
+        grad_x = None
+        if ctx.needs_input_grad[0]:
+            gw = g32 * at_least_fp32(weight.to(x.dtype))
+            dot = (gw * xhat).mean(-1, keepdim=True)
+            grad_x = ((gw - xhat * dot) * rstd).to(x.dtype)
+        return grad_x, grad_weight, None
+
+
+class _SiluMulFn(torch.autograd.Function):
+    """``silu(g) * u`` keeping only ``g`` and ``u``; silu(g) is recomputed in
+    backward instead of stored (one fewer [tokens, d_ff] tensor per FFN)."""
+
+    @staticmethod
+    def forward(ctx, g, u):
+        ctx.save_for_backward(g, u)
+        return F.silu(g) * u
+
+    @staticmethod
+    def backward(ctx, grad):
+        g, u = ctx.saved_tensors
+        sig = torch.sigmoid(g)
+        silu = g * sig
+        grad_u = grad * silu if ctx.needs_input_grad[1] else None
+        grad_g = grad * u * (sig * (1 + g * (1 - sig))) if ctx.needs_input_grad[0] else None
+        return grad_g, grad_u
+
+
+def silu_mul(g: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+    if torch.is_grad_enabled() and (g.requires_grad or u.requires_grad):
+        return _SiluMulFn.apply(g, u)
+    return F.silu(g) * u
 
 
 class SwiGLU(nn.Module):
@@ -79,7 +147,7 @@ class SwiGLU(nn.Module):
         self.down = nn.Linear(d_ff, d_model, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down(F.silu(self.gate(x)) * self.up(x))
+        return self.down(silu_mul(self.gate(x), self.up(x)))
 
 
 #: How attention is computed. ``"sdpa"`` calls PyTorch's fused kernels, which
