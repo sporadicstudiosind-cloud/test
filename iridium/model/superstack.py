@@ -97,7 +97,7 @@ def pack_routed(
     counts = member.sum(dim=1)
     m = int(counts.max().item()) if counts.numel() else 0
     bi, ti = member.nonzero(as_tuple=True)
-    rank = (member.cumsum(dim=1) - 1).clamp_min(0)
+    rank = (member.long().cumsum(dim=1) - 1).clamp_min(0)   # bool cumsum: int on CUDA, bool on XLA
     si = rank[bi, ti]
 
     packed = hidden.new_zeros(b, max(m, 1), d)
