@@ -583,6 +583,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="keep only the newest N round checkpoints")
     p.add_argument("--micro-batch", type=int, default=None,
                    help="sequences per forward pass (default: the preset's; halved on OOM)")
+    p.add_argument("--lr", type=float, default=None,
+                   help="override the preset's peak learning rate (for a short sweep: "
+                        "see docs/iridium-50m.md)")
     p.add_argument("--dry-run", action="store_true",
                    help="build on the meta device, audit and estimate; no network, no training")
     p.add_argument("--max-data", action="store_true",
@@ -602,6 +605,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--plan", action="store_true", help="print item counts and exit")
     _budget_args(p)
     p.set_defaults(func=cmd_data)
+
+    p = sub.add_parser("teacher", help="hosted-teacher text per subject: generate, then shard")
+    p.add_argument("action", choices=["generate", "shard"])
+    p.add_argument("--subject", choices=["math", "science", "code", "chat"])
+    p.add_argument("--n", type=int, default=100, help="samples to request (generate)")
+    p.add_argument("--out", help="JSON-lines file to append to (generate)")
+    p.add_argument("--base-url", dest="base_url",
+                   help="OpenAI-compatible base URL, e.g. https://api.groq.com/openai/v1")
+    p.add_argument("--model", help="teacher model id at that provider")
+    p.add_argument("--key-env", dest="key_env", default="TEACHER_API_KEY",
+                   help="environment variable holding the API key (read at call time)")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--sleep", type=float, default=0.0, help="seconds between requests")
+    p.add_argument("--in", dest="inputs", nargs="+", help="JSON-lines files (shard)")
+    p.add_argument("--data", help="shard directory holding prepared.json, e.g. data/iridium-50m")
+    p.add_argument("--preset", help="preset whose window and vocabulary size to shard for")
+    p.set_defaults(func=cmd_teacher)
 
     p = sub.add_parser("evaluate", help="graded accuracy on held-out splits")
     p.add_argument("checkpoint")
@@ -657,6 +677,50 @@ def cmd_data(args) -> int:
     return 0
 
 
+def cmd_teacher(args) -> int:
+    if args.action == "generate":
+        missing = [name for name, value in (("--subject", args.subject), ("--out", args.out),
+                                            ("--base-url", args.base_url), ("--model", args.model))
+                   if not value]
+        if missing:
+            print(f"teacher generate: missing {', '.join(missing)}", file=sys.stderr)
+            return 2
+        from .data.teacher_corpus import generate
+        try:
+            written = generate(args.subject, args.n, args.out, args.base_url, args.model,
+                               api_key_env=args.key_env, seed=args.seed, sleep=args.sleep)
+        except (RuntimeError, ValueError) as exc:
+            print(f"teacher generate: {exc}", file=sys.stderr)
+            return 2
+        print(f"wrote {written} rows to {args.out}")
+        return 0
+    if not (args.inputs and args.data and args.preset):
+        print("teacher shard: needs --in, --data and --preset", file=sys.stderr)
+        return 2
+    from .presets import get_preset
+    from .training.tokenizer_bridge import tokenizer_from_manifest
+    from .data.teacher_corpus import to_shards
+    try:
+        preset = get_preset(args.preset)
+    except KeyError as exc:
+        print(f"teacher shard: {exc.args[0]}", file=sys.stderr)
+        return 2
+    prepared_path = Path(args.data) / "prepared.json"
+    if not prepared_path.exists():
+        print(f"teacher shard: {prepared_path} not found; run `python -m iridium data prepare` "
+              "first so the tokenizer is known", file=sys.stderr)
+        return 2
+    # The same tokenizer run_preset uses: the one the prepared shards were written with.
+    prepared = json.loads(prepared_path.read_text())
+    first = next(iter(prepared["families"].values()))
+    tokenizer = tokenizer_from_manifest(first["tokenizer"])
+    manifest = to_shards(args.inputs, args.data, tokenizer, preset.window,
+                         vocab_rows=preset.config.codecs.vocab_size)
+    print(f"sharded {manifest['rows']:,} rows into {args.data} "
+          f"({', '.join(sorted(manifest['families']))})")
+    return 0
+
+
 def cmd_train(args, argv=None) -> int:
     from .training import run_preset
     try:
@@ -664,6 +728,12 @@ def cmd_train(args, argv=None) -> int:
     except KeyError as exc:
         print(f"train: {exc.args[0]}", file=sys.stderr)
         return 2
+    if getattr(args, "lr", None) is not None:
+        if not args.lr > 0:
+            print("train: --lr must be positive", file=sys.stderr)
+            return 2
+        from dataclasses import replace
+        preset = replace(preset, lr=args.lr)
     if args.dry_run:
         result = run_preset.dry_run(preset)
         return 0 if result["match"] else 1

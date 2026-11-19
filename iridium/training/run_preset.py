@@ -147,21 +147,23 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
     if not data and set(preset.mixture) & set(DOMAIN_FAMILIES):
         from .prepare import prepare
         data = str(Path(out) / "data")
-        if not (Path(data) / preset.name / "prepared.json").exists():
+        source = get_preset(preset.data_from) if preset.data_from else preset
+        if not (Path(data) / source.name / "prepared.json").exists():
             if world > 1:
                 raise RuntimeError("prepare the data first (`iridium data prepare`); "
                                    "parallel ranks must not all write the same shards")
-            prepare(preset, data, seed=seed)
+            prepare(source, data, seed=seed)
 
     shard_dir = None
     if data:
         # Prepared shards carry the tokenizer that wrote them; use exactly that
         # one rather than retraining a possibly different vocabulary.
         from .tokenizer_bridge import tokenizer_from_manifest
-        shard_dir = Path(data) / preset.name if (Path(data) / preset.name).is_dir() else Path(data)
+        owner = preset.data_from or preset.name
+        shard_dir = Path(data) / owner if (Path(data) / owner).is_dir() else Path(data)
         prepared = json.loads((shard_dir / "prepared.json").read_text())
-        if prepared["preset"] != preset.name:
-            raise ValueError(f"{shard_dir} was prepared for {prepared['preset']}, not {preset.name}")
+        if prepared["preset"] not in (preset.name, owner):
+            raise ValueError(f"{shard_dir} was prepared for {prepared['preset']}, not {owner}")
         first = next(iter(prepared["families"].values()))
         tokenizer = tokenizer_from_manifest(first["tokenizer"])
     else:
@@ -227,7 +229,8 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
     tcfg = TrainConfig(
         steps=steps, batch_size=micro, accumulate=rank_batch // micro,
         loop_probs=tuple(preset.loop_probs),
-        lr=preset.lr, seed=seed,
+        lr=preset.lr, seed=seed, pack=preset.pack,
+        **({"weight_decay": preset.weight_decay} if preset.weight_decay is not None else {}),
         optimizer=preset.optimizer, schedule=preset.schedule, ema_decay=preset.ema_decay,
         loss_balance=preset.loss_balance, max_length=min(preset.window, cfg.max_seq_len),
         # At most every 50 steps: 1% of iridium-50m is 762 steps, over an hour of
@@ -244,6 +247,18 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
         corpus = MixedCorpus.build(allocate_mixture(steps * preset.batch_size, preset.mixture),
                                    shard_dir, seed=seed, tokenizer=tokenizer)
         corpus_for = lambda r: corpus  # noqa: E731
+    anneal_corpus, anneal_from = None, steps
+    if preset.anneal_mixture:
+        if shard_dir is None:
+            raise ValueError(f"{preset.name}: anneal_mixture needs prepared shards (`iridium data prepare`)")
+        from ..data.shards import MixedCorpus
+        from .datasets import allocate_mixture
+        from .trainer import warmup_steps
+        # Where the WSD schedule starts decaying (wsd_lr's decay_start).
+        anneal_from = max(warmup_steps(tcfg), int(round(steps * (1.0 - tcfg.decay_ratio))))
+        anneal_corpus = MixedCorpus.build(
+            allocate_mixture(max(steps - anneal_from, 1) * preset.batch_size, preset.anneal_mixture),
+            shard_dir, seed=seed + 1, tokenizer=tokenizer)
     on_eval = None
     if shard_dir is not None and primary:
         on_eval = held_out_evaluator(shard_dir, cfg, info.device, min(micro, 8), preset.window,
@@ -277,6 +292,10 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
         print(f"resumed at step {trainer.completed_steps} (round {start_round})")
         if start_round and shard_dir is None:
             trainer.set_corpus(corpus_for(start_round))
+        tag, base = getattr(trainer, "saved_corpus", (None, 0))
+        if anneal_corpus is not None and tag == "anneal":
+            trainer.set_corpus(anneal_corpus, base=base, tag="anneal", seed=seed + anneal_from)
+            print(f"continuing the decay-phase mixture from step {anneal_from}")
 
     path: Optional[Path] = None
     started = time.monotonic()
@@ -286,6 +305,13 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
         if r > start_round and shard_dir is None:
             trainer.set_corpus(corpus_for(r))
         until = steps if r == rounds - 1 else (r + 1) * steps // rounds
+        if (anneal_corpus is not None and trainer.corpus_tag != "anneal"
+                and trainer.completed_steps < anneal_from < until):
+            trainer.train(until=anneal_from, on_eval=on_eval)
+        if anneal_corpus is not None and trainer.corpus_tag != "anneal" \
+                and trainer.completed_steps >= anneal_from:
+            trainer.set_corpus(anneal_corpus, tag="anneal", seed=seed + anneal_from)
+            print(f"step {trainer.completed_steps}: switching to the decay-phase mixture", flush=True)
         trainer.train(until=until, on_eval=on_eval)
         if group is not None:
             drift = group.total(group.sync_from_primary(trainer.model.parameters()))

@@ -254,18 +254,24 @@ def grade_text_lm(model, items, n_loops: int = 1,
     for item in items:
         batch = TensorBatch(collate([item.sample], dims), device=device)
         out = model(batch, n_loops=n_loops)
-        h = out.hidden[:, :-1]
         target = batch.discrete[:, 1:]
         mask = (batch.supervised[:, 1:] & batch.valid[:, 1:]
                 & (batch.modality[:, 1:] == MODALITY_INDEX["text"]))
         if not bool(mask.any()):
             continue
-        logits = model.codecs.text_head(h)
-        nll = F.cross_entropy(
-            logits.reshape(-1, logits.shape[-1]),
-            target.reshape(-1).clamp(0, logits.shape[-1] - 1),
-            reduction="none",
-        ).view_as(mask)
+        # Score each loop's prediction, weighted by the chance of stopping
+        # there -- the loss training minimises (Iridium1.losses). Cross-entropy
+        # of the stop-weighted *average* hidden state is a different number,
+        # and with several loops it is not what the model was trained to make.
+        nll = torch.zeros_like(mask, dtype=torch.float32)
+        for index, hidden in enumerate(out.per_loop_hidden):
+            logits = model.codecs.text_head(hidden[:, :-1])
+            loop_nll = F.cross_entropy(
+                logits.reshape(-1, logits.shape[-1]).float(),
+                target.reshape(-1).clamp(0, logits.shape[-1] - 1),
+                reduction="none",
+            ).view_as(mask)
+            nll = nll + out.loop_stopping[:, :-1, index].float() * loop_nll
         total_bits += float((nll * mask).sum()) / np.log(2.0)
         total_bytes += int(mask.sum())
     bpb = total_bits / max(total_bytes, 1)

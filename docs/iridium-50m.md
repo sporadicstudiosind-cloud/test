@@ -151,3 +151,50 @@ python -m iridium data prepare --preset iridium-50m
 python -m iridium train --preset iridium-50m --data data --resume auto   # uses every GPU; --gpus 1 for one
 python -m iridium battery --checkpoint runs/iridium-50m/iridium-50m-final.pt
 ```
+
+## The next run: `iridium-50m-next`
+
+The live run keeps training as it is. The next one starts **fresh** (AdamW and Muon
+optimizer states do not convert, so it must not resume iridium-50m's checkpoints) and
+reads the same prepared shards. In the Kaggle notebook, set `PRESET = 'iridium-50m-next'`.
+
+| Change | Why | Evidence and caveat |
+|---|---|---|
+| Muon on hidden matrices, RMS-matched to AdamW, weight decay 0.1 | fewer tokens to the same loss | ~1.4x vs a *tuned* AdamW at 130M, shrinking to 1.1x at 1.2B (Wen et al., ICLR 2026, arXiv 2509.02046); Moonshot's RMS matching and decay (arXiv 2502.16982). Not measured at 50M or with looping. |
+| Same-subject sequence packing | ~17% of tokens were padding | Packing is standard (Krell et al., arXiv 2107.02027). No document mask: items in a row can attend to earlier items, as in GPT-style pretraining. Rows keep one subject so subject forcing still holds. |
+| Decay-phase mixture (`_IRIDIUM50_ANNEAL`) | finish on the most targeted data | OLMo 2's Dolmino mid-training (arXiv 2501.00656), Llama 3, SmolLM2 (arXiv 2502.02737). Magnitude at 50M unknown; keep watching the general-text bpb for forgetting. |
+
+**Learning rate.** 1.5e-3 was chosen for AdamW and was never swept. Wen et al. found an
+untuned learning rate alone can cost up to 2x, more than the optimizer choice. A sweep
+that fits one Kaggle session: three short runs with the full schedule compressed into
+600 steps, then compare the last `val_*_bpb`:
+
+```
+for LR in 1e-3 2e-3 4e-3; do
+  python -m iridium train --preset iridium-50m-next --steps 600 --rounds 3 \
+      --lr $LR --out sweep/lr$LR --data /path/to/data
+done
+```
+
+Short-run optima drift toward higher rates than the full run wants, so if two are
+close, take the lower.
+
+**Teacher-written subject text** (per-stack distillation). Generate, then shard
+into the prepared data, then add the family to a mixture:
+
+```
+export TEACHER_API_KEY=...        # from your provider; never commit it
+python -m iridium teacher generate --subject math --n 2000 --out teacher/math.jsonl \
+    --base-url https://api.groq.com/openai/v1 --model <model-id> --sleep 2
+python -m iridium teacher shard --in teacher/*.jsonl --data data/iridium-50m --preset iridium-50m
+```
+
+Then add e.g. `"math_teacher": 0.03` to the mixture (and the anneal mixture). Check the
+provider's and the model's terms on training with outputs first; `teacher_manifest.json`
+records which models and hosts wrote each family. Chat samples are plain text with
+`User:`/`Assistant:` labels, not the chat control tokens.
+
+**Not done here** (see docs/research-2026-11.md): logit distillation (the 16k
+vocabulary matches no public teacher, and caching top-k logits for 5B tokens is ~320 GB),
+multi-token prediction (reported to hurt small models), nGPT and differential attention.
+

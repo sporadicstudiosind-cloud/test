@@ -58,6 +58,9 @@ class TrainConfig:
     devices: tuple[str, ...] = ()  # empty: use the supplied primary device
     precision: str = "auto"  # auto | fp32 | fp16 | bf16
     max_length: int | None = None
+    #: Pack short items of one subject into shared rows instead of padding
+    #: each to the longest in its batch (``BatchLoader._packed_batches``).
+    pack: bool = False
     #: On CUDA OOM, halve the micro-batch and retry rather than losing the run.
     oom_retry: bool = True
     #: Split parameters so that weight decay reaches only rank->=2 weights. See
@@ -328,11 +331,13 @@ class Trainer:
         self.loader = BatchLoader(
             train_corpus, model.cfg.codecs, cfg.batch_size, cfg.seed, device=device,
             max_length=cfg.max_length or model.cfg.max_seq_len, shard=(rank, world),
+            pack=cfg.pack,
         )
         #: Training items this rank has drawn over the whole run (checkpointed),
         #: and the count when the current corpus was installed.
         self.items_consumed = 0
         self._corpus_base = 0
+        self.corpus_tag: Optional[str] = None
         self.group = None
         if world > 1:
             from .parallel import Group
@@ -392,19 +397,27 @@ class Trainer:
         self.scaler = torch.amp.GradScaler("cuda", enabled=precision == "fp16")
         self.completed_steps = 0
 
-    def set_corpus(self, corpus: Corpus) -> None:
+    def set_corpus(self, corpus: Corpus, base: Optional[int] = None,
+                   tag: Optional[str] = None, seed: Optional[int] = None) -> None:
         """Swap in a fresh corpus between rounds without touching model,
         optimizer, schedule or step count -- how a run streams more data than
-        fits in memory as one list of items."""
+        fits in memory as one list of items.
+
+        ``base`` is the ``items_consumed`` count at which this corpus was
+        first installed (default: now), so reinstalling it after a resume
+        continues it instead of starting it over; ``tag`` names it in the
+        checkpoint (the decay-phase corpus is ``"anneal"``). Reinstalling needs
+        the same ``seed`` too, or the epoch order changes under ``base``."""
         if not corpus.items:
             raise ValueError("training corpus is empty")
         self.loader = BatchLoader(
             corpus, self.model.cfg.codecs, self.loader.batch_size,
-            self.cfg.seed + self.completed_steps, device=self.device,
+            self.cfg.seed + self.completed_steps if seed is None else seed, device=self.device,
             max_length=self.cfg.max_length or self.model.cfg.max_seq_len,
-            shard=(self.rank, self.world),
+            shard=(self.rank, self.world), pack=self.cfg.pack,
         )
-        self._corpus_base = self.items_consumed
+        self._corpus_base = self.items_consumed if base is None else base
+        self.corpus_tag = tag
 
     def _apply_freeze(self) -> None:
         if not self.cfg.freeze:
@@ -740,6 +753,8 @@ class Trainer:
         self.items_consumed = blob.get(
             "items_consumed", self.completed_steps * self.cfg.batch_size * self.cfg.accumulate)
         self._corpus_base = 0
+        # Which corpus was live, and from when; run_preset reinstalls it.
+        self.saved_corpus = (blob.get("corpus_tag"), blob.get("corpus_base", 0))
         self.history = blob.get("history", [])
         torch.set_rng_state(blob["torch_rng"].cpu())
         if self.generator is not None and blob.get("generator_rng") is not None:
@@ -793,6 +808,8 @@ class Trainer:
                 "loss_balancer": self.balancer.state_dict(),
                 "completed_steps": self.completed_steps,
                 "items_consumed": self.items_consumed,
+                "corpus_tag": self.corpus_tag,
+                "corpus_base": self._corpus_base,
                 "torch_rng": torch.get_rng_state(),
                 "generator_rng": self.generator.get_state() if self.generator is not None else None,
                 "loader_rng": self.loader.rng.bit_generator.state,

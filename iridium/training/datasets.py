@@ -195,7 +195,11 @@ class BatchLoader:
         device: str = "cpu",
         max_length: Optional[int] = None,
         shard: tuple[int, int] = (0, 1),
+        pack: bool = False,
     ) -> None:
+        #: Concatenate short items of the same subject into one row (see
+        #: :meth:`_packed_batches`). Off by default: it changes what a row is.
+        self.pack = pack
         #: ``(rank, world)``: this loader yields every ``world``-th item of the
         #: shuffled order starting at ``rank``. Loaders that share a seed then
         #: cover the corpus between them with no item in two of them.
@@ -225,8 +229,15 @@ class BatchLoader:
     def __len__(self) -> int:
         return (len(self.corpus) + self.batch_size - 1) // self.batch_size
 
+    #: Items packed together at a time, as a multiple of the batch size. The
+    #: chunk is the unit a resume restarts from, so it bounds re-seen data.
+    PACK_CHUNK = 8
+
     def batches(self) -> Iterator[tuple[TensorBatch, list[Item]]]:
         """The rest of the current epoch, from ``position``."""
+        if self.pack and not self.bucket:
+            yield from self._packed_batches()
+            return
         if not self.bucket:
             per_epoch = len(self._epoch_order(0))
             if per_epoch == 0:
@@ -258,11 +269,66 @@ class BatchLoader:
         for group in groups:
             yield self._make(group)
 
+    def _packed_batches(self) -> Iterator[tuple[TensorBatch, list[Item]]]:
+        """Rows filled with several short items, in the same epoch order.
+
+        Generated items (tasks, chat turns, tool calls) are far shorter than
+        the window, and padding them out wasted about a sixth of every step.
+        Here a chunk of ``PACK_CHUNK * batch_size`` items is first-fit packed
+        into rows of at most ``max_length`` tokens, back to back, the way GPT
+        pretraining packs documents (each item still opens with its own BOS
+        and keeps its own supervision mask; positions run on across the row).
+
+        Only items with the same ``meta["subject"]`` share a row, because the
+        specialist curriculum forces one subject's stack per row. A resume
+        restarts at the chunk boundary, so at most one chunk is seen twice.
+        """
+        per_epoch = len(self._epoch_order(0))
+        if per_epoch == 0:
+            return
+        if not self.max_length:
+            # A memory-mapped corpus is lazy; scanning it for the longest item
+            # would build every item once just to pick a row length.
+            raise ValueError("packing needs max_length (the row length)")
+        limit = self.max_length
+        chunk = self.PACK_CHUNK * self.batch_size
+        epoch, offset = divmod(self.position, per_epoch)
+        order = self._epoch_order(epoch)
+        for start in range(offset - offset % chunk, per_epoch, chunk):
+            group = order[start:start + chunk]
+            rows: list[list[Item]] = []
+            open_rows: dict = {}      # subject -> (row index, tokens used)
+            for i in group:
+                item = self.corpus.items[int(i)]
+                n = len(item.sample)
+                key = (item.sample.meta or {}).get("subject")
+                slot = open_rows.get(key)
+                if slot is not None and slot[1] + n <= limit:
+                    rows[slot[0]].append(item)
+                    open_rows[key] = (slot[0], slot[1] + n)
+                    continue
+                rows.append([item])
+                if n < limit:
+                    open_rows[key] = (len(rows) - 1, n)
+            for lo in range(0, len(rows), self.batch_size):
+                batch_rows = rows[lo:lo + self.batch_size]
+                last = lo + self.batch_size >= len(rows)
+                self.position = epoch * per_epoch + (start + len(group) if last else start)
+                yield self._make_rows(batch_rows)
+
+    def _make_rows(self, rows: list[list[Item]]) -> tuple[TensorBatch, list[Item]]:
+        samples = [row[0].sample if len(row) == 1 else
+                   Sample([span for it in row for span in it.sample.spans],
+                          dict(row[0].sample.meta or {}))
+                   for row in rows]
+        return self._collate(samples, [it for row in rows for it in row])
+
     def _make(self, group) -> tuple[TensorBatch, list[Item]]:
         items = [self.corpus.items[int(i)] for i in group]
-        batch = collate(
-            [it.sample for it in items], self.dims, self.n_scalars, self.max_length
-        )
+        return self._collate([it.sample for it in items], items)
+
+    def _collate(self, samples, items) -> tuple[TensorBatch, list[Item]]:
+        batch = collate(samples, self.dims, self.n_scalars, self.max_length)
         if not (batch.valid[:, 1:] & batch.supervised[:, 1:]).any(axis=1).all():
             raise ValueError("example has no targets within context; shorten/rebuild the corpus")
         tensors = TensorBatch(batch, device=self.device)

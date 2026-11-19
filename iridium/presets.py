@@ -109,6 +109,19 @@ class Preset:
     prepare_tokens: Optional[int] = None
     #: Text the subword vocabulary learns from; ``None`` is the module default.
     tokenizer_sources: Optional[dict[str, float]] = None
+    #: Pack short items of one subject into shared rows (TrainConfig.pack).
+    pack: bool = False
+    #: Family mixture for the learning-rate decay phase (the last
+    #: ``decay_ratio`` of steps), drawn from the same prepared shards and
+    #: generators. ``None`` keeps ``mixture`` throughout. Annealing on the
+    #: cleanest, most targeted data is what OLMo 2 (Dolmino), Llama 3 and
+    #: SmolLM2 do in their final phase.
+    anneal_mixture: Optional[dict[str, float]] = None
+    #: Train from another preset's prepared shards (same tokenizer and
+    #: families), so a variant need not re-download and re-tokenize data.
+    data_from: Optional[str] = None
+    #: Decoupled weight decay; ``None`` keeps the trainer default (0.01).
+    weight_decay: Optional[float] = None
 
     @property
     def tokens(self) -> int:
@@ -237,6 +250,47 @@ def _iridium_50m(chat34: IridiumConfig) -> Preset:
               "2.5B distinct tokens are written (about 7.5 GB), so the mix is seen about twice.")
 
 
+#: The decay-phase mixture for iridium-50m-next: the same families, tilted
+#: from raw text toward each subject's worked questions, code that runs, tool
+#: episodes and chat. About half stays prose (OLMo 2's Dolmino mid-training
+#: mix also keeps about half web text), so general ability is not traded away.
+_IRIDIUM50_ANNEAL = {
+    "science_text": 0.10, "science_qa": 0.10,
+    "math_text": 0.07, "math_qa": 0.09, "arithmetic_drill": 0.05,
+    "writing_text": 0.08, "writing_qa": 0.09,
+    "code_qa": 0.08, "code_exec": 0.08, "agent_episode": 0.12,
+    "chat_general": 0.11, "unknowable": 0.02,
+    "image_foundation": 0.005, "audio_foundation": 0.005,
+}
+
+
+def _iridium_50m_next(base: Preset) -> Preset:
+    """iridium-50m with the changes kept off the run in progress.
+
+    The same model, data and token budget; what changes is how it trains:
+
+    * **Muon** for the hidden matrices (AdamW for embeddings, heads, norms
+      and routers), with Moonshot's RMS matching so the AdamW learning rate
+      carries over, and their weight decay of 0.1. Wen et al. (ICLR 2026)
+      measured about 1.4x fewer tokens than a tuned AdamW at 130M.
+    * **Packing**: short generated items of one subject share a row instead
+      of being padded, which wasted about 17% of each step.
+    * **A decay-phase mixture** (``_IRIDIUM50_ANNEAL``) over the final 20%.
+
+    It reads iridium-50m's prepared shards. Its optimizer state does not
+    load into an AdamW run or the reverse, so start it fresh; do not point
+    it at iridium-50m's checkpoints.
+    """
+    return replace(
+        base, name="iridium-50m-next", optimizer="muon", weight_decay=0.1,
+        pack=True, anneal_mixture=dict(_IRIDIUM50_ANNEAL), data_from=base.name,
+        status="verified in theory",
+        notes="iridium-50m's recipe with Muon, packing and a decay-phase mix. Untimed: "
+              "packing makes rows longer, so tok/s should rise about a sixth while "
+              "s/step may not. 1.5e-3 is iridium-50m's AdamW rate, never swept for "
+              "Muon; see docs/iridium-50m.md for a one-session sweep.")
+
+
 def _presets() -> dict[str, Preset]:
     nano, n100 = get_config("nano"), get_config("nano100m")
     out: dict[str, Preset] = {}
@@ -255,6 +309,7 @@ def _presets() -> dict[str, Preset]:
 
     out["chat-36m"] = _chat_36m(chat34)
     out["iridium-50m"] = _iridium_50m(chat34)
+    out["iridium-50m-next"] = _iridium_50m_next(out["iridium-50m"])
 
     chat100 = replace(_with_vocab(n100, 16_384), name="iridium-1-chat-100m", max_seq_len=2048)
     out["chat-100m"] = Preset(

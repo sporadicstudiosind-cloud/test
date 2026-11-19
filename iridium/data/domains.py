@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from .teacher_corpus import TEACHER_FAMILIES
+
 #: Stack order: 1 maths, 2 chat, 3 code, 4 science. "chat" is everything
 #: conversational and written: stories, how-tos, small talk, saying "I don't know".
 SUBJECTS = ("math", "chat", "code", "science")
@@ -56,6 +58,8 @@ GENERATED_SUBJECT: dict[str, Optional[str]] = {
 
 
 def subject_of(family: str) -> Optional[str]:
+    if family in TEACHER_FAMILIES:
+        return TEACHER_FAMILIES[family]
     spec = DOMAIN_FAMILIES.get(family)
     return spec.subject if spec else GENERATED_SUBJECT.get(family)
 

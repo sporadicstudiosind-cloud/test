@@ -569,8 +569,12 @@ def build_kaggle_50m() -> list[dict]:
         if len(names) < 2:
             print('NOTE: one GPU. Settings -> Accelerator -> GPU T4 x2 trains about twice as fast.')
 
+    # 'iridium-50m' is the run in progress. Start the NEXT run fresh with
+    # 'iridium-50m-next' (Muon, packing, decay-phase mix): it reads the same
+    # prepared data, but must not resume iridium-50m's checkpoints.
     PRESET = 'iridium-50m'
     preset = get_preset(PRESET)
+    DATA_PRESET = preset.data_from or PRESET
     print(preset_table())
     result = dry_run(preset)
     if not result['match']:
@@ -593,7 +597,7 @@ def build_kaggle_50m() -> list[dict]:
         found = re.search(r'-round(\\d+)\\.pt$', path.name)
         return int(found.group(1)) if found else -1
 
-    data_marks = attached(f'{PRESET}/prepared.json')
+    data_marks = attached(f'{DATA_PRESET}/prepared.json')
     DATA_DIR = data_marks[0].parent.parent if data_marks else OUT_DIR / 'data'
     print('data:', DATA_DIR, '(attached)' if data_marks else '(not attached)')
 
@@ -610,10 +614,10 @@ def build_kaggle_50m() -> list[dict]:
     b.code("""
     from iridium.training.prepare import prepare
 
-    if not (DATA_DIR / PRESET / 'prepared.json').exists():
+    if not (DATA_DIR / DATA_PRESET / 'prepared.json').exists():
         if HAS_GPU:
             print('WARNING: preparing data with a GPU attached spends GPU quota. A CPU session is free.')
-        prepare(preset, DATA_DIR)
+        prepare(get_preset(DATA_PRESET), DATA_DIR)
         print('data written to', DATA_DIR)
     if not HAS_GPU:
         print('Data is ready. Saved as this version\\'s output: attach it and rerun with a GPU.')

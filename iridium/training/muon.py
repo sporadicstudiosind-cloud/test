@@ -118,6 +118,13 @@ except ImportError:  # pragma: no cover - torch always ships nn
     nn = None
 
 
+def _native_bf16(device) -> bool:
+    """Whether ``device`` has bf16 tensor cores (CUDA capability 8.0+)."""
+    if device.type != "cuda":
+        return False
+    return torch.cuda.get_device_capability(device)[0] >= 8
+
+
 def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5,
                                 eps: float = 1e-7) -> torch.Tensor:
     """Orthogonalize a 2-D matrix via the quintic Newton-Schulz iteration.
@@ -129,7 +136,14 @@ def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5,
     module docstring). That is intentional and is what the test suite checks
     for, not a bug to "fix" by adding steps.
 
-    Runs in bf16 on CUDA and fp32 on CPU/other devices. bf16 is safe here
+    Runs in bf16 on CUDA cards with native bf16 (compute capability 8.0+,
+    Ampere onward) and fp32 everywhere else. A T4 or P100 accepts bf16 but
+    emulates it on the CUDA cores, several times slower than fp32 there, and
+    `torch.cuda.is_bf16_supported()` still answers True on a T4, so the test
+    is the capability, not that call. fp32 costs nothing that matters at
+    these widths: five 384-by-1024 products per matrix per step.
+
+    Originally: bf16 on CUDA and fp32 on CPU/other devices. bf16 is safe here
     specifically because every step is a small matmul followed by a rescale,
     unlike e.g. an eigen-decomposition, which has no such low-precision
     fallback; it is also pointless on CPU, where bf16 matmuls are not
@@ -141,7 +155,7 @@ def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5,
         raise ValueError("zeropower_via_newtonschulz5 expects a 2-D matrix; "
                          "flatten or route higher-rank tensors to the AdamW path first")
     a, b, c = 3.4445, -4.7750, 2.0315
-    work_dtype = torch.bfloat16 if G.is_cuda else torch.float32
+    work_dtype = torch.bfloat16 if _native_bf16(G.device) else torch.float32
     X = G.to(work_dtype)
     transposed = X.size(0) > X.size(1)
     if transposed:
@@ -353,15 +367,19 @@ def muon_param_groups(model_or_named_params, lr: float = 3e-4, weight_decay: flo
     instead of a second, silently different one living here.
 
     Returns a list of 1-3 torch.optim-style group dicts (empty groups are
-    omitted, unlike ``decay_groups``, since ``Muon.__init__`` requires every
-    group to have at least one live tensor... actually it does not, but an
-    empty group is dead weight in every downstream loop), each carrying
+    omitted, unlike ``decay_groups``: an empty group is dead weight in every
+    downstream loop), each carrying
     ``"lr"``, ``"weight_decay"``, ``"use_muon"`` and, for the Muon group,
     ``"momentum"`` -- ready to hand straight to ``Muon(...)``.
     """
     from ..runtime.memory import decay_groups
 
-    exclude = ("embedding", "text_head")
+    # Routers and halting heads are tiny (a few rows) and feed a softmax or a
+    # sigmoid: orthogonalising a 4-by-384 router would push every stack's
+    # logit row to the same norm each step. No Muon paper covers them, so
+    # they take the AdamW path, as the norms and gates do. Every output head
+    # ("*_head") goes there too, as Jordan and Moonshot route the LM head.
+    exclude = ("embedding", "text_head", "_head", "router", "halt")
 
     def is_excluded(name: str) -> bool:
         lowered = name.lower()
@@ -377,7 +395,8 @@ def muon_param_groups(model_or_named_params, lr: float = 3e-4, weight_decay: flo
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
-            if id(param) in linear_weight_ids and param.ndim == 2 and not is_excluded(name):
+            if (id(param) in linear_weight_ids and param.ndim == 2 and not is_excluded(name)
+                    and min(param.shape) >= 16):
                 muon_params.append(param)
             else:
                 rest.append((name, param))

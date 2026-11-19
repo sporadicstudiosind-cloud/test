@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- **`iridium-50m-next`, the recipe for the next run** (the live iridium-50m run is
+  untouched: every new option defaults off). Same model, data and 5B tokens, plus:
+  Muon for hidden matrices (AdamW for embeddings, heads, norms and routers; weight decay
+  0.1); same-subject **sequence packing** of short generated items (about 17% of each
+  step was padding); and a **decay-phase mixture** over the last 20% tilted toward each
+  subject's worked questions, runnable code, tool episodes and chat. It reads
+  iridium-50m's prepared shards (`Preset.data_from`). See docs/iridium-50m.md.
+- Muon's Newton-Schulz ran in bf16 on every CUDA card; a T4 only emulates bf16. It now
+  uses bf16 only at compute capability 8.0+ and fp32 otherwise. Routers, halting heads,
+  every `*_head` output and matrices narrower than 16 now take Muon's AdamW path.
+- `iridium train --lr` overrides the peak learning rate, for short sweeps.
+- `iridium teacher generate|shard`: per-subject teacher-written text (sequence-level
+  distillation, so no tokenizer match is needed) from any OpenAI-compatible endpoint.
+  The key is read from an environment variable at call time and never written; output
+  is resumable JSON lines with provenance, sharded as `math_teacher`, `science_teacher`,
+  `code_teacher` and `chat_teacher` (each routed to its stack) plus a manifest. Not in
+  any mixture yet: free tiers yield ~0.2-2M tokens/day and provider terms on training
+  with outputs differ, so check them first.
+- The text-LM harness scored the cross-entropy of the loop-averaged hidden state;
+  training scores each loop's prediction weighted by its stopping probability. It now
+  scores the training objective (identical with one loop).
+- Checkpoints record which corpus was live (`corpus_tag`, `corpus_base`), so the
+  decay-phase mixture continues across resumes instead of restarting.
+- docs/research-2026-11.md: what 29 literature searches found about making a ~50M
+  model smarter and faster to train, with sources and counterpoints.
 - **About 20% less activation memory per sequence**, aiming to fit 16 sequences per pass
   instead of 8: RMSNorm keeps only its input and one scalar per row for backward (it kept
   two to three fp32 copies), and SwiGLU recomputes silu instead of storing it. Gradients
