@@ -1,0 +1,19 @@
+{
+  "name": "Iridium-1",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "hostRequirements": { "cpus": 4, "memory": "16gb", "storage": "32gb" },
+  "postCreateCommand": "pip install --index-url https://download.pytorch.org/whl/cpu torch && pip install numpy pyyaml pytest jsonschema matplotlib",
+  "forwardPorts": [8080],
+  "portsAttributes": {
+    "8080": { "label": "Iridium-1 probe", "onAutoForward": "openPreview" }
+  },
+  "postAttachCommand": {
+    "server": "PYTHONPATH=. python serve/server.py"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python"],
+      "settings": { "python.testing.pytestEnabled": true }
+    }
+  }
+}

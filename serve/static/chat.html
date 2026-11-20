@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Iridium-1 — live model probe</title>
+<meta name="description" content="Send a prompt through a routed control-core model and watch which superstacks it chose, how deep it went, and how many ponder loops it spent.">
+<link rel="stylesheet" href="./styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>◈</text></svg>">
+<style>
+  .chatgrid { display: grid; gap: 16px; grid-template-columns: 1fr; align-items: start; }
+  @media (min-width: 980px) { .chatgrid { grid-template-columns: 1.15fr 1fr; } }
+  .transcript { display: flex; flex-direction: column; gap: 12px; min-height: 220px; }
+  .msg { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; background: var(--surface-1); }
+  .msg.user { background: var(--surface-2); }
+  .msg .who { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-muted); margin-bottom: 5px; }
+  .msg .body { font-family: var(--mono); font-size: 13.5px; white-space: pre-wrap; word-break: break-word; }
+  .msg .meta { font-size: 11.5px; color: var(--text-muted); margin-top: 8px; font-family: var(--mono); }
+  .composer { display: flex; gap: 10px; margin-top: 14px; }
+  .composer textarea {
+    flex: 1; min-height: 74px; resize: vertical; font-family: var(--mono); font-size: 13.5px;
+    background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 10px 12px;
+  }
+  button.send {
+    background: var(--accent); color: #fff; border: none; border-radius: var(--radius);
+    padding: 0 20px; font-size: 14.5px; font-weight: 600; cursor: pointer; font-family: var(--sans);
+  }
+  button.send:disabled { opacity: .55; cursor: progress; }
+  button.reset {
+    background: var(--surface-2); color: var(--text-secondary);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 0 14px; cursor: pointer; font-family: var(--sans);
+  }
+  .warn {
+    border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
+    background: color-mix(in srgb, var(--warn) 8%, var(--surface-1));
+    border-radius: var(--radius); padding: 14px 16px; margin-bottom: 20px;
+  }
+  .warn b { color: var(--text-primary); }
+  .warn p { margin: 0 0 8px; color: var(--text-secondary); font-size: 14px; }
+  .warn p:last-child { margin: 0; }
+  .presets { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .presets button {
+    background: var(--surface-2); border: 1px solid var(--border); color: var(--text-secondary);
+    border-radius: 999px; padding: 4px 11px; font-size: 12px; cursor: pointer;
+    font-family: var(--mono);
+  }
+  .presets button:hover { color: var(--text-primary); border-color: var(--border-strong); }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="brand">◈ Iridium-1 <span>/ live probe</span></div>
+    <nav class="links">
+      <a href="./explore">Architecture explorer</a>
+      <a href="/api/health">Health</a>
+    </nav>
+    <button class="theme" id="theme-toggle">◐ Theme</button>
+  </div>
+</header>
+
+<div class="wrap" style="padding-block: 34px 10px">
+  <h1 style="font-size:clamp(24px,4vw,34px);margin:0 0 12px;letter-spacing:-.02em">
+    Send a prompt through the router
+  </h1>
+  <div class="warn">
+    <p><b>This is an experimental chat model; its replies are not reliable.</b> The bundled rung is
+      34 M parameters fitted for 800 steps on a synthetic corpus; measured against independent
+      computation it scores at or below a prompt-ignoring baseline on four of five task families.
+      It has not been trained on the chat-role format yet.</p>
+    <p>What <b>is</b> real on every request is the telemetry beside the reply: which superstacks the
+      router selected, how far the focus ladder went into each, how many ponder loops the halting
+      head spent, and what that cost in wall time. Those mechanisms are the point of the
+      architecture, and you are watching them actually run.</p>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="controls">
+    <div class="control">
+      <label for="model">Model</label>
+      <select id="model"></select>
+    </div>
+    <div class="control">
+      <label for="tokens">Max new tokens</label>
+      <input type="range" id="tokens" min="4" max="64" step="4" value="24" style="width:150px">
+    </div>
+    <div class="control">
+      <label for="temp">Temperature</label>
+      <input type="range" id="temp" min="0" max="1.4" step="0.1" value="0.8" style="width:130px">
+    </div>
+    <div class="control">
+      <label for="loops">Ponder loops</label>
+      <input type="range" id="loops" min="1" max="3" step="1" value="1" style="width:90px">
+    </div>
+    <div class="readout" id="ctl-readout"></div>
+  </div>
+  <p class="fig-sub" id="model-caveat" style="margin-top:-6px"></p>
+
+  <div class="chatgrid">
+    <div>
+      <div class="transcript" id="transcript"></div>
+      <div class="composer">
+        <textarea id="prompt" placeholder="Type a message to Iridium"></textarea>
+        <button class="send" id="send">Send</button>
+        <button class="reset" id="reset" type="button">New chat</button>
+      </div>
+      <div class="presets" id="presets"></div>
+    </div>
+    <div>
+      <figure class="card" id="fig-dispatch"></figure>
+      <div class="tiles" id="telemetry-tiles" style="margin-top:14px"></div>
+    </div>
+  </div>
+</div>
+
+<footer style="margin-top:44px">
+  <div class="wrap">
+    <p style="margin:0">
+      One container, one process: <code>serve/server.py</code> running the real
+      <code>iridium</code> package on the selected PyTorch device. Telemetry comes from the model's own routing decision,
+      not from a description of it.
+    </p>
+  </div>
+</footer>
+
+<div class="tooltip" id="tooltip" role="status"></div>
+<script src="./chat.js"></script>
+</body>
+</html>
