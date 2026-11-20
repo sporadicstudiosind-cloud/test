@@ -83,3 +83,49 @@ loop-index signal, router z-loss, optional attention softcap, WSD schedule, EMA.
   is the comparison that would settle whether the stacks earn their parameters.
 - **Tool use:** reported reliability starts around 1B parameters. At 50M, expect
   narrow, fixed-schema tool use only.
+
+## Second pass (20 Nov 2026): LittleBit-2 and the 2025-26 crop
+
+Thirty-one more searches, the decisive claims re-checked against the papers'
+full text and official code. What was built is opt-in in the code unless
+"in iridium-50m-next" says otherwise; measured CPU results are in
+docs/iridium-50m.md ("Tiny-model ablations").
+
+**LittleBit-2** ([arXiv 2603.00042](https://arxiv.org/abs/2603.00042), ICML 2026)
+is a *compression* method: a trained model's matrices become rank-r products of
+binary matrices with real scale vectors, reaching 0.1-1 bits per weight, and the
+Joint-ITQ rotation is a better starting point for that (Llama-3 8B at 1 bpw:
+perplexity 11.5 vs 16.3 for LittleBit). It does not make a model smarter, and
+every result is at 1.3B-70B; at 1.3B the papers already note the residual path
+can hurt at very low bits. Two facts specific to iridium-50m: the fp16 scale
+vectors alone cost about 0.115 bpw on its largest (1024 x 384) matrices, so the
+0.1 bpw setting cannot exist here; and small, over-trained models lose the most
+to quantisation ([Ouyang et al.](https://arxiv.org/abs/2411.17691)). Implemented
+in `iridium/quant/littlebit.py` from the equations (the official code is
+CC BY-NC); see docs/littlebit.md for what it measured.
+
+| Idea | Evidence (verified) | Status |
+|---|---|---|
+| Gated attention, sigmoid gate per head after SDPA | NeurIPS 2025 best paper ([2505.06708](https://arxiv.org/abs/2505.06708)); 1.7B dense: PPL 7.50 → 7.40, trains at ~2x LR where the baseline diverges | `attn_gate` |
+| Canon layers A+C, residual causal width-4 conv | [2512.17351](https://arxiv.org/abs/2512.17351) + official code (Kaiming init, no bias, no activation); 2-4x synthetic reasoning depth; ~2.8% lower loss on a 4M TinyStories model (third party) | `canon` (core only) |
+| Polar Express Newton-Schulz coefficients | [2505.16932](https://arxiv.org/abs/2505.16932): GPT-2 small val loss 3.588 vs 3.639 (Jordan's) at 1B tokens; checked numerically here | optimizer `muon_pe` |
+| NorMuon per-neuron normalisation | [2510.05491](https://arxiv.org/abs/2510.05491): 21.7% vs 10.4% steps saved over Adam at 1.1B (Muon); ~6% fewer iterations than Muon at 124M | optimizer `normuon` |
+| Linear decay to zero | [Bergsma et al., ICLR 2025](https://arxiv.org/abs/2502.15938) | `decay_shape="linear"`, `min_lr_ratio=0` |
+| Ponder prior on the batch-mean exit distribution | one 160M paper ([2610.09013](https://arxiv.org/abs/2610.09013)), with a beta ramp to 0.05; Ouro's fixed 0.1 collapsed | `ponder_global` |
+| Do the stacks earn their parameters? | learned routing does not make domain experts ([2601.03425](https://arxiv.org/abs/2601.03425)); nothing measured below 100M | presets `iridium-50m-control-random`, `-control-dense` |
+| Self-improvement on exact-checkable tasks | [Lee et al., ICML 2025](https://arxiv.org/abs/2502.01612): a 14M model went from 16- to ~100-digit addition on its own filtered outputs | recipe noted, not built |
+
+Not pursued, with the reason: hybrid linear attention (gains appear at 400M+ and long
+context; no confirmed Turing kernels), byte-level models (behind BPE below ~1B),
+diffusion LMs (win only at hundreds of epochs; this run repeats data twice),
+ternary training from scratch (ParetoQ: −2.0 points at 125M; a final QAT phase
+is the better route to a small file), mHC/Engram (shown at 3B-27B; the repo already
+has hyper-connections), RL at 50M (no evidence), test-time verifiers (need a
+trained verifier; later).
+
+Data and deployment notes: rephrasing data with a local 1-3B model costs roughly
+175 T4-hours per 500M tokens (estimate); use Apache-2.0 generators (Qwen3-1.7B,
+SmolLM2), since Llama's licence requires a derived model's name to start with
+"Llama" and Gemma's terms reach models trained on its outputs. For phones, the
+routing's data-dependent shapes are what block ExecuTorch/ONNX export; a
+fixed-capacity dispatch would unlock both.

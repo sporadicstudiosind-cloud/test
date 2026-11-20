@@ -552,8 +552,8 @@ def test_mrope_and_yarn_validation_and_serialisation():
 @pytest.mark.parametrize("chunk", [1, 3])
 @pytest.mark.parametrize("loops", [1, 2])
 def test_canon_layers_with_trained_weights_keep_cached_decoding_exact(chunk, loops):
-    """Canon weights start at zero (an identity), which would hide a cache bug;
-    random weights make every one of the three remembered inputs matter."""
+    """Re-randomised Canon weights, larger than their init, so a cache bug in
+    any of the three remembered inputs shows."""
     model = _model(dict(canon=True, attn_gate="head"))
     g = torch.Generator().manual_seed(3)
     with torch.no_grad():

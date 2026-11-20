@@ -150,9 +150,14 @@ def _quintic_coefficients(kind: str, steps: int):
     if kind == "jordan":
         return [(3.4445, -4.7750, 2.0315)] * steps
     if kind == "polar_express":
-        table = [POLAR_EXPRESS[min(i, len(POLAR_EXPRESS) - 1)] for i in range(steps)]
-        s = _PE_SAFETY
-        return [(a / s, b / s ** 3, c / s ** 5) for a, b, c in table]
+        # The paper's code scales every polynomial but the last one in its
+        # list (whose repeats, past eight iterations, stay unscaled too).
+        s, last = _PE_SAFETY, len(POLAR_EXPRESS) - 1
+        out = []
+        for i in range(steps):
+            a, b, c = POLAR_EXPRESS[min(i, last)]
+            out.append((a, b, c) if i >= last else (a / s, b / s ** 3, c / s ** 5))
+        return out
     raise ValueError(f"unknown orthogonalisation coefficients {kind!r}")
 
 
@@ -190,7 +195,10 @@ def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5,
     transposed = X.size(0) > X.size(1)
     if transposed:
         X = X.T
-    X = X / (X.norm() + eps)
+    # Polar Express divides by 1.01 * ||G||_F (its code, not its Algorithm 1
+    # text): the extra 1% keeps the top singular value inside the interval
+    # its polynomials were optimised for.
+    X = X / (X.norm() * (_PE_SAFETY if coefficients == "polar_express" else 1.0) + eps)
     for a, b, c in _quintic_coefficients(coefficients, steps):
         A = X @ X.T
         B = b * A + c * (A @ A)
@@ -210,15 +218,13 @@ def _muon_update(grad: torch.Tensor, momentum_buffer: torch.Tensor, beta: float,
 
 def _row_normalise(update: torch.Tensor, row_sq: torch.Tensor, beta2: float,
                    eps: float = 1e-8) -> torch.Tensor:
-    """NorMuon-style (Li et al., arXiv 2510.05491): divide each output row of
-    the orthogonalised update by a running RMS of that row, so no neuron's
-    update is systematically larger than another's, then restore the
-    update's overall RMS so Moonshot's scale (and the AdamW learning rate it
-    matches) still applies. Mutates ``row_sq`` (one float per row)."""
+    """NorMuon (Li et al., arXiv 2510.05491, Algorithm 1): divide each output
+    row (neuron) of the orthogonalised update by a running RMS of that row,
+    ``v <- b2 v + (1 - b2) mean_cols(O * O)``, no bias correction. The caller
+    then scales the result to Frobenius norm ``0.2 sqrt(m n)`` (the paper's
+    step), which matches AdamW's update RMS. Mutates ``row_sq``."""
     row_sq.mul_(beta2).add_(update.float().pow(2).mean(dim=1), alpha=1 - beta2)
-    normed = update / (row_sq.sqrt().unsqueeze(1) + eps).to(update.dtype)
-    scale = update.norm() / normed.norm().clamp_min(eps)
-    return normed * scale
+    return update / (row_sq.sqrt().unsqueeze(1) + eps).to(update.dtype)
 
 
 class Muon:
@@ -336,13 +342,16 @@ class Muon:
             buf = self.state[p]['momentum_buffer']
             update = _muon_update(p.grad, buf, momentum, self.ns_steps, self.nesterov,
                                   self.coefficients)
+            m, n = p.shape
             if self.row_norm:
                 update = _row_normalise(update, self.state[p]['row_sq'], self.row_beta2)
-            m, n = p.shape
-            # Moonlight eq. 4: 0.2 * sqrt(max(m, n)) cancels the shape-dependent
-            # RMS of Lemma 1 and lands Muon's update RMS in AdamW's ~0.2-0.4
-            # range, so the same lr/weight_decay tuned for AdamW applies here.
-            scale = 0.2 * (max(m, n) ** 0.5)
+                # NorMuon's step: Frobenius norm 0.2 sqrt(m n), i.e. RMS 0.2.
+                scale = 0.2 * (m * n) ** 0.5 / float(update.norm().clamp_min(1e-12))
+            else:
+                # Moonlight eq. 4: 0.2 * sqrt(max(m, n)) cancels the shape-dependent
+                # RMS of Lemma 1 and lands Muon's update RMS in AdamW's ~0.2-0.4
+                # range, so the same lr/weight_decay tuned for AdamW applies here.
+                scale = 0.2 * (max(m, n) ** 0.5)
             p.mul_(1 - lr * wd)
             p.add_(update, alpha=-lr * scale)
 

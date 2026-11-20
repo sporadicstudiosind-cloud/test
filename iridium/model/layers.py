@@ -471,7 +471,10 @@ class CanonConv(nn.Module):
     information flow the paper finds attention does poorly on its own; the
     paper reports 2-4x deeper synthetic reasoning and about 0.5% more
     parameters, and an independent 4M-parameter TinyStories run saw ~2.8%
-    lower loss. Weights start at zero, so a fresh layer is the identity.
+    lower loss. Initialised as the official code does (PyTorch's default
+    depthwise Conv1d init, kaiming_uniform a=sqrt(5): U(-1/2, 1/2) for width
+    four), no bias, no activation; the paper found identity-like init gave
+    no benefit.
 
     Incremental decoding keeps the last three inputs in the cache under
     ``key``, so a token fed one at a time sees the same window as in a full
@@ -482,7 +485,12 @@ class CanonConv(nn.Module):
 
     def __init__(self, d_model: int) -> None:
         super().__init__()
-        self.weight = nn.Parameter(torch.zeros(d_model, self.WIDTH))
+        self.weight = nn.Parameter(torch.empty(d_model, self.WIDTH))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        bound = 1.0 / math.sqrt(self.WIDTH)       # = kaiming_uniform(a=sqrt(5)), fan_in 4
+        nn.init.uniform_(self.weight, -bound, bound)
 
     def forward(self, x: torch.Tensor, cache: Optional[dict] = None,
                 key: Optional[tuple] = None) -> torch.Tensor:

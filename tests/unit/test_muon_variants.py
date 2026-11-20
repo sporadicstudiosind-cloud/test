@@ -159,15 +159,17 @@ def test_muon_state_dict_round_trip():
                 assert s_src[k] == s_dst[k]
 
 
-def test_row_normalise_preserves_frobenius_norm():
+def test_row_normalise_equalises_row_scale():
+    """NorMuon divides each row by its running RMS (no bias correction), so
+    rows that start at very different scales come out comparable."""
     torch.manual_seed(2)
-    update = torch.randn(32, 32)
+    update = torch.randn(32, 32) * torch.logspace(-2, 1, 32).unsqueeze(1)
     row_sq = torch.zeros(32)
-    out = _row_normalise(update, row_sq, beta2=0.95)
+    out = _row_normalise(update, row_sq, beta2=0.0)
+    rms = out.pow(2).mean(1).sqrt()
     assert out.shape == update.shape
-    assert torch.allclose(out.norm(), update.norm(), rtol=1e-5)
-    # Rows are actually rescaled, not returned unchanged.
-    assert not torch.allclose(out, update)
+    assert torch.allclose(rms, torch.ones(32), rtol=1e-3)
+    torch.testing.assert_close(row_sq, update.pow(2).mean(1))
 
 
 # --------------------------------------------------------------------------

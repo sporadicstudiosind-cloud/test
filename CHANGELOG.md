@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Opt-in architecture options** (off in every shipped preset until measured):
+  `attn_gate` ("head"/"elem"), a sigmoid gate per attention head after SDPA (Qiu et al.,
+  NeurIPS 2025); `canon` on the core, a residual causal width-4 depthwise convolution
+  after each block norm (Physics of LMs 4.1), initialised as the official code and exact
+  under cached decoding through the ponder loop. Parameter formulas updated.
+- **Muon variants**: optimizer `muon_pe` uses Polar Express coefficients (checked against
+  the paper's listing, including its 1.01 normalisation); `normuon` adds NorMuon's
+  per-neuron normalisation with the paper's update scale.
+- `decay_shape="linear"` (with `min_lr_ratio=0`, decay to zero) and
+  `RouterConfig.ponder_global` (ponder prior on the batch-average exit distribution).
+- **`iridium/quant/littlebit.py`**: sub-1-bit LittleBit layers with LittleBit-2's Joint-ITQ
+  initialisation and distillation QAT, written from the papers' equations. At this
+  model size the scale vectors alone cost ~0.115 bpw, and quality loss is large; see
+  docs/littlebit.md.
+- Presets `iridium-50m-control-random` and `iridium-50m-control-dense`: the experiment
+  that says whether the subject stacks earn their parameters.
 - **`iridium-50m-next`, the recipe for the next run** (the live iridium-50m run is
   untouched: every new option defaults off). Same model, data and 5B tokens, plus:
   Muon for hidden matrices (AdamW for embeddings, heads, norms and routers; weight decay

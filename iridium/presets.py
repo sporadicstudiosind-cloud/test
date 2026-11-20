@@ -291,6 +291,38 @@ def _iridium_50m_next(base: Preset) -> Preset:
               "Muon; see docs/iridium-50m.md for a one-session sweep.")
 
 
+def _iridium_50m_controls(routed: Preset) -> dict[str, Preset]:
+    """Two controls that say whether the subject stacks earn their parameters.
+
+    No published study isolates routed or subject-specialised experts below
+    100M parameters, and 2026 work finds learned routing does not produce
+    domain experts ("The Illusion of Specialization", arXiv 2601.03425), so
+    the stacks are a bet until measured. Train all three on the same short
+    budget (docs/iridium-50m.md gives the command) and compare per-subject
+    held-out bits per byte:
+
+    * ``-control-random``: the same model, every window sent to a random
+      stack instead of its subject's. If the routed model does not beat it,
+      the subject labels are not doing the work.
+    * ``-control-dense``: one 12-layer stack, so each token runs the same
+      depth as the routed model's top-2 (core + 2 x 6 layers): equal compute,
+      about 30M body parameters instead of 50M. If the routed model does not
+      beat it, the extra 20M parameters are not paying for themselves.
+    """
+    cfg = routed.config
+    random_cfg = replace(cfg, router=replace(cfg.router, subject_force=False, solo_p=0.0, any_p=1.0))
+    dense_cfg = replace(cfg, stacks=replace(cfg.stacks, n_stacks=1, n_layers=2 * cfg.stacks.n_layers,
+                                            specializations=()),
+                        router=replace(cfg.router, top_k=1, subject_force=False, solo_p=0.0, any_p=0.0))
+    note = "A control for iridium-50m-next; train it for the same short budget, not 5B tokens."
+    return {
+        "iridium-50m-control-random": replace(routed, name="iridium-50m-control-random",
+                                              config=random_cfg, notes=note),
+        "iridium-50m-control-dense": replace(routed, name="iridium-50m-control-dense",
+                                             config=dense_cfg, notes=note),
+    }
+
+
 def _presets() -> dict[str, Preset]:
     nano, n100 = get_config("nano"), get_config("nano100m")
     out: dict[str, Preset] = {}
@@ -310,6 +342,7 @@ def _presets() -> dict[str, Preset]:
     out["chat-36m"] = _chat_36m(chat34)
     out["iridium-50m"] = _iridium_50m(chat34)
     out["iridium-50m-next"] = _iridium_50m_next(out["iridium-50m"])
+    out.update(_iridium_50m_controls(out["iridium-50m-next"]))
 
     chat100 = replace(_with_vocab(n100, 16_384), name="iridium-1-chat-100m", max_seq_len=2048)
     out["chat-100m"] = Preset(
