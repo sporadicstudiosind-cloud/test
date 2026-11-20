@@ -282,7 +282,7 @@ def _iridium_50m_next(base: Preset) -> Preset:
     * **Canon layers** in the core (residual causal width-4 convolution after
       each block norm, ~12k parameters). In the ablation they cut loss 1.315 ->
       1.081 at 300 steps with AdamW, but by 1,200 steps with NorMuon the gain was
-      0.006 (0.069 with AdamW): mostly faster early learning. Kept as cheap
+      ~0 over two seeds (0.069 with AdamW): mostly faster early learning. Kept as cheap
       insurance. Cached decoding is exact.
     * **Packing**: short generated items of one subject share a row instead
       of being padded, which wasted about 17% of each step.
