@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **iridium-50m-next now trains with NorMuon at lr 3e-3 and Canon layers in the core.**
+  A 2M-parameter CPU ablation (docs/iridium-50m.md) found the AdamW-matched learning
+  rate under-drove Muon (it lost to AdamW at 3e-3 and won by ~0.15 at matched higher
+  rates), NorMuon ahead of plain Muon at every rate, and Canon layers lowering loss with
+  either optimizer (1.315 -> 1.081 with AdamW). Gated attention, looping, the batch-mean
+  ponder prior and decay-to-zero showed nothing at that length and stay opt-in.
 - **Opt-in architecture options** (off in every shipped preset until measured):
   `attn_gate` ("head"/"elem"), a sigmoid gate per attention head after SDPA (Qiu et al.,
   NeurIPS 2025); `canon` on the core, a residual causal width-4 depthwise convolution

@@ -106,10 +106,10 @@ CC BY-NC); see docs/littlebit.md for what it measured.
 
 | Idea | Evidence (verified) | Status |
 |---|---|---|
-| Gated attention, sigmoid gate per head after SDPA | NeurIPS 2025 best paper ([2505.06708](https://arxiv.org/abs/2505.06708)); 1.7B dense: PPL 7.50 → 7.40, trains at ~2x LR where the baseline diverges | `attn_gate` |
-| Canon layers A+C, residual causal width-4 conv | [2512.17351](https://arxiv.org/abs/2512.17351) + official code (Kaiming init, no bias, no activation); 2-4x synthetic reasoning depth; ~2.8% lower loss on a 4M TinyStories model (third party) | `canon` (core only) |
+| Gated attention, sigmoid gate per head after SDPA | NeurIPS 2025 best paper ([2505.06708](https://arxiv.org/abs/2505.06708)); 1.7B dense: PPL 7.50 → 7.40, trains at ~2x LR where the baseline diverges | `attn_gate` (opt-in; no effect in the 300-step ablation) |
+| Canon layers A+C, residual causal width-4 conv | [2512.17351](https://arxiv.org/abs/2512.17351) + official code (Kaiming init, no bias, no activation); 2-4x synthetic reasoning depth; ~2.8% lower loss on a 4M TinyStories model (third party) | `canon`, **in iridium-50m-next** (ablation: 1.315 → 1.081) |
 | Polar Express Newton-Schulz coefficients | [2505.16932](https://arxiv.org/abs/2505.16932): GPT-2 small val loss 3.588 vs 3.639 (Jordan's) at 1B tokens; checked numerically here | optimizer `muon_pe` |
-| NorMuon per-neuron normalisation | [2510.05491](https://arxiv.org/abs/2510.05491): 21.7% vs 10.4% steps saved over Adam at 1.1B (Muon); ~6% fewer iterations than Muon at 124M | optimizer `normuon` |
+| NorMuon per-neuron normalisation | [2510.05491](https://arxiv.org/abs/2510.05491): 21.7% vs 10.4% steps saved over Adam at 1.1B (Muon); ~6% fewer iterations than Muon at 124M | optimizer `normuon`, **in iridium-50m-next** |
 | Linear decay to zero | [Bergsma et al., ICLR 2025](https://arxiv.org/abs/2502.15938) | `decay_shape="linear"`, `min_lr_ratio=0` |
 | Ponder prior on the batch-mean exit distribution | one 160M paper ([2610.09013](https://arxiv.org/abs/2610.09013)), with a beta ramp to 0.05; Ouro's fixed 0.1 collapsed | `ponder_global` |
 | Do the stacks earn their parameters? | learned routing does not make domain experts ([2601.03425](https://arxiv.org/abs/2601.03425)); nothing measured below 100M | presets `iridium-50m-control-random`, `-control-dense` |

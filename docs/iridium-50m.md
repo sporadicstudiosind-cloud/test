@@ -201,3 +201,58 @@ records which models and hosts wrote each family. Chat samples are plain text wi
 vocabulary matches no public teacher, and caching top-k logits for 5B tokens is ~320 GB),
 multi-token prediction (reported to hurt small models), nGPT and differential attention.
 
+
+## Tiny-model ablations (CPU, 20 Nov 2026)
+
+These runs used a 2.1M-parameter Iridium-1 with the same architecture as
+iridium-50m: d = 128, 2 core layers and 4 subject stacks of 2 layers, routed
+top-2. It trained for 300 steps on TinyStories, byte-level, at batch 16 × 256,
+with the WSD schedule. The score is held-out text loss per byte, lower is
+better. Two seeds differ by about 0.02–0.06, so smaller gaps are noise.
+Reproduce with `experiments/tiny_ablation.py`.
+
+| Run | Loss (mean of seeds) | Seeds |
+|---|---|---|
+| **NorMuon, lr 1.2e-2, Canon** (iridium-50m-next's recipe, at the toy's own best rate) | **0.935** | 2 |
+| AdamW, lr 1.2e-2, Canon | 0.977 | 1 |
+| Muon, lr 2.4e-2 | 0.989 | 1 |
+| NorMuon, lr 1.2e-2 | 0.990 | 2 |
+| Muon, lr 1.2e-2 | 1.028 | 1 |
+| AdamW, lr 3e-3, Canon | 1.081 | 2 |
+| Muon, lr 6e-3 | 1.135 | 1 |
+| AdamW, lr 1.2e-2 | 1.181 | 2 |
+| AdamW, lr 6e-3 | 1.226 | 1 |
+| AdamW, lr 3e-3, loops 1/2/3 at 0.7/0.2/0.1 | 1.301 | 2 |
+| same, ponder prior on the batch mean | 1.309 | 1 |
+| **AdamW, lr 3e-3 (the original recipe)** | **1.315** | 2 |
+| AdamW, lr 3e-3, gated attention (head) | 1.335 | 2 |
+| NorMuon, lr 3e-3 | 1.339 | 2 |
+| AdamW, lr 3e-3, linear decay to zero | 1.356 | 2 |
+| Polar Express Muon, lr 3e-3 | 1.371 | 2 |
+| Muon, lr 3e-3 | 1.403 | 2 |
+| Muon, lr 3e-3, weight decay 0.01 | 1.438 | 1 |
+| AdamW, lr 1.5e-3 | 1.471 | 1 |
+
+What this supports:
+
+* **The learning rate was the biggest lever.** Both optimizers improved from
+  1.5e-3 up to 1.2e-2. At the AdamW-matched 3e-3, Muon looked worse than AdamW.
+  At matched higher rates, Muon won by about 0.15. NorMuon beat plain Muon and
+  Polar Express Muon at every rate tried.
+* **Canon layers help with either optimizer.** They lowered loss by 0.23 with
+  AdamW at 3e-3, 0.20 at 1.2e-2, and 0.06 on top of NorMuon. They add about
+  2k parameters here and about 12k at 50M. Byte-level text flatters them,
+  because neighbouring bytes form words. Expect less on 16k-token text.
+* **No measurable effect at this length:**
+  - gated attention, whose paper's gain is stability at high learning rates;
+  - looping;
+  - the batch-mean ponder prior.
+  
+  All three stay opt-in.
+* **Linear decay to zero was worse here.** Its 60-step decay is far shorter
+  than the long runs where it was shown to win. It stays opt-in.
+
+What it does not show: anything at 50M, at 16k tokens, or over 76k steps.
+Toy-scale optimal learning rates overshoot what long runs want, so
+iridium-50m-next uses 3e-3, not 1.2e-2. Run the sweep above before
+committing a session to it.
