@@ -253,6 +253,10 @@ What this supports:
   AdamW at 3e-3, 0.20 at 1.2e-2, and 0.06 on top of NorMuon. They add about
   2k parameters here and about 12k at 50M. Byte-level text flatters them,
   because neighbouring bytes form words. Expect less on 16k-token text.
+* **Gated attention at high rates** (NorMuon + Canon, one seed each): 0.921 vs 0.940 at
+  2.4e-2 and 0.939 vs 0.944 at 4.8e-2, gate vs no gate. That direction matches the
+  paper, but the gaps are within noise, and neither model diverged without the gate,
+  so its stability benefit had nothing to prevent here.
 * **No measurable effect at this length:**
   - gated attention, whose paper's gain is stability at high learning rates;
   - looping;
