@@ -217,6 +217,7 @@ Reproduce with `experiments/tiny_ablation.py`.
 | AdamW, lr 1.2e-2, Canon | 0.977 | 1 |
 | Muon, lr 2.4e-2 | 0.989 | 1 |
 | NorMuon, lr 1.2e-2 | 0.990 | 2 |
+| Polar Express Muon, lr 1.2e-2 | 1.020 | 1 |
 | Muon, lr 1.2e-2 | 1.028 | 1 |
 | AdamW, lr 3e-3, Canon | 1.081 | 2 |
 | Muon, lr 6e-3 | 1.135 | 1 |
