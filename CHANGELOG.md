@@ -13,6 +13,8 @@
   rates), NorMuon ahead of plain Muon at every rate, and Canon layers lowering loss with
   either optimizer (1.315 -> 1.081 with AdamW). Gated attention, looping, the batch-mean
   ponder prior and decay-to-zero showed nothing at that length and stay opt-in.
+  At 1,200 steps the best rate fell to ~6e-3 and Canon's gain on top of NorMuon shrank
+  to 0.006 (0.069 with AdamW); NorMuon still led AdamW by 0.14.
 - **Opt-in architecture options** (off in every shipped preset until measured):
   `attn_gate` ("head"/"elem"), a sigmoid gate per attention head after SDPA (Qiu et al.,
   NeurIPS 2025); `canon` on the core, a residual causal width-4 depthwise convolution

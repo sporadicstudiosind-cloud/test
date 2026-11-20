@@ -266,6 +266,29 @@ What this supports:
 * **Linear decay to zero was worse here.** Its 60-step decay is far shorter
   than the long runs where it was shown to win. It stays opt-in.
 
+**Four times longer (1,200 steps, one seed)** changes two conclusions:
+
+| Run, 1,200 steps | Loss |
+|---|---|
+| NorMuon, lr 6e-3, Canon | **0.719** |
+| NorMuon, lr 6e-3 | 0.725 |
+| NorMuon, lr 3e-3, Canon | 0.727 |
+| NorMuon, lr 1.2e-2, Canon | 0.730 |
+| AdamW, lr 6e-3, Canon | 0.792 |
+| AdamW, lr 6e-3 | 0.861 |
+| AdamW, lr 1.2e-2 | 0.879 |
+
+* **The best learning rate fell as training lengthened.** At 300 steps,
+  higher kept helping up to 1.2e-2 and beyond. At 1,200 steps, 3e-3, 6e-3 and
+  1.2e-2 are within 0.011 of each other, with 1.2e-2 the worst of the three.
+  The 76k-step run is 60 times longer again, which is why iridium-50m-next uses 3e-3.
+* **Canon mostly speeds up early learning; with NorMuon it is nearly neutral
+  by 1,200 steps.** It is worth 0.006 with NorMuon, against 0.069 with AdamW. It
+  stays in the preset because it costs about 12k parameters and protects against an
+  optimizer or rate that is off. Do not expect the 300-step gains.
+* **NorMuon's lead over AdamW held:** 0.725 against 0.861 at matched rates without
+  Canon.
+
 What it does not show: anything at 50M, at 16k tokens, or over 76k steps.
 Toy-scale optimal learning rates overshoot what long runs want, so
 iridium-50m-next uses 3e-3, not 1.2e-2. Run the sweep above before
