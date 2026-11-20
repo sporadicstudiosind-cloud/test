@@ -40,6 +40,7 @@ python -m iridium data prepare --preset iridium-50m        # tokenize once, to d
 python -m iridium train --preset iridium-50m --data data --resume auto   # uses every GPU
 python -m iridium battery --checkpoint runs/iridium-50m/iridium-50m-final.pt
 python -m iridium specialists --checkpoint runs/iridium-50m/iridium-50m-final.pt --data data
+python -m iridium cloze --checkpoint runs/iridium-50m/iridium-50m-final.pt   # HellaSwag, ARC, PIQA
 python -m iridium agent --checkpoint runs/iridium-50m/iridium-50m-final.pt --workspace ./sandbox
 ```
 
@@ -148,7 +149,7 @@ iridium/
   codecs/      typed spans and the omnimodal embedding bank
   training/    trainer, run_preset, multi-GPU (parallel.py), data mixtures, budget audit
   data/        licensed text, chat, tool and agent corpora; subjects (domains.py)
-  evaluation/  test battery, routing and specialist checks
+  evaluation/  test battery, routing and specialist checks, cloze benchmarks
   alignment/   written principles and an output screen (no training data yet)
   runtime/     device backends, streaming, tools, constrained decoding, serving
   world/       cameras, splats, world state, rollout
