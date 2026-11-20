@@ -59,6 +59,10 @@ VARIANTS = {
     "dynamic_ffn": dict(ffn_dynamic_rank=4),
     "mhc": dict(hyper_streams=4),
     "mhc_static": dict(hyper_streams=3, hyper_dynamic=False),
+    "gate_head": dict(attn_gate="head"),
+    "gate_elem": dict(attn_gate="elem", layer_pattern=("local", "global"), local_window=3),
+    "canon": dict(canon=True),
+    "canon_gate_mhc": dict(canon=True, attn_gate="head", hyper_streams=2),
     "everything": dict(layer_pattern=("deltanet", "mla", "local", "global"),
                        local_window=3, mla_kv_rank=24, mla_rope_dim=8,
                        norm_kind="dyt", block_kind="parallel", ffn_dynamic_rank=4,
@@ -543,3 +547,21 @@ def test_mrope_and_yarn_validation_and_serialisation():
     assert restored.mrope_sections == (2, 3, 3) and restored.rope_yarn_factor == 4.0
     model = Iridium1(cfg)
     assert model.rope.scaling["type"] == "yarn"
+
+
+@pytest.mark.parametrize("chunk", [1, 3])
+@pytest.mark.parametrize("loops", [1, 2])
+def test_canon_layers_with_trained_weights_keep_cached_decoding_exact(chunk, loops):
+    """Canon weights start at zero (an identity), which would hide a cache bug;
+    random weights make every one of the three remembered inputs matter."""
+    model = _model(dict(canon=True, attn_gate="head"))
+    g = torch.Generator().manual_seed(3)
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if "canon" in name:
+                p.copy_(torch.randn(p.shape, generator=g, dtype=p.dtype) * 0.5)
+    batch = _batch(model.cfg, seed=2)
+    with torch.no_grad():
+        reference = model(batch, n_loops=loops).hidden
+        cached = run_chunked(model, batch, chunk=chunk, n_loops=loops)
+    torch.testing.assert_close(cached, reference, rtol=0, atol=1e-10)

@@ -378,6 +378,22 @@ class GroupedQueryAttention(nn.Module):
         self.window = window
         # Gemma 2 attention-logit softcapping; None keeps SDPA in play.
         self.softcap = softcap
+        #: Output gate (``enable_gate``); None is the ungated layer.
+        self.gate: Optional[nn.Linear] = None
+        self.gate_kind = ""
+
+    def enable_gate(self, kind: str, d_model: int) -> None:
+        """Gated attention (Qiu et al., "Gated Attention for Large Language
+        Models", NeurIPS 2025, arXiv 2505.06708): multiply each head's output by
+        ``sigmoid(x W)`` before ``wo``. Their best placement, after the
+        attention, so the fast SDPA kernel still runs. "head" is one scalar
+        per head; "elem" one per channel. Reported to remove attention sinks
+        and allow higher learning rates; shown at 1.7B dense and 15B MoE."""
+        if kind not in ("head", "elem"):
+            raise ValueError("gate kind must be 'head' or 'elem'")
+        self.gate_kind = kind
+        self.gate = nn.Linear(d_model, self.n_q if kind == "head" else self.n_q * self.d_head,
+                              bias=False)
 
     def project_kv(
         self, x: torch.Tensor, positions: torch.Tensor
@@ -438,7 +454,52 @@ class GroupedQueryAttention(nn.Module):
             keep = keep & window_mask
 
         out = _attend(q, k, v, keep, self.d_head, n_rep=self.repeat, softcap=self.softcap)
-        return self.wo(out.transpose(1, 2).reshape(b, t, -1))
+        out = out.transpose(1, 2)                      # [B, T, H, d_head]
+        if self.gate is not None:
+            g = torch.sigmoid(self.gate(x))
+            g = g.unsqueeze(-1) if self.gate_kind == "head" else g.view(b, t, self.n_q, self.d_head)
+            out = out * g.to(out.dtype)
+        return self.wo(out.reshape(b, t, -1))
+
+
+class CanonConv(nn.Module):
+    """Canon layer (Allen-Zhu, "Physics of Language Models: Part 4.1",
+    arXiv 2512.17351): ``h_t + sum_{i<4} w_i * h_{t-i}``, a residual causal
+    depthwise convolution of width four.
+
+    It hands each position a mix of its three predecessors, the "horizontal"
+    information flow the paper finds attention does poorly on its own; the
+    paper reports 2-4x deeper synthetic reasoning and about 0.5% more
+    parameters, and an independent 4M-parameter TinyStories run saw ~2.8%
+    lower loss. Weights start at zero, so a fresh layer is the identity.
+
+    Incremental decoding keeps the last three inputs in the cache under
+    ``key``, so a token fed one at a time sees the same window as in a full
+    forward pass.
+    """
+
+    WIDTH = 4
+
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(d_model, self.WIDTH))
+
+    def forward(self, x: torch.Tensor, cache: Optional[dict] = None,
+                key: Optional[tuple] = None) -> torch.Tensor:
+        b, t, d = x.shape
+        history = self.WIDTH - 1
+        past = cache.get(key) if cache is not None and key is not None else None
+        if past is None:
+            past = x.new_zeros(b, history, d)
+        full = torch.cat([past.to(x.dtype), x], dim=1)          # [B, 3 + T, D]
+        if cache is not None and key is not None:
+            cache[key] = full[:, -history:].detach()
+        w = self.weight.to(x.dtype)
+        # out_t = sum_i w[:, i] * x_{t-i}; full[:, history - i + t] is x_{t-i}.
+        out = x
+        for i in range(self.WIDTH):
+            out = out + w[:, i] * full[:, history - i:history - i + t]
+        return out
 
 
 class BridgeCrossAttention(nn.Module):
@@ -577,6 +638,14 @@ class TransformerBlock(nn.Module):
         )
         self.norm_ffn = RMSNorm(d_model, eps)
         self.ffn = SwiGLU(d_model, d_ff)
+        #: Canon-A (before attention) and Canon-C (before the MLP); see
+        #: CanonConv. None unless ``enable_canon`` was called.
+        self.canon_a: Optional[CanonConv] = None
+        self.canon_c: Optional[CanonConv] = None
+
+    def enable_canon(self, d_model: int) -> None:
+        self.canon_a = CanonConv(d_model)
+        self.canon_c = CanonConv(d_model)
 
     def forward(
         self,
@@ -586,5 +655,11 @@ class TransformerBlock(nn.Module):
         cache: Optional[dict] = None,
         cache_key: Optional[tuple] = None,
     ) -> torch.Tensor:
-        x = x + self.attn(self.norm_attn(x), positions, keep, cache, cache_key)
-        return x + self.ffn(self.norm_ffn(x))
+        a = self.norm_attn(x)
+        if self.canon_a is not None:
+            a = self.canon_a(a, cache, None if cache_key is None else (*cache_key, "canon_a"))
+        x = x + self.attn(a, positions, keep, cache, cache_key)
+        c = self.norm_ffn(x)
+        if self.canon_c is not None:
+            c = self.canon_c(c, cache, None if cache_key is None else (*cache_key, "canon_c"))
+        return x + self.ffn(c)

@@ -422,7 +422,8 @@ PRESETS: dict[str, Preset] = _presets()
 
 #: Training-state bytes per parameter: fp32 weights and gradients (8) plus the
 #: optimizer's state. Activations come on top and depend on micro-batch.
-STATE_BYTES = {"eager_adamw": 16.0, "adamw": 16.0, "adamw8": 10.03, "muon": 12.0}
+STATE_BYTES = {"eager_adamw": 16.0, "adamw": 16.0, "adamw8": 10.03, "muon": 12.0,
+               "muon_pe": 12.0, "normuon": 12.0}
 
 
 def state_gb(preset: Preset) -> float:

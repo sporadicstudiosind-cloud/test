@@ -26,7 +26,8 @@ from ..config import IridiumConfig
 from .control_core import ControlCore
 from .layers import causal_keep
 from .rope import RotaryEmbedding
-from .router import MacroRouter, RoutingDecision, geometric_prior, ponder_kl, stopping_distribution
+from .router import (MacroRouter, RoutingDecision, geometric_prior, global_ponder_kl, ponder_kl,
+                     stopping_distribution)
 from .superstack import SuperstackBank
 
 
@@ -443,7 +444,8 @@ class Iridium1(nn.Module):
         prior = geometric_prior(
             ran, self.cfg.router.ponder_prior_p_stop, h.device, loop_p.dtype
         )
-        stats["loop_kl"] = (ponder_kl(loop_p, prior, valid=batch.valid)
+        kl_fn = global_ponder_kl if self.cfg.router.ponder_global else ponder_kl
+        stats["loop_kl"] = (kl_fn(loop_p, prior, valid=batch.valid)
                            if ran > 1 else h.new_zeros(()))
         stats.setdefault("halted_at", ran)
 

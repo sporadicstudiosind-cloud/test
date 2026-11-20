@@ -298,6 +298,29 @@ def geometric_prior(
     return prior
 
 
+def global_ponder_kl(p: torch.Tensor, prior: torch.Tensor,
+                     valid: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """``KL(mean_tokens p || prior)``: the prior on the *batch-average* exit
+    distribution instead of on every token's.
+
+    A per-token KL pulls every token toward the same depth profile, so easy
+    and hard tokens cannot differ; on 160M looped models it made exits at
+    depth one almost vanish ("Enabling Dynamic Computation in Looped LMs",
+    arXiv 2610.09013, which reports far more depth variation with the global
+    form). The global form constrains only the average compute and leaves the
+    per-token allocation to the task loss. Single-source evidence; opt-in."""
+    p = (p if p.dtype == torch.float64 else p.float())
+    flat = p.reshape(-1, p.shape[-1])
+    if valid is not None:
+        w = valid.reshape(-1).to(flat.dtype)
+        mean = (flat * w[:, None]).sum(0) / w.sum().clamp_min(1.0)
+    else:
+        mean = flat.mean(0)
+    mean = mean.clamp_min(1e-9)
+    q = prior.clamp_min(1e-9)
+    return (mean * (mean.log() - q.log())).sum()
+
+
 def ponder_kl(p: torch.Tensor, prior: torch.Tensor, dim: int = -1,
               valid: Optional[torch.Tensor] = None) -> torch.Tensor:
     """``KL(p || prior)`` averaged over everything but ``dim``; with ``valid``

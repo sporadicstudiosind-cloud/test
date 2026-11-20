@@ -125,8 +125,39 @@ def _native_bf16(device) -> bool:
     return torch.cuda.get_device_capability(device)[0] >= 8
 
 
+#: Polar Express (Amsel et al., arXiv 2505.16932, appendix A): a different
+#: odd quintic for each iteration, each minimax-optimal for the singular-value
+#: range left by the one before, instead of one fixed polynomial. With the
+#: same five matrix products, singular values from 1e-3 to 1 land in about
+#: [0.85, 1.12], against [0.47, 1.20] for the fixed coefficients (checked
+#: numerically in tests/unit/test_muon_variants.py). Iterations past the list
+#: reuse its last entry. Each is applied to x / 1.01, the paper's safety
+#: margin for rounding.
+POLAR_EXPRESS = (
+    (8.28721201814563, -23.595886519098837, 17.300387312530933),
+    (4.107059111542203, -2.9478499167379106, 0.5448431082926601),
+    (3.9486908534822946, -2.908902115962949, 0.5518191394370137),
+    (3.3184196573706015, -2.488488024314874, 0.51004894012372),
+    (2.300652019954817, -1.6689039845747493, 0.4188073119525673),
+    (1.891301407787398, -1.2679958271945868, 0.37680408948524835),
+    (1.8750014808534479, -1.2500016453999487, 0.3750001645474248),
+    (1.875, -1.25, 0.375),
+)
+_PE_SAFETY = 1.01
+
+
+def _quintic_coefficients(kind: str, steps: int):
+    if kind == "jordan":
+        return [(3.4445, -4.7750, 2.0315)] * steps
+    if kind == "polar_express":
+        table = [POLAR_EXPRESS[min(i, len(POLAR_EXPRESS) - 1)] for i in range(steps)]
+        s = _PE_SAFETY
+        return [(a / s, b / s ** 3, c / s ** 5) for a, b, c in table]
+    raise ValueError(f"unknown orthogonalisation coefficients {kind!r}")
+
+
 def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5,
-                                eps: float = 1e-7) -> torch.Tensor:
+                                eps: float = 1e-7, coefficients: str = "jordan") -> torch.Tensor:
     """Orthogonalize a 2-D matrix via the quintic Newton-Schulz iteration.
 
     Returns something close to ``U @ V.T`` where ``G = U @ S @ V.T`` is the
@@ -154,14 +185,13 @@ def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5,
     if G.ndim != 2:
         raise ValueError("zeropower_via_newtonschulz5 expects a 2-D matrix; "
                          "flatten or route higher-rank tensors to the AdamW path first")
-    a, b, c = 3.4445, -4.7750, 2.0315
     work_dtype = torch.bfloat16 if _native_bf16(G.device) else torch.float32
     X = G.to(work_dtype)
     transposed = X.size(0) > X.size(1)
     if transposed:
         X = X.T
     X = X / (X.norm() + eps)
-    for _ in range(steps):
+    for a, b, c in _quintic_coefficients(coefficients, steps):
         A = X @ X.T
         B = b * A + c * (A @ A)
         X = a * X + B @ X
@@ -171,11 +201,24 @@ def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5,
 
 
 def _muon_update(grad: torch.Tensor, momentum_buffer: torch.Tensor, beta: float,
-                 ns_steps: int, nesterov: bool) -> torch.Tensor:
+                 ns_steps: int, nesterov: bool, coefficients: str = "jordan") -> torch.Tensor:
     """Nesterov momentum, then orthogonalize. Mutates ``momentum_buffer`` in place."""
     momentum_buffer.lerp_(grad, 1 - beta)
     update = grad.lerp(momentum_buffer, beta) if nesterov else momentum_buffer
-    return zeropower_via_newtonschulz5(update, steps=ns_steps)
+    return zeropower_via_newtonschulz5(update, steps=ns_steps, coefficients=coefficients)
+
+
+def _row_normalise(update: torch.Tensor, row_sq: torch.Tensor, beta2: float,
+                   eps: float = 1e-8) -> torch.Tensor:
+    """NorMuon-style (Li et al., arXiv 2510.05491): divide each output row of
+    the orthogonalised update by a running RMS of that row, so no neuron's
+    update is systematically larger than another's, then restore the
+    update's overall RMS so Moonshot's scale (and the AdamW learning rate it
+    matches) still applies. Mutates ``row_sq`` (one float per row)."""
+    row_sq.mul_(beta2).add_(update.float().pow(2).mean(dim=1), alpha=1 - beta2)
+    normed = update / (row_sq.sqrt().unsqueeze(1) + eps).to(update.dtype)
+    scale = update.norm() / normed.norm().clamp_min(eps)
+    return normed * scale
 
 
 class Muon:
@@ -202,7 +245,8 @@ class Muon:
 
     def __init__(self, param_groups, lr: float = 3e-4, weight_decay: float = 0.01,
                 momentum: float = 0.95, nesterov: bool = True, ns_steps: int = 5,
-                adamw_betas: tuple[float, float] = (0.9, 0.95), adamw_eps: float = 1e-8):
+                adamw_betas: tuple[float, float] = (0.9, 0.95), adamw_eps: float = 1e-8,
+                coefficients: str = "jordan", row_norm: bool = False, row_beta2: float = 0.95):
         if lr < 0 or weight_decay < 0 or adamw_eps <= 0:
             raise ValueError("invalid Muon parameters")
         if not 0 <= momentum < 1:
@@ -240,6 +284,10 @@ class Muon:
                         "through the adamw path instead (use_muon=False)")
         self.nesterov = nesterov
         self.ns_steps = ns_steps
+        _quintic_coefficients(coefficients, 1)          # validate the name now
+        self.coefficients = coefficients
+        self.row_norm = row_norm
+        self.row_beta2 = row_beta2
         self.adamw_betas = adamw_betas
         self.adamw_eps = adamw_eps
         self.state: dict = {}
@@ -267,6 +315,9 @@ class Muon:
                     continue
                 if group['use_muon']:
                     self.state[p] = dict(momentum_buffer=torch.zeros_like(p))
+                    if self.row_norm:
+                        self.state[p]['row_sq'] = torch.zeros(p.shape[0], device=p.device,
+                                                              dtype=torch.float32)
                 else:
                     self.state[p] = dict(step=0, exp_avg=torch.zeros_like(p),
                                          exp_avg_sq=torch.zeros_like(p))
@@ -283,7 +334,10 @@ class Muon:
         lr, wd, momentum = group['lr'], group['weight_decay'], group['momentum']
         for p in live:
             buf = self.state[p]['momentum_buffer']
-            update = _muon_update(p.grad, buf, momentum, self.ns_steps, self.nesterov)
+            update = _muon_update(p.grad, buf, momentum, self.ns_steps, self.nesterov,
+                                  self.coefficients)
+            if self.row_norm:
+                update = _row_normalise(update, self.state[p]['row_sq'], self.row_beta2)
             m, n = p.shape
             # Moonlight eq. 4: 0.2 * sqrt(max(m, n)) cancels the shape-dependent
             # RMS of Lemma 1 and lands Muon's update RMS in AdamW's ~0.2-0.4

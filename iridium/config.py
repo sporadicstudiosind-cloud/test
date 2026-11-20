@@ -96,6 +96,8 @@ def _validate_block_options(c, label: str) -> None:
         raise ConfigError("window, ranks and conv width must be positive")
     if c.mla_rope_dim % 2 or c.mla_q_rank < 0 or c.ffn_dynamic_rank < 0:
         raise ConfigError("mla_rope_dim must be even; ranks must be nonnegative")
+    if getattr(c, "attn_gate", "") not in ("", "head", "elem"):
+        raise ConfigError(f"attn_gate must be '', 'head' or 'elem', got {c.attn_gate!r}")
 
 
 class _BlockAccounting:
@@ -116,7 +118,8 @@ class _BlockAccounting:
     def attention_params(self, kind: str) -> int:
         d, h, dh = self.d_model, self.n_query_heads, self.d_head
         if kind in ("global", "local"):
-            return 2 * d * d + 2 * d * self.d_kv
+            gate = {"": 0, "head": d * h, "elem": d * d}[getattr(self, "attn_gate", "")]
+            return 2 * d * d + 2 * d * self.d_kv + gate
         if kind == "mla":
             kvr, qr, rr = self.mla_kv_rank, self.mla_q_rank, self.mla_rope_dim
             q = (d * qr + qr + qr * h * dh + qr * h * rr) if qr else (d * h * dh + d * h * rr)
@@ -139,7 +142,8 @@ class _BlockAccounting:
         return one if self.block_kind == "parallel" else 2 * one
 
     def layer_params(self, kind: str) -> int:
-        return self.attention_params(kind) + self.ffn_params() + self.norm_params()
+        canon = 2 * 4 * self.d_model if getattr(self, "canon", False) else 0
+        return self.attention_params(kind) + self.ffn_params() + self.norm_params() + canon
 
     @property
     def params_per_layer(self) -> int:
@@ -264,9 +268,20 @@ class CoreConfig(_BlockAccounting):
     hyper_streams: int = 1
     hyper_dynamic: bool = True
     hyper_sinkhorn_iters: int = 20
+    #: Gated attention (Qiu et al., NeurIPS 2025): the attention output is
+    #: multiplied by sigmoid(x W) before ``wo``. "head" learns one gate per
+    #: head (d * heads weights), "elem" one per channel (d * d); "" is off.
+    attn_gate: str = ""
+    #: Canon layers A and C (Allen-Zhu, Physics of LMs 4.1): a residual causal
+    #: depthwise convolution over the last four positions after each block
+    #: norm. Core only: the superstacks see routed subsequences, where "the
+    #: previous token" is not the previous position.
+    canon: bool = False
 
     def __post_init__(self) -> None:
         _validate_block_options(self, "core")
+        if self.canon and self.block_kind != "sequential":
+            raise ConfigError("canon layers are implemented for sequential blocks only")
         if self.hyper_streams < 1 or self.hyper_sinkhorn_iters < 1:
             raise ConfigError("hyper_streams and hyper_sinkhorn_iters must be positive")
         if self.n_layers < 2:
@@ -357,6 +372,8 @@ class SuperstackConfig(_BlockAccounting):
     norm_kind: str = "rms"
     block_kind: str = "sequential"
     ffn_dynamic_rank: int = 0
+    #: As CoreConfig.attn_gate.
+    attn_gate: str = ""
 
     def __post_init__(self) -> None:
         _validate_block_options(self, "superstack")
@@ -493,6 +510,9 @@ class RouterConfig:
     loop_entry: int = 0            # core layer index re-entered on a ponder loop
     ponder_prior_p_stop: float = 0.4
     ponder_beta: float = 1e-2
+    #: Apply the ponder prior to the batch-average exit distribution rather
+    #: than per token (router.global_ponder_kl). Off keeps the original.
+    ponder_global: bool = False
     depth_prior_p_stop: float = 0.25
     depth_beta: float = 1e-2
     #: Specialist curriculum, applied per training window (never at inference).

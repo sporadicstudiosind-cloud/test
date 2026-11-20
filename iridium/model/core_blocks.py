@@ -108,6 +108,11 @@ def build_block(cfg, rope: RotaryEmbedding, index: int, eps: Optional[float] = N
         # little init time on non-default configs only.
         block.attn = _attention(cfg, kind, rope)
         block.ffn = _ffn(cfg)
+    gate = getattr(cfg, "attn_gate", "")
+    if gate and kind in ("global", "local"):
+        block.attn.enable_gate(gate, cfg.d_model)
+    if getattr(cfg, "canon", False):
+        block.enable_canon(cfg.d_model)
     return block
 
 

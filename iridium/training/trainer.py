@@ -37,6 +37,10 @@ class TrainConfig:
     batch_size: int = 8
     lr: float = 3e-4
     min_lr_ratio: float = 0.1
+    #: WSD decay curve: "sqrt" is 1 - sqrt(t) (Hägele et al. 2024), "linear"
+    #: is 1 - t, which with ``min_lr_ratio=0`` is the decay-to-zero schedule
+    #: Bergsma et al. (ICLR 2025, arXiv 2502.15938) found beats decaying to 10%.
+    decay_shape: str = "sqrt"
     warmup: int = 50
     weight_decay: float = 0.01
     grad_clip: float = 1.0
@@ -138,6 +142,16 @@ def warmup_steps(cfg: TrainConfig) -> int:
     return min(max(cfg.warmup, ratio), max(cfg.steps - 1, 0))
 
 
+#: Muon optimizer names: "muon" is Jordan's fixed Newton-Schulz quintic;
+#: "muon_pe" uses Polar Express coefficients; "normuon" adds NorMuon-style
+#: per-row normalisation on top of Polar Express.
+MUON_VARIANTS = {
+    "muon": {},
+    "muon_pe": {"coefficients": "polar_express"},
+    "normuon": {"coefficients": "polar_express", "row_norm": True},
+}
+
+
 def learning_rate(step: int, cfg: TrainConfig) -> float:
     """The configured schedule's rate at ``step``."""
     if cfg.schedule == "cosine":
@@ -156,6 +170,10 @@ def wsd_lr(step: int, cfg: TrainConfig) -> float:
         return cfg.lr
     t = min((step - decay_start) / max(cfg.steps - decay_start, 1), 1.0)
     floor = cfg.lr * cfg.min_lr_ratio
+    if cfg.decay_shape == "linear":
+        return floor + (cfg.lr - floor) * (1.0 - t)
+    if cfg.decay_shape != "sqrt":
+        raise ValueError(f"decay_shape must be sqrt or linear, got {cfg.decay_shape!r}")
     return floor + (cfg.lr - floor) * (1.0 - math.sqrt(t))
 
 
@@ -349,7 +367,7 @@ class Trainer:
             raise ValueError("schedule must be cosine or wsd, decay_ratio in (0, 1]")
         if not 0.0 <= cfg.ema_decay < 1.0:
             raise ValueError("ema_decay must lie in [0, 1)")
-        if cfg.optimizer == "muon":
+        if cfg.optimizer in MUON_VARIANTS:
             # Muon is defined for hidden matrices only; embeddings, the output
             # head, norms and biases go to its internal AdamW path. The split
             # is by module type, so it needs the model, not a parameter list.
@@ -368,9 +386,10 @@ class Trainer:
             optimizer_params = [p for p in model.parameters() if p.requires_grad]
             self.decayed_params = sum(p.numel() for p in optimizer_params)
             self.undecayed_params = 0
-        if cfg.optimizer == "muon":
+        if cfg.optimizer in MUON_VARIANTS:
             from .muon import Muon
-            self.optimizer = Muon(optimizer_params, lr=cfg.lr, weight_decay=cfg.weight_decay)
+            self.optimizer = Muon(optimizer_params, lr=cfg.lr, weight_decay=cfg.weight_decay,
+                                  **MUON_VARIANTS[cfg.optimizer])
         else:
             self.optimizer = build_optimizer(
                 optimizer_params, kind=cfg.optimizer, lr=cfg.lr,
