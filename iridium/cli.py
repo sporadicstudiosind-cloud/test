@@ -386,6 +386,26 @@ def cmd_battery(args) -> int:
     return 0
 
 
+def cmd_cloze(args) -> int:
+    """HellaSwag, ARC, OpenBookQA and PIQA as cloze likelihoods (iridium.evaluation.cloze)."""
+    from .evaluation.cloze import TASKS, run_cloze
+    from .training.tokenizer_bridge import tokenizer_from_manifest
+
+    tasks = [t.strip() for t in args.tasks.split(",") if t.strip()]
+    unknown = [t for t in tasks if t not in TASKS]
+    if unknown:
+        print(f"cloze: unknown task(s) {', '.join(unknown)}; choose from {', '.join(TASKS)}",
+              file=sys.stderr)
+        return 2
+    model, manifest = _load_chat_checkpoint(Path(args.checkpoint).expanduser().resolve(), args.device)
+    results = run_cloze(model, tokenizer_from_manifest(manifest), tasks, limit=args.limit or None,
+                        n_loops=args.loops)
+    if args.out:
+        Path(args.out).write_text(json.dumps([r.as_dict() for r in results], indent=2),
+                                  encoding="utf-8")
+    return 0
+
+
 def cmd_specialists(args) -> int:
     """Check that each stack is the best place for its own subject."""
     from .evaluation.specialists import describe, held_out_batches, specialist_matrix
@@ -554,6 +574,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", default="cpu")
     p.add_argument("--out", default=None, help="also write the matrix as JSON")
     p.set_defaults(func=cmd_specialists)
+
+    p = sub.add_parser("cloze", help="HellaSwag, ARC, OpenBookQA and PIQA as cloze likelihoods")
+    p.add_argument("--checkpoint", required=True)
+    p.add_argument("--tasks", default="hellaswag,arc_easy,arc_challenge,openbookqa,piqa")
+    p.add_argument("--limit", type=int, default=500, help="items per task (0 = all)")
+    p.add_argument("--loops", type=int, default=1, help="ponder loops to score with")
+    p.add_argument("--device", default="cpu")
+    p.add_argument("--out", default=None, help="also write the scores as JSON")
+    p.set_defaults(func=cmd_cloze)
 
     p = sub.add_parser("export", help="strip a training checkpoint to inference weights")
     p.add_argument("--checkpoint", required=True)

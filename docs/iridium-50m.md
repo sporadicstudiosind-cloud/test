@@ -152,6 +152,15 @@ python -m iridium train --preset iridium-50m --data data --resume auto   # uses 
 python -m iridium battery --checkpoint runs/iridium-50m/iridium-50m-final.pt
 ```
 
+## Benchmarks that give signal at this size
+
+Asked to pick a letter, models this small answer at chance. Scored by which answer
+they find most likely, they do not. `python -m iridium cloze --checkpoint X` runs
+HellaSwag, ARC-Easy, ARC-Challenge, OpenBookQA and PIQA that way (OLMES's
+formulation; `acc_norm` is the headline number). Chance is 25% (PIQA 50%). For scale,
+SmolLM2-135M reports HellaSwag ~42 after 2T tokens. An untrained model scores
+chance, which the test suite checks.
+
 ## The next run: `iridium-50m-next`
 
 The live run keeps training as it is. The next one starts **fresh**: it adds Canon

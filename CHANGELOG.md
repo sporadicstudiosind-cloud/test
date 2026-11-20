@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **`iridium cloze`**: HellaSwag, ARC-Easy, ARC-Challenge, OpenBookQA and PIQA scored as
+  cloze likelihoods (OLMES's small-model formulation), reporting raw, per-byte and
+  unconditional-normalised accuracy, with each loop scored as training scores it.
+  Multiple-choice letter prompts sit at chance below a few hundred million parameters;
+  these give signal. Over-long answers are skipped and counted, never truncated.
 - **iridium-50m-next now trains with NorMuon at lr 3e-3 and Canon layers in the core.**
   A 2M-parameter CPU ablation (docs/iridium-50m.md) found the AdamW-matched learning
   rate under-drove Muon (it lost to AdamW at 3e-3 and won by ~0.15 at matched higher
