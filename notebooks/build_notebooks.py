@@ -570,7 +570,7 @@ def build_kaggle_50m() -> list[dict]:
             print('NOTE: one GPU. Settings -> Accelerator -> GPU T4 x2 trains about twice as fast.')
 
     # 'iridium-50m' is the run in progress. Start the NEXT run fresh with
-    # 'iridium-50m-next' (Muon, packing, decay-phase mix): it reads the same
+    # 'iridium-50m-next' (NorMuon, Canon layers, packing, decay-phase mix): it reads the same
     # prepared data, but must not resume iridium-50m's checkpoints.
     PRESET = 'iridium-50m'
     preset = get_preset(PRESET)

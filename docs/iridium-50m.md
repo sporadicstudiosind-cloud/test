@@ -154,23 +154,26 @@ python -m iridium battery --checkpoint runs/iridium-50m/iridium-50m-final.pt
 
 ## The next run: `iridium-50m-next`
 
-The live run keeps training as it is. The next one starts **fresh** (AdamW and Muon
-optimizer states do not convert, so it must not resume iridium-50m's checkpoints) and
+The live run keeps training as it is. The next one starts **fresh**: it adds Canon
+layers and switches optimizer, so iridium-50m's checkpoints do not load into it. It
 reads the same prepared shards. In the Kaggle notebook, set `PRESET = 'iridium-50m-next'`.
 
 | Change | Why | Evidence and caveat |
 |---|---|---|
-| Muon on hidden matrices, RMS-matched to AdamW, weight decay 0.1 | fewer tokens to the same loss | ~1.4x vs a *tuned* AdamW at 130M, shrinking to 1.1x at 1.2B (Wen et al., ICLR 2026, arXiv 2509.02046); Moonshot's RMS matching and decay (arXiv 2502.16982). Not measured at 50M or with looping. |
+| NorMuon on hidden matrices (Muon + Polar Express coefficients + per-neuron normalisation), weight decay 0.1 | fewer tokens to the same loss | ~1.4x vs a *tuned* AdamW at 130M, 1.1x at 1.2B (Wen et al., ICLR 2026); NorMuon ~6% fewer steps than Muon at 124M (arXiv 2510.05491). In the 2M ablation below, Muon beat AdamW by ~0.15 loss at matched learning rates and NorMuon beat Muon. |
+| Peak learning rate 3e-3 (was 1.5e-3) | both optimizers were under-driven | In the ablation, AdamW improved from 1.5e-3 to 1.2e-2 and Muon to at least 2.4e-2. Toy-scale optima overshoot; 3e-3 is a hedge. Sweep it. |
+| Canon layers A and C in the core | cheap local mixing (Physics of LMs 4.1) | Ablation: 1.081 vs 1.315 over two seeds, for ~12k parameters at 50M; byte-level text flatters it. |
 | Same-subject sequence packing | ~17% of tokens were padding | Packing is standard (Krell et al., arXiv 2107.02027). No document mask: items in a row can attend to earlier items, as in GPT-style pretraining. Rows keep one subject so subject forcing still holds. |
 | Decay-phase mixture (`_IRIDIUM50_ANNEAL`) | finish on the most targeted data | OLMo 2's Dolmino mid-training (arXiv 2501.00656), Llama 3, SmolLM2 (arXiv 2502.02737). Magnitude at 50M unknown; keep watching the general-text bpb for forgetting. |
 
-**Learning rate.** 1.5e-3 was chosen for AdamW and was never swept. Wen et al. found an
-untuned learning rate alone can cost up to 2x, more than the optimizer choice. A sweep
-that fits one Kaggle session: three short runs with the full schedule compressed into
-600 steps, then compare the last `val_*_bpb`:
+**Learning rate.** Nothing has swept it at 50M. Wen et al. found an untuned learning
+rate alone can cost up to 2x, more than the optimizer choice, and the ablation below
+agrees: at 3e-3 Muon *lost* to AdamW, at 1.2e-2 it won by 0.15. A sweep that fits one
+Kaggle session: three short runs with the full schedule compressed into 600 steps, then
+compare the last `val_*_bpb`:
 
 ```
-for LR in 1e-3 2e-3 4e-3; do
+for LR in 1.5e-3 3e-3 6e-3; do
   python -m iridium train --preset iridium-50m-next --steps 600 --rounds 3 \
       --lr $LR --out sweep/lr$LR --data /path/to/data
 done

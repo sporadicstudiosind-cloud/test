@@ -267,28 +267,39 @@ _IRIDIUM50_ANNEAL = {
 def _iridium_50m_next(base: Preset) -> Preset:
     """iridium-50m with the changes kept off the run in progress.
 
-    The same model, data and token budget; what changes is how it trains:
+    The same data and token budget; what changes:
 
-    * **Muon** for the hidden matrices (AdamW for embeddings, heads, norms
-      and routers), with Moonshot's RMS matching so the AdamW learning rate
-      carries over, and their weight decay of 0.1. Wen et al. (ICLR 2026)
-      measured about 1.4x fewer tokens than a tuned AdamW at 130M.
+    * **NorMuon** for the hidden matrices: Muon with Polar Express
+      coefficients and per-neuron normalisation (AdamW for embeddings, heads,
+      norms and routers), weight decay 0.1. On the 2M-parameter CPU ablation
+      (docs/iridium-50m.md) it beat plain Muon at every learning rate tried,
+      and Muon beat AdamW by ~0.15 loss at matched rates; Wen et al. (ICLR
+      2026) measured ~1.4x fewer tokens than tuned AdamW at 130M.
+    * **A higher peak learning rate, 3e-3** (iridium-50m's AdamW rate was
+      1.5e-3). In the ablation both optimizers kept improving well past the
+      AdamW default, Muon more so. Toy-scale optima overshoot what a 76k-step
+      run wants, so this is a hedge, not a measurement: sweep it.
+    * **Canon layers** in the core (residual causal width-4 convolution after
+      each block norm, ~12k parameters): two seeds at 2M parameters, loss
+      1.081 vs 1.315 (byte-level text, where local mixing matters most; expect
+      less on 16k-token text). Cached decoding is exact.
     * **Packing**: short generated items of one subject share a row instead
       of being padded, which wasted about 17% of each step.
     * **A decay-phase mixture** (``_IRIDIUM50_ANNEAL``) over the final 20%.
 
-    It reads iridium-50m's prepared shards. Its optimizer state does not
-    load into an AdamW run or the reverse, so start it fresh; do not point
-    it at iridium-50m's checkpoints.
+    It reads iridium-50m's prepared shards. It is a different architecture
+    (Canon) and optimizer, so start it fresh: iridium-50m's checkpoints do not
+    load into it.
     """
+    cfg = replace(base.config, core=replace(base.config.core, canon=True))
     return replace(
-        base, name="iridium-50m-next", optimizer="muon", weight_decay=0.1,
-        pack=True, anneal_mixture=dict(_IRIDIUM50_ANNEAL), data_from=base.name,
+        base, name="iridium-50m-next", config=cfg, optimizer="normuon", weight_decay=0.1,
+        lr=3e-3, pack=True, anneal_mixture=dict(_IRIDIUM50_ANNEAL), data_from=base.name,
         status="verified in theory",
-        notes="iridium-50m's recipe with Muon, packing and a decay-phase mix. Untimed: "
-              "packing makes rows longer, so tok/s should rise about a sixth while "
-              "s/step may not. 1.5e-3 is iridium-50m's AdamW rate, never swept for "
-              "Muon; see docs/iridium-50m.md for a one-session sweep.")
+        notes="iridium-50m's data with NorMuon, Canon layers, packing and a decay-phase "
+              "mix. Untimed: packing makes rows longer, so tok/s should rise about a sixth "
+              "while s/step may not. lr 3e-3 is a hedge from a 2M-parameter ablation; "
+              "sweep it (docs/iridium-50m.md).")
 
 
 def _iridium_50m_controls(routed: Preset) -> dict[str, Preset]:
