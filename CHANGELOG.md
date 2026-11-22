@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Superstacks skip rows with no routed tokens** (`SuperstackBank.compact_rows`, exact; float64
+  test compares forward and gradients). With subject-forced routing every stack used to run the
+  full `[micro-batch, 1024]` including empty rows; saved activations for iridium-50m-next at
+  4x1024 fell from 3.12 to 1.75 GiB (CPU measurement, ~7 GiB at micro-batch 16), and stack
+  compute falls by a similar share.
+- **OOM no longer halves the micro-batch for the rest of the run.** The trainer first retries the
+  update with each micro-batch in more forward passes (same data, same gradient sum), and drops
+  back after 200 quiet steps; halving remains the last resort.
 - **Multi-GPU ranks now exit when their launcher dies.** Interrupting the notebook's
   train cell SIGKILLs the launcher, which left both rank processes training as orphans
   (and spending GPU quota). Ranks set `PR_SET_PDEATHSIG` on Linux; checked by killing a

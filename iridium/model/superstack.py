@@ -353,6 +353,9 @@ class Superstack(nn.Module):
 class SuperstackBank(nn.Module):
     """All stacks, plus the dispatch and gather that connect them to the core."""
 
+    #: Drop rows with no routed tokens before a stack runs (exact; see forward).
+    compact_rows: bool = True
+
     def __init__(self, cfg: IridiumConfig, rope: RotaryEmbedding) -> None:
         super().__init__()
         self.cfg = cfg
@@ -423,11 +426,29 @@ class SuperstackBank(nn.Module):
                 if use_depth_cap
                 else None
             )
-            x = packed.hidden if self.entry is None else self.entry(packed.hidden)
+            # Rows with no token routed here are pure padding: drop them before
+            # the stack runs. With subject-forced routing and solo windows,
+            # often a third or more of the rows are empty for any one stack,
+            # and every layer would otherwise compute (and keep for backward)
+            # all of them. Exact: padded slots never reach the output. Off when
+            # a KV cache is live (its rows must stay aligned with the stream)
+            # or grids are routed (they carry stream row indices).
+            rows = None
+            row_hidden, row_positions, row_valid = packed.hidden, packed.positions, packed.valid
+            if cache is None and not grids and self.compact_rows:
+                used = packed.valid.any(dim=1)
+                if not bool(used.all()):
+                    rows = used.nonzero(as_tuple=True)[0]
+                    row_hidden, row_positions, row_valid = (
+                        packed.hidden[rows], packed.positions[rows], packed.valid[rows])
+                    focus_packed = focus_packed[rows]
+                    depth_cap = depth_cap[rows] if depth_cap is not None else None
+                    local_row = used.long().cumsum(0) - 1
+            x = row_hidden if self.entry is None else self.entry(row_hidden)
             packed = PackedBatch(
                 hidden=x,
-                positions=packed.positions,
-                valid=packed.valid,
+                positions=row_positions,
+                valid=row_valid,
                 batch_index=packed.batch_index,
                 token_index=packed.token_index,
                 slot_index=packed.slot_index,
@@ -444,6 +465,10 @@ class SuperstackBank(nn.Module):
                     core_states.to(stack_device) if core_states is not None else None,
                     core_positions.to(stack_device) if core_positions is not None else None)
             local_core, local_positions = bridge_by_device[stack_device]
+            if rows is not None and local_core is not None:
+                rows_dev = rows.to(stack_device)
+                local_core = local_core[rows_dev]
+                local_positions = local_positions[rows_dev] if local_positions is not None else None
             local = replace(packed, **{name: value.to(stack_device)
                             for name, value in vars(packed).items() if torch.is_tensor(value)})
             result = stack(
@@ -462,7 +487,8 @@ class SuperstackBank(nn.Module):
             result.stopping = result.stopping.to(hidden.device)
             result.expected_depth = result.expected_depth.to(hidden.device)
             y = result.hidden if self.exit is None else self.exit(result.hidden)
-            contribution = y[packed.batch_index, packed.slot_index]
+            source_row = packed.batch_index if rows is None else local_row[packed.batch_index]
+            contribution = y[source_row, packed.slot_index]
             out.index_put_(
                 (packed.batch_index, packed.token_index),
                 (contribution * packed.weight.unsqueeze(-1)).to(out.dtype),

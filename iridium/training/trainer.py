@@ -4,11 +4,12 @@ Nothing exotic. What it does insist on:
 
 * every run writes a **manifest** — config, mixture, seeds, loss weights, git
   revision — so a number can be traced to the run that produced it;
-* evaluation reports **graded accuracy** from free-running generation, not only
-  teacher-forced loss, because the two come apart and only one of them is the
-  claim anyone cares about;
-* router diagnostics are logged every step, because a collapsed router shows up
-  in the entropy long before it shows up in the loss.
+* evaluation should report **graded accuracy** from free-running generation, not
+  only teacher-forced loss, because the two come apart and only one of them is the
+  claim anyone cares about (the trainer's own held-out evaluator reports loss and
+  bits per byte; grading lives in ``iridium.evaluation``);
+* router diagnostics are logged at every ``log_every`` steps, because a collapsed
+  router shows up in the entropy long before it shows up in the loss.
 """
 
 from __future__ import annotations
@@ -56,8 +57,9 @@ class TrainConfig:
     #: is the cheapest way to train at a large batch on a small card: the
     #: gradient is identical, only the peak activation memory differs.
     accumulate: int = 1
-    #: "adamw" | "adamw_8bit" | "paged_adamw" | "adafactor" | "sgd".
-    #: ``paged_adamw`` keeps the moments in host RAM.
+    #: "eager_adamw" | "adamw8" | "adamw" | "paged_adamw" | "adamw_8bit" |
+    #: "adafactor" | "sgd" (see ``runtime.memory.build_optimizer``), or a Muon
+    #: variant from ``MUON_VARIANTS``. ``paged_adamw`` keeps the moments in host RAM.
     optimizer: str = "eager_adamw"
     devices: tuple[str, ...] = ()  # empty: use the supplied primary device
     precision: str = "auto"  # auto | fp32 | fp16 | bf16
@@ -65,7 +67,8 @@ class TrainConfig:
     #: Pack short items of one subject into shared rows instead of padding
     #: each to the longest in its batch (``BatchLoader._packed_batches``).
     pack: bool = False
-    #: On CUDA OOM, halve the micro-batch and retry rather than losing the run.
+    #: On CUDA OOM, retry the update rather than losing the run: first with each
+    #: micro-batch split into more forward passes, then with a halved micro-batch.
     oom_retry: bool = True
     #: Split parameters so that weight decay reaches only rank->=2 weights. See
     #: :func:`iridium.runtime.memory.decay_groups` for what each excluded kind of
@@ -204,6 +207,10 @@ def _fsync(path: Path) -> None:
         pass                       # some filesystems refuse fsync on directories
     finally:
         os.close(fd)
+
+
+#: Steps without an OOM before a raised micro-batch split is halved again.
+OOM_SPLIT_DECAY_STEPS = 200
 
 
 class _PeerOutOfMemory(RuntimeError):
@@ -354,6 +361,8 @@ class Trainer:
         #: Training items this rank has drawn over the whole run (checkpointed),
         #: and the count when the current corpus was installed.
         self.items_consumed = 0
+        self._oom_split = 1            # forward passes per micro-batch (raised on OOM)
+        self._oom_quiet_until = 0
         self._corpus_base = 0
         self.corpus_tag: Optional[str] = None
         self.group = None
@@ -499,8 +508,23 @@ class Trainer:
                 exc = sys.exc_info()[1]
                 exc.__traceback__ = None
                 old = self.loader.batch_size
+                if self._oom_split * 2 <= old:
+                    # First answer to an OOM: run each micro-batch in more
+                    # forward passes, keeping the micro-batch (and so the data
+                    # order and the gradient sum) as it is. The split decays
+                    # back after a quiet stretch, so one unlucky step (a long
+                    # packed row, a busy stack) does not cost the whole run
+                    # throughput the way a permanent halving did. Every rank
+                    # sees the same OOM verdict, so splits stay in step.
+                    self._oom_split *= 2
+                    self._oom_quiet_until = step + OOM_SPLIT_DECAY_STEPS
+                    self._release_after_oom()
+                    print(f"[trainer] out of memory: retrying this update with each micro-batch "
+                          f"in {self._oom_split} passes (micro-batch stays {old})", flush=True)
+                    continue
                 effective = old * self.cfg.accumulate
                 new = max(1, old // 2)
+                self._oom_split = 1
                 self.loader.batch_size = new
                 self.cfg = replace(self.cfg, batch_size=new,
                                    accumulate=math.ceil(effective / new))
@@ -525,6 +549,9 @@ class Trainer:
                 print("[trainer] fp16 overflow: reduced loss scale; retry update", flush=True)
                 continue
             overflow_retries = 0
+            if self._oom_split > 1 and step >= self._oom_quiet_until:
+                self._oom_split //= 2
+                self._oom_quiet_until = step + OOM_SPLIT_DECAY_STEPS
             self.completed_steps = step + 1
             mark_tokens += tokens * self.world
             if want_log and primary:
@@ -627,7 +654,8 @@ class Trainer:
             # it, so a rare deep step cannot OOM a batch size chosen for the
             # common case. The gradient is the same sum either way.
             rows = batch.modality.shape[0]
-            pieces = split_batch(batch, min(n_loops, rows)) if n_loops > 1 else [batch]
+            parts = min(rows, n_loops * self._oom_split)
+            pieces = split_batch(batch, parts) if parts > 1 else [batch]
             for piece in pieces:
                 share = piece.modality.shape[0] / rows
                 with torch.autocast(device_type="cuda" if str(self.device).startswith("cuda") else "cpu",
@@ -682,6 +710,17 @@ class Trainer:
         return report, diagnostics, float(norm), updated, tokens
 
     @torch.no_grad()
+    def _release_after_oom(self) -> None:
+        """Free what a failed update held before it is retried."""
+        import gc
+        self._stream.close()
+        self._stream = self._infinite_batches()  # discard old prebuilt groups
+        gc.collect()
+        for device in self.devices:
+            if str(device).startswith("cuda"):
+                with torch.cuda.device(device):
+                    torch.cuda.empty_cache()
+
     def _update_ema(self) -> None:
         d = self.cfg.ema_decay
         for name, value in self.model.state_dict().items():
