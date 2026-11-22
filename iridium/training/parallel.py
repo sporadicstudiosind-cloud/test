@@ -149,6 +149,21 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def _die_with_parent() -> None:
+    """In a rank process (Linux): exit when the launcher dies, however it dies.
+
+    Interrupting a notebook cell kills the launcher with SIGKILL (that is what
+    ``subprocess.run`` does on KeyboardInterrupt), which skips its cleanup; the
+    ranks would otherwise keep training, and spending GPU quota, as orphans.
+    """
+    try:
+        import ctypes
+        import signal
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+
 def launch(argv: Sequence[str], world: int, log_dir: Optional[str | Path] = None,
            python: Optional[str] = None, command: Optional[Sequence[str]] = None) -> int:
     """Run ``python -m iridium <argv>`` once per rank; returns the exit code.
@@ -175,7 +190,8 @@ def launch(argv: Sequence[str], world: int, log_dir: Optional[str | Path] = None
             out = open(Path(log_dir) / f"rank{rank}.log", "a", encoding="utf-8")
             logs.append(out)
         procs.append(subprocess.Popen(cmd, env={**env, "RANK": str(rank), "LOCAL_RANK": str(rank)},
-                                      stdout=out))
+                                      stdout=out,
+                                      preexec_fn=_die_with_parent if sys.platform == "linux" else None))
     code = 0
     try:
         while procs:

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Multi-GPU ranks now exit when their launcher dies.** Interrupting the notebook's
+  train cell SIGKILLs the launcher, which left both rank processes training as orphans
+  (and spending GPU quota). Ranks set `PR_SET_PDEATHSIG` on Linux; checked by killing a
+  launcher stand-in with SIGKILL. First measured iridium-50m speed on Kaggle 2xT4:
+  ~9.8k tok/s for both GPUs together (micro-batch fell back 16 -> 8 on memory), about
+  140 GPU-hours for 5B tokens, not the 15-51 h the preset estimated.
 - **`RouterConfig.curriculum_first_loop_only`** (opt-in): the subject curriculum and
   subject-label loss bind only the first ponder loop, so later loops can route a window
   to a different stack (e.g. maths stack, then code stack). Untested at scale.
