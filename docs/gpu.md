@@ -89,9 +89,11 @@ failure.
 **Training** on those cards (T4, P100) uses fp16 autocast with gradient
 scaling (`TrainConfig.precision = "auto"`). Autocast keeps softmax and the
 losses in fp32, and a step whose gradient is not finite is skipped by the
-scaler instead of applied. chat-34m's recorded run used this path. Pass
-`precision="fp32"` to the trainer if a run's losses turn non-finite; it costs
-speed and memory, not correctness.
+scaler instead of applied. chat-34m's recorded run used this path. A non-finite
+loss stops the run with an error on every precision, and on fp32 a non-finite
+gradient does too. To train in fp32 when a run's losses turn non-finite, set
+`TrainConfig.precision="fp32"`; it costs speed and memory, not correctness. The
+`iridium train` CLI has no flag for it.
 
 ## NVIDIA
 
@@ -102,6 +104,11 @@ python -m iridium.runtime.device        # expect backend: cuda
 
 bf16 needs compute capability 8.0+ (Ampere and newer). A free Colab **T4 is
 Turing (7.5) and has no bf16** — see above for what runs there instead.
+
+**Several cards.** `iridium train` uses every visible GPU by default
+(`--gpus auto`: one process per card, gradients averaged each step; `--gpus 1`
+for one). On Kaggle's two T4s, `iridium-50m` measured about 9.8k tokens/s for
+both cards together. See [`free-tier-training.md`](free-tier-training.md).
 
 ## Google Colab
 

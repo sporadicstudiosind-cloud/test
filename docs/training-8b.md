@@ -33,8 +33,10 @@ of model and optimizer state. Swap is not a training implementation.
 5. Held-out evaluations showing a trained checkpoint beats stated baselines.
 
 Until then the rung is a costed design point, and nothing may claim an 8B
-checkpoint exists. The free-tier path is the presets (`python -m iridium
-presets`), which top out around 110M parameters.
+checkpoint exists. The free-tier path is the presets with a free-tier setting (`python -m iridium
+presets`). The largest of them is `1b`, about 1B parameters, with its own
+estimate of about four days on a free TPU v5e-1. `modern-744m`, `2b` and `4b`
+have no free-tier setting, and `8b` is a rung rather than a preset.
 
 ## TPU support
 

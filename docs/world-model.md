@@ -48,7 +48,7 @@ needs training" below).
 | Module | Owns |
 |---|---|
 | `camera.py` (existing, pre-dates this build) | Pinhole cameras, rays, Plücker embeddings, motion primitives (`move`, `orbit`, `interpolate`, `trajectory`). |
-| `splats.py` (built concurrently by another agent; not covered by this doc's testing) | `GaussianScene`, the differentiable renderer `render`, and `fit`. |
+| `splats.py` (built concurrently by another agent; covered by `tests/unit/test_splats.py`) | `GaussianScene`, the differentiable renderer `render`, and `fit`. |
 | `world_state.py` | `Keyframe`, `WorldState`: persistent scene + keyframe bank, frustum-overlap `retrieve`, `coverage`, coverage-preserving eviction, `fuse`, `save`/`load`. |
 | `rollout.py` | `ActionMap`, `FrameContext`, `Frame`, `RenderOnlyFrameModel`, `WorldRollout` (`step`/`play`/`fly`), `revisit_consistency`. |
 | `tokens.py` | `camera_span`, `anchor_coordinates`, `scene_span` — cameras and scenes as spans the model consumes. |
@@ -206,7 +206,7 @@ error on the same revisit pairs (also tested).
 ### `tokens.py`
 
 ```python
-def camera_span(camera: Camera, patch: int = 8, modality: str = "field",
+def camera_span(camera: Camera, patch: int = 8, modality: str = "camera",
                 supervised: bool = False, meta: Optional[dict] = None) -> Span: ...
 
 def anchor_coordinates(camera: Camera, depth: torch.Tensor, patch: int = 8) -> torch.Tensor:
@@ -244,10 +244,9 @@ input scene and checking the emitted span is bit-identical.
 
 ## Config / integration this module needs from the owner of `config.py`, `codecs/*`, `model/*`
 
-Nothing in `spans.py` was edited, per the build constraints; the two spans
-above use the closest existing modality as a stand-in and need one of the
-following before they can round-trip through `collate()` without a width
-mismatch:
+`spans.py` now defines a `camera` modality, so item 2 below is resolved in code.
+The two spans above still need items 1 and 3 before they can round-trip
+through `collate()` without a width mismatch:
 
 1. **`scene_span`** uses `"geometry"` — the correct modality by name and
    description (`spans.py`: "point / splat features") but the wrong width:
@@ -256,14 +255,11 @@ mismatch:
    raise `point_features` to 14, or add a separate field (e.g.
    `splat_features: int = 14`) if some other caller depends on 10-wide
    "geometry" spans staying 10-wide.
-2. **`camera_span`** defaults to `"field"` purely as a structural
-   placeholder (a per-patch multi-channel signal on a grid, like a physical
-   field) — `CodecConfig.field_channels = 4` is unrelated content
-   (physical-field channels) at the wrong width (Plücker rays are 6-wide).
-   The clean fix is a new `"camera"` modality, width 6/patch, added to
-   `spans.MODALITIES`/`CONTINUOUS`; `camera_span` takes `modality` as a
-   parameter for exactly this reason, so adopting it is a one-line
-   call-site change (`camera_span(cam, modality="camera")`), not a rewrite.
+2. **Done in `spans.py`.** `camera_span` now defaults to the `"camera"`
+   modality, which is conditioning only (`CONDITIONING`, not `CONTINUOUS`). Its
+   width comes from `CodecConfig.camera_features`, which defaults to 0
+   (disabled). A config that uses it sets `camera_features = 6` and
+   `n_modalities >= 10`.
 3. **`anchor_coordinates`** output (`[n, 3]` world `(x, y, z)`) needs a home
    in `codecs/spatial.py`'s M-RoPE distinct from the existing pixel-frame
    `(t, y, x)` axes `Batch.media_coordinates` carries. Recommended: a second

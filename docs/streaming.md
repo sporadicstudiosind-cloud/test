@@ -220,9 +220,8 @@ session.stats                # {"drafted", "accepted", "verify_rounds", "full_de
 
 `StreamingSession` currently requires `model.cfg.controller_mode is False`,
 a single ponder loop, batch size 1, and `model.cfg.memory_slots == 0` --
-exactly what `get_config("tiny")` and `get_config("nano")` already are. See
-the final report for what extending this to `controller_mode` or a
-multi-loop ponder core would need from `iridium1.py`.
+exactly what `get_config("tiny")` and `get_config("nano")` already are. The
+checks in `StreamingSession.__init__` (`iridium/runtime/streaming.py`) enforce them.
 
 ## Continuous perception (`iridium.runtime.live`)
 

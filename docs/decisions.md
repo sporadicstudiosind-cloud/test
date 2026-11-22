@@ -39,7 +39,7 @@ schema. Not yet exercised by a dedicated test — listed in the backlog.
 **Was:** a spacetime Clifford algebra was credited with simultaneous Euclidean, Galilean and
 Lorentz equivariance across an arbitrary mixed transformer.
 **Now:** scalar/vector/tensor channels with unit-aware transforms are the default.
-Constrained Euclidean geometric attention is an experimental block. A Lorentz-equivariant
+Constrained Euclidean geometric attention is specified as an experimental block; no such block is in `iridium/model/` yet. A Lorentz-equivariant
 block is a domain extension with its own metric and tests. A claimed equivariance must hold
 through normalization, attention scores, coordinate features, nonlinearities, pooling, masks
 and decoding.
@@ -108,7 +108,9 @@ isolation.
 **Why:** a sink that has absorbed one workspace's content is that workspace's content.
 **Status:** partially tested — `test_core_reference.py::test_workspace_mask_isolates_concurrent_streams`
 covers attention by perturbation. The non-attention components are backlog items and are
-listed as pending in the invariant table, not as done.
+listed as pending in the invariant table, not as done. Cache release and the absence of shared
+tensor storage between streams are tested in `tests/integration/test_isolation.py`; memory
+retrieval, logging and action handles remain untested.
 
 ### D10 · Learned corrections must be conservative by construction
 **Was:** "a coarse conservative solve plus a learned correction cannot invent mass."
@@ -229,7 +231,7 @@ improvement.
 **Now:** Iridium-1's own gated training and deployment policy, with three separated loops.
 **Why:** a claim about every system everywhere is not a design decision and cannot be
 verified.
-**Status:** specified.
+**Status:** specified. A candidate-research controller exists in `iridium/research/`, without tests.
 
 ### D23 · Published benchmark scores are not Iridium-1 targets
 **Was:** an external agent benchmark score was carried as Iridium-1's expected ceiling and an

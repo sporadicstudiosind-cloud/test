@@ -323,7 +323,7 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
             print(f"round {r + 1}/{rounds} done at step {trainer.completed_steps}: {path}",
                   flush=True)
             if keep_rounds:
-                _prune_rounds(out_dir, keep_rounds)
+                _prune_rounds(out_dir, keep_rounds, protect=Path(path))
         slowest = max(slowest, time.monotonic() - round_started)
         out_of_time = bool(time_budget_hours and r < rounds - 1
                            and time.monotonic() - started + 1.1 * slowest > time_budget_hours * 3600)
@@ -349,11 +349,16 @@ def train_preset(preset: Preset, *, steps: Optional[int] = None, rounds: Optiona
     return final or path
 
 
-def _prune_rounds(out_dir: Path, keep: int) -> None:
+def _prune_rounds(out_dir: Path, keep: int, protect: Optional[Path] = None) -> None:
+    """Keep the ``keep`` highest rounds, and never the checkpoint just written:
+    after resuming from an older round, stale higher-numbered files would
+    otherwise outrank (and delete) the newest one."""
     import re
     rounds = sorted((int(m.group(1)), p) for p in Path(out_dir).glob("*-round*.pt")
                     if (m := re.search(r"-round(\d+)\.pt$", p.name)))
     for _, path in rounds[:-keep]:
+        if protect is not None and path.resolve() == protect.resolve():
+            continue
         path.unlink(missing_ok=True)
 
 
@@ -388,6 +393,7 @@ def held_out_evaluator(shard_dir, cfg, device, batch_size: int, window: int,
         out = {}
         for family, (loader, tokens_per_byte) in loaders.items():
             total, count = 0.0, 0
+            loader.position = 0      # the same held-out windows every time, so evals compare
             for i, (batch, _) in enumerate(loader.batches()):
                 if i >= max_batches:
                     break

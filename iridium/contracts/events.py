@@ -7,6 +7,8 @@ computation, export, and every numeric claim in a report.
 
 from __future__ import annotations
 
+import re
+
 import hashlib
 import json
 from dataclasses import dataclass
@@ -77,6 +79,9 @@ class ExactStore:
         if not uri.startswith("exact://"):
             raise EventError(f"not an exact-store uri: {uri}")
         sha = uri[len("exact://"):]
+        if not re.fullmatch(r"[0-9a-f]{64}", sha):
+            # A digest, never a path: "exact://../../x" must not read outside the store.
+            raise EventError(f"malformed exact-store uri: {uri}")
         path = self.root / f"{sha}.npy"
         if not path.exists():
             raise EventError(f"payload not found: {uri}")

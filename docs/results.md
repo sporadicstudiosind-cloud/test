@@ -1,7 +1,8 @@
 # Measured results — `nano`, phase 1
 
-One run. 34,028,056 parameters, 800 steps, batch 8, 8,000 synthetic items, CPU,
-755 seconds. Checkpoint and manifest in `runs/phase1/`, log in `runs/phase1b.log`.
+One run. 34,028,056 parameters (the `nano` rung now counts 34,035,482 in `iridium ladder`),
+800 steps, batch 8, 8,000 synthetic items, CPU, 755 seconds. Its checkpoint, manifest and log
+(`runs/phase1/`, `runs/phase1b.log`) are not in this repository.
 
 **Headline: the architecture trains, and the model did not learn the tasks.**
 Four of five families sit at or below a baseline that ignores the input

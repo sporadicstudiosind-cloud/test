@@ -16,11 +16,11 @@ quadratic. There is no way to run 1M tokens through an architecture where
 every layer does this, on any hardware this repository's rungs target.
 
 **(b) Positional encoding that extends past what the model was trained at.**
-`iridium/model/rope.py` already implements the two static, verified pieces of
-this — linear position interpolation (Chen et al. 2023) and NTK-aware base
-adjustment — and is explicit that it is *not* full YaRN (no per-frequency
-ramp, no attention-logit temperature correction). See "RoPE extension"
-below for what that gap means in practice.
+`iridium/model/rope.py` implements linear position interpolation (Chen et al.
+2023), NTK-aware base adjustment, and `"yarn"` (a per-frequency ramp plus an
+attention-temperature correction; tests in `tests/unit/test_rope_extensions.py`).
+Whether a given extension factor is adequate is an empirical question; see
+"RoPE extension" below.
 
 **(c) A KV cache that fits.** Even the layers that keep exact attention need
 their cache priced honestly at 1M tokens, including the mechanisms this
@@ -71,7 +71,7 @@ and `iridium/model/superstack.py` directly.
 
 **Can (self-attention with a plain causal-plus-padding `keep`):**
 
-- The control core's `TransformerBlock` layers. `TransformerControlCore.
+- The control core's `TransformerBlock` layers. `ControlCore.
   stream_keep` builds `causal_keep(...) & valid[:, None, None, :]` — exactly
   the convention `GatedDeltaNet` accepts (see its module docstring and
   `_validity_from_keep`). This is the layer stack that actually needs to
@@ -121,7 +121,7 @@ cache may already be cheap enough that converting it buys little.
 
 ## RoPE extension for the remaining global layers
 
-`rope.py`'s `scaling=` already gives two of YaRN's three ingredients:
+`rope.py`'s `scaling=` accepts `linear`, `ntk` and `yarn`. The first two each give part of YaRN:
 
 - `{"type": "linear", "factor": F}` — position interpolation, divides
   positions by `F` so the model never sees an index past what it trained on.
@@ -129,17 +129,16 @@ cache may already be cheap enough that converting it buys little.
   (high-frequency) rotary dimensions barely stretch while long-wavelength
   ones absorb most of the extension.
 
-What it does **not** do (per its own docstring, restated here because it
-matters for a 1M claim specifically): no per-frequency-band ramp between the
-NTK and linear treatments, and no `1/sqrt(t)`-style attention-logit
-temperature correction. Full YaRN's ablations are the reason these two
-pieces exist — going to 1M tokens (a much larger extension factor than YaRN
-was demonstrated at) is exactly the regime where the missing ramp and
-temperature correction are more likely to matter, not less. Recommendation:
-start with `ntk` scaling on the remaining full-attention layers, sized to
-the rung's `max_seq_len` → target-length ratio, and treat "does this still
-need the ramp and temperature term" as an empirical question to check with
-real long-document eval, not one to assume away.
+`"yarn"` adds the two pieces neither of those has: a per-frequency-band ramp
+(short-wavelength dimensions are left unstretched, long-wavelength ones are
+interpolated, with a linear blend between) and an attention-temperature
+correction (`mscale`, applied through the cos/sin tables). It requires `factor`
+and `original_max_position`; `beta_fast` and `beta_slow` default to 32 and 1.
+Going to 1M tokens is a much larger extension factor than YaRN was demonstrated
+at, so whether the ramp and temperature term matter there is an empirical
+question to check with real long-document eval, not one to assume away.
+Recommendation: start with `ntk` or `yarn` scaling on the remaining
+full-attention layers, sized to the rung's `max_seq_len` → target-length ratio.
 
 ## The 1M-token memory table
 
@@ -175,7 +174,7 @@ KV (`top_k * SuperstackConfig.kv_bytes_per_token(...) * tokens`) is larger
 than the entire baseline core cache and is *unchanged* by this table's
 hybrid schedule, because converting only the core does not touch it. At
 `test1b`, 1M tokens, bf16: baseline core 17.18 GB, hybrid core 4.30 GB, but
-superstack KV is 55.84 GB either way — the schedule change saves ~13 GB out
+superstack KV is 55.83 GB either way — the schedule change saves ~13 GB out
 of a ~75 GB baseline, not the order-of-magnitude the core numbers alone
 would suggest.
 
@@ -203,7 +202,7 @@ layer to check the claim against.
    very start where nothing has accumulated into an RNN state yet).
 2. The remaining core global layers: RoPE with `scaling={"type": "ntk",
    "factor": target_len / max_seq_len}`, per "RoPE extension" above, and
-   flagged for a linear-vs-NTK, and eventually full-YaRN-ramp, ablation
+   flagged for a linear-vs-NTK-vs-`yarn` ablation
    before trusting it past a few hundred thousand tokens.
 3. Superstacks: leave as-is for a first cut (this is the lower-risk,
    lower-effort path — it does not touch the router, the bridge, or
@@ -229,7 +228,7 @@ layer to check the claim against.
   signature-identical, so a per-layer `layer_types: list[str]` in
   `CoreConfig` (mirroring `hybrid_schedule`'s output) is enough to pick
   `GatedDeltaNet` vs. `TransformerBlock` per layer index at model-build time.
-- `keep` must be built the same way `TransformerControlCore.stream_keep`
+- `keep` must be built the same way `ControlCore.stream_keep`
   already builds it (causal & key-padding, nothing sparser) for any layer
   index assigned `"deltanet"`. This is already true for the core; it would
   need checking again if `"deltanet"` is ever assigned to a superstack layer
@@ -238,7 +237,7 @@ layer to check the claim against.
 - Cache dict entries for a DeltaNet layer are `(state, conv_q, conv_k,
   conv_v)`, not `(k, v)` — any code that inspects cache entries by shape
   (rather than treating them as an opaque per-layer blob, which is how
-  `GroupedQueryAttention` and `TransformerControlCore._run` already treat
+  `GroupedQueryAttention` and `ControlCore._run` already treat
   them) needs to branch on layer type before doing so.
 - `GatedDeltaNet.param_count(d_model, n_heads, d_head, conv_size)` and
   `GatedDeltaNet.state_bytes(n_heads, d_head, conv_size, bytes_per_element)`

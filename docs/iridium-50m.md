@@ -1,6 +1,6 @@
 # Iridium-50m
 
-Status: **built and tested on CPU, not trained.** Nothing below says how well it will
+Status: **built and tested on CPU; first Kaggle runs started (iridium-50m, then iridium-50m-next), none finished.** Nothing below says how well it will
 work. `python -m iridium battery` is how to find out once it has been trained.
 
 ## Shape
@@ -55,8 +55,9 @@ stored, so most data is seen about twice.
 **Speed.** Choose Kaggle's **GPU T4 x2**. Training runs one process per GPU and
 averages their gradients every step (`iridium/training/parallel.py`), so the batch and
 schedule are the same as on one GPU and each step takes about half as long. Batches are
-built on a background thread, and each forward pass carries 16 sequences (the trainer
-halves that by itself if a card runs out of memory).
+built on a background thread, and each forward pass carries 16 sequences. On an
+out-of-memory error the trainer first runs each micro-batch in more passes (same data
+and gradient), returning to one pass after 200 quiet steps.
 
 **Measured, first session (before the fixes below):** about 7.8 s per step, roughly
 8k tokens/s, with the trainer forced down to 4 sequences per pass. At that speed the
@@ -68,10 +69,15 @@ storing every head's full score matrix; and the text loss is computed in chunks 
 are recomputed in the backward pass, instead of holding 64 MB of logits per sequence
 per loop. The log now says once which attention kernel CUDA can use.
 
-The original estimate, also unmeasured: chat-36m measured 68k tokens/s on
-one GPU; if this model matches it, two T4s give roughly 120-130k tokens/s, and the
-trained loops cost 1.4x, so the run is about 15 hours, or two Kaggle sessions. The
-`tok/s` figure on each log line in the first session is the number that tests this.
+**Measured, second session (with those fixes):** about 9.8k tokens/s for both GPUs
+together at step 100, after the trainer again fell back to 8 sequences per pass. At that
+rate 5B tokens take about 140 hours, roughly 4-5 weeks of Kaggle's 30 GPU-hours a week.
+The cause of the fallback was found afterwards: every superstack ran all rows of the
+micro-batch, including rows routed none of its tokens (with subject-forced routing that
+is often a third or more of them). Stacks now skip those rows (`SuperstackBank.compact_rows`,
+exact); on CPU this cut saved activations at 16 sequences from about 12.5 to 7 GiB. Not
+yet measured on a T4. The original 15-hour estimate assumed chat-36m's 68k tokens/s
+carried over; it did not.
 
 | Share | Family | Source |
 |---:|---|---|
@@ -171,7 +177,7 @@ reads the same prepared shards. In the Kaggle notebook, set `PRESET = 'iridium-5
 |---|---|---|
 | NorMuon on hidden matrices (Muon + Polar Express coefficients + per-neuron normalisation), weight decay 0.1 | fewer tokens to the same loss | ~1.4x vs a *tuned* AdamW at 130M, 1.1x at 1.2B (Wen et al., ICLR 2026); NorMuon ~6% fewer steps than Muon at 124M (arXiv 2510.05491). In the 2M ablation below, Muon beat AdamW by ~0.15 loss at matched learning rates and NorMuon beat Muon. |
 | Peak learning rate 3e-3 (was 1.5e-3) | both optimizers were under-driven | In the ablation, AdamW improved from 1.5e-3 to 1.2e-2 and Muon to at least 2.4e-2. Toy-scale optima overshoot; 3e-3 is a hedge. Sweep it. |
-| Canon layers A and C in the core | cheap local mixing (Physics of LMs 4.1) | Ablation: 1.081 vs 1.315 over two seeds, for ~12k parameters at 50M; byte-level text flatters it. |
+| Canon layers A and C in the core | cheap local mixing (Physics of LMs 4.1) | Ablation: 1.081 vs 1.315 over two seeds, for ~18k parameters at 50M; byte-level text flatters it. |
 | Same-subject sequence packing | ~17% of tokens were padding | Packing is standard (Krell et al., arXiv 2107.02027). No document mask: items in a row can attend to earlier items, as in GPT-style pretraining. Rows keep one subject so subject forcing still holds. |
 | Decay-phase mixture (`_IRIDIUM50_ANNEAL`) | finish on the most targeted data | OLMo 2's Dolmino mid-training (arXiv 2501.00656), Llama 3, SmolLM2 (arXiv 2502.02737). Magnitude at 50M unknown; keep watching the general-text bpb for forgetting. |
 
@@ -285,7 +291,7 @@ What this supports:
 * **Canon mostly speeds up early learning; with NorMuon it is neutral by
   1,200 steps.** Seed 0 favoured it by 0.006 and seed 1 went against it by 0.007,
   so the two-seed mean difference is 0.001 (noise). With AdamW it was worth 0.069. It
-  stays in the preset because it costs about 12k parameters and protects against an
+  stays in the preset because it costs about 18k parameters and protects against an
   optimizer or rate that is off. Do not expect the 300-step gains.
 * **NorMuon's lead over AdamW held:** 0.725 against 0.861 at matched rates without
   Canon.

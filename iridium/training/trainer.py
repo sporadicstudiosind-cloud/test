@@ -510,8 +510,9 @@ class Trainer:
                 old = self.loader.batch_size
                 if self._oom_split * 2 <= old:
                     # First answer to an OOM: run each micro-batch in more
-                    # forward passes, keeping the micro-batch (and so the data
-                    # order and the gradient sum) as it is. The split decays
+                    # forward passes, keeping the micro-batch size (and so the
+                    # gradient scale) as it is; the batches the failed update
+                    # drew are skipped, as before. The split decays
                     # back after a quiet stretch, so one unlucky step (a long
                     # packed row, a busy stack) does not cost the whole run
                     # throughput the way a permanent halving did. Every rank
@@ -522,26 +523,9 @@ class Trainer:
                     print(f"[trainer] out of memory: retrying this update with each micro-batch "
                           f"in {self._oom_split} passes (micro-batch stays {old})", flush=True)
                     continue
-                effective = old * self.cfg.accumulate
-                new = max(1, old // 2)
-                self._oom_split = 1
-                self.loader.batch_size = new
-                self.cfg = replace(self.cfg, batch_size=new,
-                                   accumulate=math.ceil(effective / new))
-                scale_state = self.scaler.state_dict()
-                self.scaler = torch.amp.GradScaler("cuda", enabled=self.precision == "fp16")
-                self.scaler.load_state_dict(scale_state)
-                self._stream.close()
-                self._stream = self._infinite_batches()  # discard old prebuilt groups
-                import gc
-                gc.collect()
-                for device in self.devices:
-                    if str(device).startswith('cuda'):
-                        with torch.cuda.device(device):
-                            torch.cuda.empty_cache()
-                print(f"[trainer] retry whole update: micro-batch {old}->{new}; "
-                      f"accumulate={self.cfg.accumulate}", flush=True)
-                continue
+                # One row per pass already ran out of memory: a smaller
+                # micro-batch would only make each pass larger again.
+                raise exc
             if not updated:
                 overflow_retries += 1
                 if overflow_retries >= 16:
@@ -552,6 +536,9 @@ class Trainer:
             if self._oom_split > 1 and step >= self._oom_quiet_until:
                 self._oom_split //= 2
                 self._oom_quiet_until = step + OOM_SPLIT_DECAY_STEPS
+                if primary:
+                    print(f"[trainer] no OOM for {OOM_SPLIT_DECAY_STEPS} steps: back to "
+                          f"{self._oom_split} pass(es) per micro-batch", flush=True)
             self.completed_steps = step + 1
             mark_tokens += tokens * self.world
             if want_log and primary:
@@ -709,10 +696,15 @@ class Trainer:
             self._update_ema()
         return report, diagnostics, float(norm), updated, tokens
 
-    @torch.no_grad()
     def _release_after_oom(self) -> None:
         """Free what a failed update held before it is retried."""
         import gc
+        # An OOM after scaler.unscale_ (e.g. in clipping) leaves the scaler
+        # marked "unscaled"; the retry's unscale_ would then raise. Rebuild it
+        # from its state, keeping the loss scale.
+        scale_state = self.scaler.state_dict()
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.precision == "fp16")
+        self.scaler.load_state_dict(scale_state)
         self._stream.close()
         self._stream = self._infinite_batches()  # discard old prebuilt groups
         gc.collect()
@@ -721,6 +713,7 @@ class Trainer:
                 with torch.cuda.device(device):
                     torch.cuda.empty_cache()
 
+    @torch.no_grad()
     def _update_ema(self) -> None:
         d = self.cfg.ema_decay
         for name, value in self.model.state_dict().items():

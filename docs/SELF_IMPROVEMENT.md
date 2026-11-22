@@ -130,10 +130,11 @@ The audit split is reused across the finite campaign; it is not a fresh unseen
 dataset after each promotion. Use new source-disjoint audit data across campaigns
 and preserve a final untouched external benchmark for final capability claims.
 
-## How to use the notebooks
+## How to run a campaign
 
-All four notebooks contain section **Optional bounded self-improvement campaign**.
-It defaults to `RUN_RESEARCH=False`. Run All therefore does not launch research.
+The campaign is driven from Python by `ResearchLoop` (`iridium/research/controller.py`).
+The notebooks in `notebooks/` contain no campaign section and no `RUN_RESEARCH`
+switch, so research runs only when the controller is called.
 
 1. Train and save a meaningful initial checkpoint using the regular training cell.
 2. Provide three JSONL manifests whose records use splits `train`, `selection`,
@@ -145,8 +146,10 @@ It defaults to `RUN_RESEARCH=False`. Run All therefore does not launch research.
 4. Supply at least 16 held-out examples per family and supervised modality in the
    default policy. `eval_items=128` caps the first examples, so order the manifests
    to include coverage or increase the cap before starting the campaign.
-5. Fill in the three notebook paths, inspect the fixed policy, and set
-   `RUN_RESEARCH=True` when you want to spend the compute.
+5. Construct `ResearchLoop(directory, train_manifest, selection_manifest,
+   audit_manifest, policy=None, device='cuda:0')`, inspect `ResearchPolicy`
+   (`iridium/research/policy.py`), then call `initialize(trusted_checkpoint)` and
+   `run()` when you want to spend the compute.
 
 Default budget: 2 rounds × 3 candidates × 100 optimizer updates, plus proposal
 inference and selection/audit inference; one candidate at a time. The controller
@@ -210,8 +213,8 @@ core an explicit refinement-pass signal by reusing the router's existing loop
 embedding at re-entry. This adds no parameters and keeps loop-specific cache
 keys. It allows the shared core to distinguish repeated passes more directly.
 
-New notebooks enable both options; old configs default them off for checkpoint
-compatibility. Research candidates can compare them under fixed evaluation.
+Both options default to off in `IridiumConfig`, for checkpoint
+compatibility. The `iridium-50m` preset enables `loop_identity`. Research candidates can compare them under fixed evaluation.
 New loop-loss behavior changes multi-loop training semantics; do not interpret
 historical multi-loop numbers as validation. All earlier multimodal, agent,
 Kaggle and optimization changes remain included.

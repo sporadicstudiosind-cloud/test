@@ -7,7 +7,7 @@ were narrowed and the narrowing is stated.
 | # | Original wording | Requirement | Specified in | Check |
 |---|---|---|---|---|
 | 1 | "input simulation data, text, images, video, audio, physics data, etc" | IR 03 | [arch §3](architecture.md#3-representation) | `test_events.py` (typed payloads, per-channel units) |
-| 2 | "output any type of output like the inputs … theoretically all together" | IR 03, IR 05 | [arch §5](architecture.md#5-native-generation-and-joint-outputs) | `first_slice.py` trains symbolic + field + image heads on one trunk |
+| 2 | "output any type of output like the inputs … theoretically all together" | IR 03, IR 05 | [arch §5](architecture.md#5-native-generation-and-joint-outputs) | `iridium/training/first_slice.py` trains field and image heads (plus a direct-head control) on one trunk; the instruction is input only |
 | 3 | "deep complex math" | IR 04 | [arch §10](architecture.md#10-mathematics-and-exact-computation) | `test_inlet_arithmetic.py` (unit algebra); proof checker is backlog M9 |
 | 4 | "full access to a simulation" | IR 06 | [arch §6.2](architecture.md#62-three-execution-modes) | three execution modes; reference mode is M5 |
 | 5 | "calculate that fluid flow if I double the input water … accurate physics based video and short report" | IR 04, IR 05 | [arch §11.1](architecture.md#111-waterfall-input-to-deliverables) | `test_inlet_arithmetic.py`; end-to-end package is M9 |

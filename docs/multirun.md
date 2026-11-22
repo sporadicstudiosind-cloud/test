@@ -98,9 +98,10 @@ precise-looking and wrong for most GPUs.
 
 ## `benchmark()`: measure, don't assert
 
-`benchmark(make_step, k, steps, device)` times one run for `steps`
-iterations, then times `k` independent runs interleaved round-robin for
-`steps` iterations each, and reports the speedup actually observed. It runs
+`benchmark(make_step, k, *, steps=20, warmup=2, device="cpu")` times one run for
+`steps` iterations, then times `k` independent runs interleaved round-robin for
+`steps` iterations each, and reports the speedup actually observed. `steps` and
+`device` are keyword-only. It runs
 unmodified on CPU (this container's only target), where it typically shows
 speedup at or below 1.0 — CPU has no independent per-stream execution units
 the way a GPU has SMs, so interleaving CPU-bound steps in one process is at

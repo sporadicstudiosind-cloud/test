@@ -263,6 +263,7 @@ class Iridium1(nn.Module):
         stats["memory_reconstruction"] = memory_loss
         stats["core_dispatch"] = []
         stats["subject_loss"] = h.sum() * 0
+        subject_loops = 0       # loops whose routing the subject labels supervised
         prev_pick: Optional[torch.Tensor] = None
         curriculum = self._routing_curriculum(batch) if self.training else None
         for loop in range(n_loops):
@@ -305,12 +306,15 @@ class Iridium1(nn.Module):
                 decision.stack_weight = decision.stack_weight.clone()
                 decision.valid = decision.valid.clone() if decision.valid is not None else batch.valid.clone()
             pinned = loop == 0 or not self.cfg.router.curriculum_first_loop_only
+            subject_loops += int(pinned)
             for row, metadata in enumerate(batch.meta if pinned else ()):
                 subject = metadata.get("subject")
                 names = self.cfg.stacks.specializations
                 if subject in names:
                     index = names.index(subject)
                     mask = batch.valid[row]
+                    if not bool(mask.any()):
+                        continue                # an all-padding row: mean over nothing is NaN
                     probs = decision.gate_probs[row, :, index].float().clamp_min(1e-8)
                     stats["subject_loss"] = stats["subject_loss"] - probs[mask].log().mean() / len(batch.meta)
                     if self.cfg.controller_mode and loop < n_loops - 1:
@@ -440,7 +444,7 @@ class Iridium1(nn.Module):
             first = stops.to(torch.int64).argmax(-1)
             mixed = stacked.gather(-1, first[..., None, None].expand(-1, -1, stacked.shape[-2], 1)).squeeze(-1)
             stats["chosen_cycle"] = first + 1
-        stats["subject_loss"] = stats["subject_loss"] / len(halt_logits)
+        stats["subject_loss"] = stats["subject_loss"] / max(subject_loops, 1)
 
         for key in ("balance_loss", "z_loss", "depth_kl"):
             stats[key] = stats[key] / len(halt_logits)

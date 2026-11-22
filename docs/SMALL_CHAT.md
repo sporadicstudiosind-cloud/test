@@ -1,8 +1,8 @@
 # Small Iridium chat: run, train, and interpret
 
 The bundled `serve/weights/nano-phase1-fp16.pt` is a real Iridium checkpoint,
-roughly 34 million parameters. It was trained for 800 steps on synthetic phase-1
-tasks. It was **not trained on chat turns**, and its recorded task results are
+roughly 34 million parameters. Its recorded configuration is 800 steps on synthetic
+phase-1 tasks, and the checkpoint does not record that the run completed. It was **not trained on chat turns**, and its recorded task results are
 mostly at or below a prompt-ignoring baseline. The commands below give you a
 working chat interface and a path to train a chat checkpoint; they do not turn
 the bundled weights into a reliable assistant.

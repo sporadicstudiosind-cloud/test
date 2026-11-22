@@ -6,6 +6,13 @@ correctness slice. Nothing here is a claim that a general system has been demons
 specified, implemented, trained, evaluated, or unsupported. Read that before quoting
 anything from this document as a result.
 
+**The 1.0 presets differ from this specification.** The presets in `iridium/presets.py`
+(`iridium-50m` and its variants) route each token through a macro-router to top-k
+specialist superstacks. IR 02, §1.3, AD 01 and invariant 2 rule that out. The router check
+in `tests/integration/test_core_reference.py` covers the reference core, not the 1.0 model.
+The requirements below describe the Iridium-1 target. For what is built and how to run it,
+see the [README](../README.md) and [`architecture-options.md`](architecture-options.md).
+
 `MUST` marks an implementation requirement, `SHOULD` a default that can change on
 documented evidence, and `RESEARCH` an unvalidated mechanism. Unless attributed, every
 configuration, threshold and schedule is a proposed engineering choice.

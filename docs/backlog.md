@@ -22,8 +22,9 @@ Milestones are dependency gates, not a schedule. Each names the evidence that cl
 **M3** — one native continuous head (the diagnostic image) is trained by conditional flow
 matching inside the shared trunk, with a measured quality-versus-steps curve. Text generation
 was not trained in that slice (the 1.0 `chat-34m` preset has since been trained on text and
-chat, see `CHANGELOG.md`); there the instruction is consumed, not produced. Image editing and conditioning
-dropout are not implemented.
+chat, see `CHANGELOG.md`); there the instruction is consumed, not produced. Image editing is not
+implemented. Conditioning dropout and classifier-free guidance were added later to the flow head
+(`iridium/model/heads.py`, tested in `tests/unit/test_heads.py`).
 
 **M5** — the conservative face-flux correction is trained and its conservation property is
 measured on the trained model. Manufactured-solution convergence and open-system budgets are
@@ -61,8 +62,9 @@ physical competence" remains a narrow result rather than a capability.
 ## Cross-cutting work items not tied to one milestone
 
 - **Isolation beyond attention** (D09): cache allocation, memory retrieval, logging, object
-  storage and action handles each need their own boundary and adversarial test. Attention is
-  tested; these are not.
+  storage and action handles each need their own boundary and adversarial test. Attention, cache
+  release and object storage between streams are tested (`tests/integration/test_isolation.py`);
+  memory retrieval, logging and action handles are not.
 - **Spectral axis typing** (D02): axis kind is in the schema but no test distinguishes optical
   wavelength from audio frequency from mode index.
 - **Renderer provenance** (Invariant 3): exact-array survival is tested for the store, not
@@ -71,3 +73,19 @@ physical competence" remains a narrow result rather than a capability.
   at matched compute, before anything claims equivariance.
 - **Train/serve stopping-policy parity** on a real trained halting head: the semantics are
   tested, the trained behaviour is not.
+
+
+## Open findings from the Nov 2026 code review (not yet fixed)
+
+- `prepare` tools family can loop forever once its ~115k unique conversations are used up.
+- Resuming on a different GPU count repeats or skips data (`items_consumed` is per rank).
+- Muon also takes media encoders and flow-head projections; the docs say inputs/heads use AdamW.
+- MLA layers ignore M-RoPE sections and RoPE scaling; `_propagate_loop_cache` skips
+  sliding-window layers; cached decoding treats padded history as valid; DeltaNet state is
+  half precision under autocast.
+- Runtime: scheduler owner cap and `realized` cost are ineffective; system prompt can be
+  dropped by `fit_to_budget`; `push_input`/`LongContextSession` do not shift `rope_positions`.
+- Phase-3 RLVR default families cannot earn reward; DP epsilon is not an upper bound;
+  splat rendering with degree-1 SH mis-pairs view directions.
+- Notebooks: the studio tools stage inits tools-100m from chat-34m (shape mismatch); TPU
+  notebook geometry overrides raise; `--dry-run` ignores `--steps`.

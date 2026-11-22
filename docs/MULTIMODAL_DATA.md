@@ -81,8 +81,9 @@ chat data does not teach this tool schema automatically. Native action opcodes
 and JSON media tool calls are separate output interfaces; the action head remains
 for the existing scene/UI vocabulary, while file-aware media tools use JSON text.
 
-In the notebook set `MEDIA_MANIFEST`, then use `TRAIN_MODE='mixed'` or
-`'media_only'`. The loader caps examples and rejects overlong samples; it does not
+Load the manifest with `load_manifest` in `iridium/data/multimodal.py`
+(`split`, `max_items` and `max_tokens` arguments). The notebooks in this
+repository do not set `MEDIA_MANIFEST` or `TRAIN_MODE`. The loader caps examples and rejects overlong samples; it does not
 silently cut the answer or pool future output tokens. Dependencies are Pillow,
 NumPy and system FFmpeg/ffprobe. No pretrained external model is a dependency.
 
@@ -111,7 +112,8 @@ output; output-generation slots retain stream-position conditioning.
 
 `prepare_librispeech` produces complete utterance/transcript pairs for native ASR
 and native speech generation; it never substitutes an external speech model.
-The notebook enables its bounded download by default. Internet, FFmpeg/ffprobe,
+Its download is bounded by `count` (default 128) and `max_scanned`, and no
+notebook in this repository calls it. Internet, FFmpeg/ffprobe,
 space, source availability and matching training budgets are required.
 
 See `ARCHITECTURE_V2.md` for the complete mechanism and unvalidated boundaries.

@@ -25,8 +25,8 @@ and the fix has not been reproduced on Kaggle by the author.
 Precision selection now checks native CUDA architecture support across every
 selected GPU. T4/P100 use FP16 and GradScaler, not emulated BF16. Master weights
 remain FP32. FP32 remains a selectable troubleshooting mode with a higher memory
-cost. Changing precision cannot resume an old optimizer checkpoint under the
-current strict resume contract; start fresh or explicitly import weights.
+cost. Resuming under a different precision is allowed: the optimizer state is
+loaded and only the fp16 loss scale starts fresh (`Trainer.resume` prints a note).
 
 PyTorch references: [AMP guidance](https://docs.pytorch.org/docs/stable/notes/amp_examples.html)
 and [a related reported AMP backward dtype failure](https://github.com/pytorch/pytorch/issues/81876).
@@ -34,32 +34,27 @@ The latter is not proof of the precise cause in this run.
 
 ## Using both GPUs
 
-Select **GPU T4 x2** in Kaggle, restart the session, and use the updated notebook.
-The notebook defaults to `GPU_MODE='auto'`, which selects up to two visible GPUs.
-`GPU_MODE='single'` selects only GPU 0. The code prints each device's name and
-available memory, the stack-to-device map, per-device parameter estimates, and
-actual allocated/reserved/peak memory in training records.
+Select **GPU T4 x2** in Kaggle, restart the session, and use the current notebook
+(see [kaggle-agent-runbook.md](kaggle-agent-runbook.md)). The notebook no longer
+has a `GPU_MODE` setting. It runs `iridium train --gpus auto`, which uses every
+visible GPU at once; the log prints `training on 2 GPUs at once`.
 
-This implementation is single-process **model parallelism**:
+This is **data parallelism**, not model parallelism:
 
-- The control core, codecs, router and learned input memory live on GPU 0.
-- Whole specialist stacks are greedily distributed by parameter count.
-- Each stack's weights, gradients and eager AdamW moments live on its GPU.
-- Routed states and bridge context cross devices through differentiable copies;
-  specialist outputs return to the core's GPU for integration.
-- Components are placed directly from CPU. Training does not first load the
-  complete model onto GPU 0.
-- Gradient scaling and global clipping apply to the complete update. Checkpoints
-  include the device map and device-local optimizer state.
+- One process per GPU (`iridium/training/parallel.py`). Each rank holds a full
+  copy of the model, its gradients and its optimizer state on its own card.
+- Each rank runs its share of every global batch. Gradients are averaged with one
+  all-reduce per optimizer step, so the batch, the schedule and the result match a
+  single-GPU run.
+- If any rank fails, the launcher stops the rest. Rank 0 logs to the notebook;
+  the other ranks write `rank<N>.log` under the run folder.
+- Only rank 0 writes checkpoints.
 
-The cards are not one contiguous 32 GB allocation. A component must fit on its
-assigned card. Per-device activation/optimizer budgets matter. Stack execution
-is scheduled sequentially by the bank, so both cards need not be fully busy at
-the same instant. Transfers can make small models slower; this implementation
-primarily expands available model capacity. It is not DDP, tensor parallelism,
-or pipelined microbatch execution. Unequal core/stack widths and non-eager
-optimizers are rejected in multi-device training until explicitly supported.
-Optional research subprocesses still use their configured single device.
+The older single-process placement (`iridium/runtime/placement.py`, which spread
+one model's stacks over cards) is still in the library, but the CLI and the Kaggle
+notebook do not use it. Each card must fit a whole replica plus its activations.
+The measured `iridium-50m` run on two T4s ended at micro-batch 8 after a memory
+fallback.
 
 ## Small and medium presets
 
@@ -78,21 +73,23 @@ describe relative geometry, not a promise of a particular trained capability.
 | medium_plus | 768 | 12 | 6 | 22 |
 | workstation | 768 | 16 | 6 | 28 |
 
-Start with the unchanged consumer_tiny default. Increase only after inspecting
-both device plans and live memory. If the conservative plan rejects a choice,
-reduce MAX_SEQ_LEN or the preset. Micro-batch reduction cannot solve a model-state
-allocation that alone exceeds VRAM. Specialist depth remains greater than core
-depth at every size.
+These geometries belong to the retired placement notebook (its `consumer_tiny`
+default is in `iridium/config_builder.py`). The current Kaggle notebook trains
+`iridium-50m`, whose geometry is in `iridium/presets.py`. In the table above,
+specialist depth is greater than core depth at every size.
 
 ## Updating a previously failed Kaggle session
 
 1. Save any checkpoints you want to retain, then restart the kernel/session.
-2. Import the latest iridium_studio_kaggle.ipynb from the branch. The new default
-   checkout is `/kaggle/working/iridium-updated-v3`; it avoids reusing the old path.
-3. Run setup and settings again. Confirm two devices and Selected precision: fp16
-   when running on two T4s. Ensure both GPUs appear in the stack placement map.
-4. Run data and training. Checkpoints default to every 50 completed optimizer
-   steps within each phase. GPU memory is printed at log intervals.
+2. Import the latest iridium_studio_kaggle.ipynb from the branch. Its clone cell
+   fetches the release branch into a checkout of this repository, or updates an
+   existing checkout (a checkout with local edits stops the cell).
+3. Run the notebook from the top. Confirm the cell lists two GPUs, and that the
+   training log says `training on 2 GPUs at once`. On two T4s the trainer uses
+   fp16 autocast with gradient scaling.
+4. Run data and training. A checkpoint is written at the end of each round
+   (`iridium-50m` has 300 rounds, about every 250 steps), not every 50 steps. GPU
+   memory is printed at log intervals.
 
 Do not rerun only the failed cell against old imported classes. A failed backward
 can leave partial gradients; this revision does not repair a running old kernel.

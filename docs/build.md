@@ -44,8 +44,8 @@ instantiation would use. Scale is a config file, not a rewrite.
 | rung | params | active/token | GFLOP/token | MXFP4 weights |
 |---|---|---|---|---|
 | tiny | 1.5 M | 0.40 M | 0.003 | 0.81 MB |
-| nano | 34.0 M | 18.7 M | 0.07 | 18.1 MB |
-| micro | 995.8 M | 324.5 M | 1.95 | 529 MB |
+| nano | 34.0 M | 18.1 M | 0.07 | 18.1 MB |
+| micro | 995.8 M | 319.6 M | 1.92 | 529 MB |
 | small | 25.8 B | 4.2 B | 25.3 | 13.7 GB |
 | **base** | **9.04 T** | **692 B** | **4154** | **4.80 TB** |
 | extreme | 39.5 T | 1.63 T | 9774 | 21.0 TB |
@@ -64,7 +64,7 @@ python -m iridium quant base                   # MXFP4 memory and measured SQNR
 python -m iridium fluid                        # Taylor-Green validation
 python -m iridium waterfall --q 3 --factor 2   # the originating question
 python -m iridium serve --prompt "hello" --prompt "second stream"
-pytest -q                                      # 384 tests
+pytest -q                                      # 1,487 tests collected at this revision
 ```
 
 Training phases, each runnable:

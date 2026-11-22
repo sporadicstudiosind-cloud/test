@@ -36,17 +36,17 @@ def test_oom_splits_passes_then_decays_back(tmp_path, monkeypatch):
     assert 4 in seen[4:], "full-size passes resume after the decay"
 
 
-def test_oom_halves_micro_batch_only_when_splitting_cannot_help(tmp_path, monkeypatch):
+def test_oom_at_one_row_per_pass_is_raised(tmp_path, monkeypatch):
     t, model = _trainer(tmp_path, steps=2)
     real = model.losses
     state = {"n": 0}
 
     def losses(batch, **kw):
         state["n"] += 1
-        if state["n"] <= 3:                    # OOM even at 2 and 1 rows per pass
-            raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 1 GiB")
-        return real(batch, **kw)
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 1 GiB")
 
     monkeypatch.setattr(model, "losses", losses)
-    t.train()
-    assert t.loader.batch_size == 2 and t.completed_steps == 2
+    import pytest
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        t.train()
+    assert t._oom_split == 4 and t.loader.batch_size == 4, "split to one row per pass, then give up"

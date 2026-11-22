@@ -23,6 +23,8 @@ means the same thing in every unit system.
 
 from __future__ import annotations
 
+import math
+
 import enum
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -85,6 +87,11 @@ class Residuals:
         return name, ratios[name]
 
     def passes(self, tol: Tolerance) -> bool:
+        # max() skips NaN unless it comes first, so check finiteness explicitly:
+        # a residual function that returns NaN must not count as "checked".
+        values = (self.divergence, self.mass_budget, self.bounds, self.energy_growth)
+        if not all(math.isfinite(float(v)) for v in values):
+            return False
         return self.worst_violation(tol)[1] <= 1.0
 
     def as_dict(self) -> dict[str, float]:

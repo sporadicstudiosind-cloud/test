@@ -332,8 +332,12 @@ class Superstack(nn.Module):
             lambdas.append(lam)
             states.append(self.exit_norm(x))
             if hard_exit:
-                p_so_far = stopping_distribution(torch.stack(lambdas, -1))
-                alive = alive & (p_so_far.sum(-1) < exit_threshold)
+                # Mass that has actually halted so far. Not the stopping
+                # distribution of the partial list: its last entry absorbs all
+                # remaining mass, so it always sums to 1 and every token would
+                # exit after the first layer, ignoring min_depth.
+                halted = 1.0 - torch.prod(1.0 - torch.stack(lambdas, -1), dim=-1)
+                alive = alive & (halted < exit_threshold)
 
         lam_stack = torch.stack(lambdas, dim=-1)           # [B, M, L']
         p = stopping_distribution(lam_stack)

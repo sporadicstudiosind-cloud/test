@@ -696,6 +696,13 @@ def cmd_data(args) -> int:
     from .training.prepare import plan, prepare
     try:
         preset = _budgeted_preset(args)
+        if preset.data_from and preset.data_from != preset.name:
+            # Training reads data/<data_from>/ (run_preset), so preparing under
+            # this preset's own name would write 7.5 GB nobody reads.
+            print(f"data: {preset.name} trains on {preset.data_from}'s data; "
+                  f"preparing {preset.data_from}", file=sys.stderr)
+            args.preset = preset.data_from
+            preset = _budgeted_preset(args)
     except KeyError as exc:
         print(f"data: {exc.args[0]}", file=sys.stderr)
         return 2

@@ -1,8 +1,10 @@
 # Training Iridium on free compute
 
-Everything in the 1.0 preset list is sized so that a person with no budget can
-train it. This page says what each free tier gives you, how long each preset
-should take there, and what the hosted "free AI" services can and cannot do.
+Most presets in the 1.0 list are sized so that a person with no budget can
+train them. `modern-744m`, `2b` and `4b` are costed only, and `500m` and `1b`
+have only a free TPU v5e-1 estimate. This page says what each free tier gives
+you, how long each preset should take there, and what the hosted "free AI"
+services can and cannot do.
 
 > **Read this first.** Every preset is *verified in theory*: it builds, its
 > parameter count matches the accounting formula, and the test-suite invariants
@@ -28,7 +30,12 @@ the XLA path has not been timed.
 **Two T4s.** On Kaggle choose *GPU T4 x2*. `iridium train` starts one process
 per GPU and averages their gradients each step, so the batch and schedule are
 those of a one-GPU run at about half the time per step. `--gpus 1` turns it
-off. This is verified with two CPU processes, not yet timed on GPUs.
+off. Measured on Kaggle's two T4s for `iridium-50m`: about 9.8k tokens/s for
+both GPUs together, so its 5B tokens take about 140 GPU-hours (roughly 4-5
+weeks of the 30 GPU-hour weekly quota). The arithmetic estimate for this tier
+(`iridium presets iridium-50m`, 51 h) is well below that. On a CUDA out-of-memory
+error the trainer first splits each micro-batch into more forward passes, then
+halves it; the measured run ended at micro-batch 8 after such a fallback.
 
 ## Presets and estimated hours
 
@@ -38,9 +45,12 @@ off. This is verified with two CPU processes, not yet timed on GPUs.
 preset        pri       params    body  embed   tokens tok/body    T4 h  P100 h  v5e h  status
 ----------------------------------------------------------------------------------------------
 chat-34m        1   36,038,426   30.1M   2.1M     328M       11     4.1     3.6    0.2  trained once (val 1.19 bpb text, 0.87 chat); not evaluated
+iridium-50m-control-dense   1   39,433,400   29.5M   7.9M    5000M      169   101.3    88.2    4.2  verified in theory
 chat-36m        1   46,180,869   35.8M   5.9M     716M       20    14.3    12.5    0.6  verified in theory
 50m             1   52,719,370   45.1M   3.2M     328M        7     7.0     6.1    0.3  verified in theory
 iridium-50m     1   60,273,479   50.4M   7.9M    5000M       99   102.5    89.3    4.2  verified in theory
+iridium-50m-control-random   1   60,291,911   50.4M   7.9M    5000M       99   102.6    89.4    4.2  verified in theory
+iridium-50m-next   1   60,291,911   50.4M   7.9M    5000M       99   102.6    89.4    4.2  verified in theory
 100m            1  108,304,153   94.5M   8.4M     655M        7    21.1    18.4    0.9  verified in theory
 chat-100m       1  108,304,153   94.5M   8.4M     655M        7    21.1    18.4    0.9  verified in theory
 500m            1  497,686,932  449.5M  33.6M    1966M        4   458.6   399.4   18.9  verified in theory
@@ -60,8 +70,9 @@ modern-744m     -  743,752,454  651.4M  67.1M   26214M       40  7055.7  6145.3 
 utilisation. They can miss either way: chat-34m's recorded run (44k tokens/s
 under fp16 autocast) took about half its figure, while Python overhead, data
 loading and small matmuls push the other way. `iridium-50m`'s row is for one
-card at fp32; its own estimate is about 15 hours on two T4s
-([`iridium-50m.md`](iridium-50m.md)), also unmeasured. The
+card at fp32. Its measured rate on two T4s (about 9.8k tokens/s in total, about
+140 GPU-hours for 5B tokens) is far slower than the 15 hours its earlier
+estimate gave ([`iridium-50m.md`](iridium-50m.md)). The
 TPU figure assumes XLA compiles one static shape and never recompiles — any
 shape churn can erase the TPU's advantage entirely.
 
@@ -88,11 +99,15 @@ python -m iridium train --preset 1b --tokens-per-param 20 --data data   # any bu
 **Prepare once, train from disk.** `data prepare` streams the preset's text,
 chat and tool sources one source at a time, tokenizes them with the Rust
 tokenizer, and writes flat token files (`.bin` ids, `.mask` targets, `.idx`
-item offsets). Training memory-maps them, so RAM use does not grow with the
-token budget, and the network is used once. Run `prepare` on a free *CPU*
-session (Kaggle CPU notebooks do not spend GPU quota) and attach the output to
-the GPU/TPU run. Synthetic families are generated on demand from a seeded
-index and are never stored.
+item offsets) plus `<out>/<preset>/prepared.json`. Training memory-maps them, so
+RAM use does not grow with the token budget, and the network is used once. Run
+`prepare` on a free *CPU* session (Kaggle CPU notebooks do not spend GPU quota)
+and attach the output to the GPU/TPU run (on Kaggle: Add Input, then Notebook
+Output Files). Families are written in parallel processes (`--workers N`;
+default the core count, at most four), and chat families are tokenized in
+batches. `data prepare --preset iridium-50m-next` prepares `iridium-50m`'s data,
+which that preset reads. Synthetic families are generated on demand from a
+seeded index and are never stored.
 
 **Budgets.** `--tokens 2e9` or `--tokens-per-param 20` (Chinchilla) resizes
 any preset's run; `data prepare --plan` prints how many items that needs.
@@ -104,27 +119,36 @@ size are comparable).
 
 **Learning rate and batch.** `describe` prints DeepSeek LLM's fitted optimum
 for the preset's compute (`lr = 0.3118 C^-0.125`, `B = 0.2920 C^0.3271`
-tokens). The presets sit at 6-10x smaller batches and 2-3x lower learning
-rates -- consistent with each other, but not the fit. `--hparams deepseek`
+tokens). The presets' batches are 2-10x smaller than the fit (iridium-50m: 66k
+tokens against 274k), and most of their learning rates are 1.4-3x lower.
+iridium-50m's 1.5e-3 is close to the fit's 1.6e-3, and iridium-50m-next's 3e-3
+is about twice it. The presets are consistent with each other, but not with the
+fit. `--hparams deepseek`
 runs the fit instead (same tokens, larger batch by accumulation, no extra
 memory); comparing the two on bits per byte is the cheapest useful sweep.
 
 **Optimizers.** `eager_adamw` (fp32, 16 bytes/param of training state),
 `adamw8` (8-bit block-wise moments, ~10 bytes/param, runs on every backend:
-what lets `1b` fit a 16 GB device), and `muon` (~12 bytes/param).
+what lets `1b` fit a 16 GB device), `muon` and `normuon` (~12 bytes/param;
+`iridium-50m-next` uses `normuon`).
 
 Without `--data`, training falls back to the older in-memory rounds path,
-which streams and tokenizes inside the training process.
+which streams and tokenizes inside the training process. The exception is a
+preset with subject families (`iridium-50m` and its variants): it prepares its
+shards first into `<out>/data`, unless they are already there.
 
 Recommended order: **chat-34m** (a single session; the smoke test that the
 pipeline works end to end, and the one preset with a recorded run) →
-**iridium-50m** (about two Kaggle sessions on two T4s, by estimate). The
+**iridium-50m** (on two T4s about 140 GPU-hours at the measured rate, so several
+weeks of Kaggle quota; then `iridium-50m-next`, which reuses its data). The
 `-100m` presets follow the 1.0 priorities after that: chat-100m (several weeks
 of Kaggle quota) → tools-100m initialised from it → omni / stem / world.
 
-**Sessions that end.** Every round writes a checkpoint and then `latest.json`,
-so `--resume auto` never picks up a half-written file. `--time-budget-hours`
-stops cleanly before a host's limit; `--keep-rounds 1` keeps disk use flat.
+**Sessions that end.** Every round writes a checkpoint (`<preset>-round<N>.pt`)
+and then `latest.json`, so `--resume auto` never picks up a half-written file.
+Checkpoints are written at round ends only, not every N steps: `iridium-50m` has
+300 rounds, so about every 250 steps. `--time-budget-hours` stops cleanly before
+a host's limit; `--keep-rounds 1` keeps disk use flat.
 
 ## Groq, NVIDIA NIM and other hosted "free" APIs
 

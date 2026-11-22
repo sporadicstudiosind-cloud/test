@@ -40,7 +40,18 @@ default). That is exact; it is off while a KV cache is live.
 | `norm_kind` | `rms`, `dyt`, `derf` | normalisation-free elementwise norms | DyT's α is reported sensitive for LLMs; Derf's outer affine is an extrapolation |
 | `block_kind` | `sequential`, `parallel` | PaLM parallel attention+FFN | PaLM measured a small loss at 8B, neutral at 62B; the matmul fusion that makes it faster is not implemented |
 | `ffn_dynamic_rank` | int | token-conditioned low-rank FFN corrections | +2/4/8 % params at rank 8/16/32 (d=768); no evidence at scale |
+| `attn_gate` | `""`, `head`, `elem` | sigmoid gate on each attention output before `wo`, on `global` and `local` layers only: one gate per query head (`head`) or per channel (`elem`) | Qiu et al., NeurIPS 2025. Showed nothing in the 2M-parameter CPU ablation (docs/iridium-50m.md); off in every shipped preset |
+| `canon` | bool | Canon layers: a residual causal depthwise convolution over the last four positions after each block norm. Adds 2 × 4 × `d_model` parameters per core layer: 18,432 for the six core layers of `iridium-50m-next` | Allen-Zhu, Physics of LMs 4.1. Core only, sequential blocks only. Ablation: loss 1.315 to 1.081 at 300 steps with AdamW, but about 0 on top of NorMuon at 1,200 steps |
 | `hyper_streams`, `hyper_dynamic`, `hyper_sinkhorn_iters` | ints / bool | mHC residual streams (DeepSeek-V4 uses 4) | measured: unconstrained mixing amplified 1,069,385× over 48 layers; mHC stayed at 1.02×. Streams live inside each run of core layers |
+
+## Router and specialist curriculum — `RouterConfig`
+
+| field | what it does | status |
+| --- | --- | --- |
+| `top_k` | superstacks that receive each token (`iridium-50m`: 2) | shipped |
+| `ponder_global` | the ponder prior applies to the batch-average exit distribution, not per token | opt-in; showed nothing in the 2M-parameter CPU ablation |
+| `curriculum_first_loop_only` | the subject curriculum and subject-label loss bind only the first ponder loop, so a window can go e.g. maths stack, then core, then code stack | opt-in; untested at scale |
+| `subject_force`, `solo_p`, `any_p` | training-only, per window: visit the labelled subject's stack; `solo_p` share visit only that stack; `any_p` share visit one random stack | `iridium-50m` sets `subject_force` and `solo_p=0.5` |
 
 ## Model and codecs
 
@@ -73,7 +84,7 @@ default). That is exact; it is off while a KV cache is live.
 | field | what it does | status |
 | --- | --- | --- |
 | `schedule="wsd"`, `decay_ratio` | warmup–stable–decay with a `1 − √` cooldown (Hägele et al. 2024); extendable runs | standard |
-| `optimizer="muon"` | Muon (Moonlight RMS-matched) on hidden matrices, AdamW on embeddings/head/norms/biases | toy-scale only here |
+| `optimizer="muon"`, `"muon_pe"`, `"normuon"` | Muon (Moonlight RMS-matched) on hidden 2-D matrices at least 16 wide; AdamW on embeddings, `*_head` outputs, routers, halting, norms and biases. `muon_pe` uses Polar Express coefficients; `normuon` adds NorMuon's per-neuron normalisation (`iridium-50m-next`) | toy-scale only here |
 | `loss_balance="ema"` | per-modality task losses divided by a running estimate of their own scale; raw values still logged | heuristic, unvalidated, off by default |
 | `ema_decay` | exponential moving average of weights, saved in checkpoints, for evaluating generators | standard |
 | `decay_groups` | weight decay on hidden matrices only; embeddings excluded (OLMo 2) | default |

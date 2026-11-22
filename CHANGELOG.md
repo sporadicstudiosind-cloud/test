@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Bug fixes from a codebase review** (eight read-only reviewers, each finding re-checked):
+  OOM retry now rebuilds the fp16 GradScaler (a retry after `unscale_` crashed);
+  `_prune_rounds` never deletes the checkpoint just written; held-out evaluation uses the
+  same windows every time; serving with `hard_exit` ran exactly one stack layer (it read the
+  partial stopping distribution, whose last entry absorbs all mass); subject-routing loss is
+  averaged over the loops it supervised and skips all-padding rows; `data prepare` for a
+  preset with `data_from` prepares the owner's data; LittleBit's Joint-ITQ works on GPU;
+  NaN physics residuals no longer pass; exact-store URIs must be digests. An OOM at one row
+  per pass now raises instead of halving the micro-batch (which only enlarged each pass).
+  Docs and docstrings brought up to date. Open findings are listed in docs/backlog.md.
 - **Superstacks skip rows with no routed tokens** (`SuperstackBank.compact_rows`, exact; float64
   test compares forward and gradients). With subject-forced routing every stack used to run the
   full `[micro-batch, 1024]` including empty rows; saved activations for iridium-50m-next at

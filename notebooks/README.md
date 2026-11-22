@@ -29,9 +29,9 @@ checkpoint.
 **The model is untrained until you run the training cell.** Nothing in `Run
 All` up to that point produces anything but random weights and a cost report.
 
-**What a free session buys you** is not a guess: section 3 of every studio
-notebook prints `iridium.presets.preset_table()` and the `dry_run` cost/audit
-report before training starts, both computed by `iridium.presets.estimate_hours`
+**What a free session buys you** is not a guess: in the Colab and Jupyter notebooks,
+section 2 prints `iridium.presets.preset_table()`, and section 3 prints the `dry_run`
+cost/audit report (the Kaggle notebook prints both in section 2) before training starts, both computed by `iridium.presets.estimate_hours`
 and `iridium.training.budget.audit` from the config's own FLOP formula --
 arithmetic, not a measurement (30% of published fp32 peak assumed; it can miss
 either way, see `iridium/presets.py`). The `tok/s` on the training log lines is
@@ -55,7 +55,9 @@ prints or writes it to disk:
   `GITHUB_TOKEN` (a fine-grained personal access token scoped to read this
   repo) -> toggle notebook access on for it.
 - **Kaggle**: Add-ons -> Secrets -> add `GITHUB_TOKEN` the same way -> attach
-  it to the notebook.
+  it to the notebook. Optionally add `HF_TOKEN` (a free Hugging Face read token) the
+  same way. It lifts the anonymous Hugging Face rate limit that slows data preparation.
+  The notebook sets it only if it is present, and never prints it.
 - **Plain Jupyter**: set the `GITHUB_TOKEN` environment variable before
   starting Jupyter, or just launch the notebook from inside an already-cloned
   checkout (the clone cell detects that and skips cloning).
@@ -78,9 +80,12 @@ omnimodality, then physics/STEM, then world model.
 preset        pri       params    body  embed   tokens tok/body    T4 h  P100 h  v5e h  status
 ----------------------------------------------------------------------------------------------
 chat-34m        1   36,038,426   30.1M   2.1M     328M       11     4.1     3.6    0.2  trained once (val 1.19 bpb text, 0.87 chat); not evaluated
+iridium-50m-control-dense   1   39,433,400   29.5M   7.9M    5000M      169   101.3    88.2    4.2  verified in theory
 chat-36m        1   46,180,869   35.8M   5.9M     716M       20    14.3    12.5    0.6  verified in theory
 50m             1   52,719,370   45.1M   3.2M     328M        7     7.0     6.1    0.3  verified in theory
 iridium-50m     1   60,273,479   50.4M   7.9M    5000M       99   102.5    89.3    4.2  verified in theory
+iridium-50m-control-random   1   60,291,911   50.4M   7.9M    5000M       99   102.6    89.4    4.2  verified in theory
+iridium-50m-next   1   60,291,911   50.4M   7.9M    5000M       99   102.6    89.4    4.2  verified in theory
 100m            1  108,304,153   94.5M   8.4M     655M        7    21.1    18.4    0.9  verified in theory
 chat-100m       1  108,304,153   94.5M   8.4M     655M        7    21.1    18.4    0.9  verified in theory
 500m            1  497,686,932  449.5M  33.6M    1966M        4   458.6   399.4   18.9  verified in theory
@@ -103,9 +108,10 @@ invariant test suite holds for it. It does not mean the preset has been
 trained or that training it produces a good model. Only `chat-34m` has a
 recorded full run, and it has not been evaluated.
 
-`500m` and larger, `modern-744m` and `8b` are costed, not free-tier trainable (see the `T4 h` /
-`P100 h` / `v5e h` columns above); they exist so the cost is visible, not as
-something to run in these notebooks.
+`2b`, `4b` and `modern-744m` are costed only, not free-tier trainable (see the `T4 h` /
+`P100 h` / `v5e h` columns above). `500m` and `1b` have only a free TPU v5e-1 estimate
+(weeks of a T4 or P100). `8b` is a rung, not a preset. The rows exist so the cost is
+visible.
 
 ## Resuming after a session ends
 
@@ -116,7 +122,7 @@ warning, so:
 - **Colab**: mount Drive in section 4 (the notebook does this itself if you
   let it) and checkpoints land under `/content/drive/MyDrive/iridium-runs`,
   which survives a runtime reset.
-- **Kaggle**: checkpoints land under `/kaggle/working`, which persists only if
+- **Kaggle**: checkpoints land under `/kaggle/working/iridium-runs`, which persists only if
   you *Save Version* (commit the notebook) before the session ends -- an
   interactive-only session that is never committed loses them. The notebook
   stops itself after about 11 hours so the save happens inside the 12-hour limit.
@@ -128,8 +134,17 @@ To continue: rerun the notebook. `RESUME_FROM = 'auto'` (the default) picks up
 the newest complete round in the run folder; set it to a path to choose one, or
 to `''` to start again. On Kaggle, attach the previous version's output first.
 `train_preset` restores the optimizer, step count and learning-rate schedule
--- the schedule spans the whole run -- but starts a new data shuffle, so a
-resumed run is not bit-for-bit replay of the interrupted round.
+-- the schedule spans the whole run. With prepared shards (the Kaggle notebook and
+any run given `--data`) it also restores the position in the data. Without shards,
+the resumed round draws a fresh slice of the stream. Either way a resumed run is not
+a bit-for-bit replay of the interrupted round.
+
+On Kaggle, the first GPU session attaches the data version and the previous training
+version (Add Input, then Notebook Output Files). The notebook finds both under
+`/kaggle/input` by itself. To run `iridium-50m-next` after `iridium-50m` has finished,
+set `PRESET = 'iridium-50m-next'` in the notebook. It reads iridium-50m's data and starts
+fresh, since it does not resume iridium-50m's checkpoints. To stop a multi-GPU run,
+use Stop session (the power button); ranks also exit when their launcher dies (Linux).
 
 ## Chatting with a checkpoint
 
@@ -137,8 +152,12 @@ Inside the notebook, `ChatSession` from `iridium.runtime.chat` holds a
 conversation across turns. Outside it, the same checkpoint works from a
 terminal:
 
+Export a training checkpoint to inference weights first (`chat` loads only a
+state_dict and a plain manifest, see `_load_chat_checkpoint` in `iridium/cli.py`):
+
 ```bash
-python -m iridium chat --checkpoint runs/chat-34m/chat-34m-final.pt --device auto
+python -m iridium export --checkpoint runs/chat-34m/chat-34m-final.pt --out chat-34m-inference.pt
+python -m iridium chat --checkpoint chat-34m-inference.pt --device auto
 ```
 
 ## Tool use (`tools-100m`)

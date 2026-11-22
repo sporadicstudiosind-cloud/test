@@ -101,6 +101,7 @@ def joint_itq(u: torch.Tensor, v: torch.Tensor, iterations: int = 50,
     z = torch.cat([u, v], dim=0).double()
     r = z.shape[1]
     q, _ = torch.linalg.qr(torch.randn(r, r, generator=generator, dtype=torch.float64))
+    q = q.to(z.device)            # the generator may be CPU while the weights are on a GPU
     for _ in range(iterations):
         b = torch.where(z @ q >= 0, 1.0, -1.0).to(z.dtype)
         left, _, right_t = torch.linalg.svd(z.T @ b)

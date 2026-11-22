@@ -145,7 +145,7 @@ BPE-native next-token distribution yet to rank in the first place.
 
 | source | licence | verified | commercial_ok | default | why |
 |---|---|---|---|---|---|
-| `synthetic` (built in) | none needed | — | yes | **on** | calculator / unit conversion / key-value lookup — pure local functions, exactly gradeable |
+| `synthetic` (built in) | none needed | — | yes | **off** (name it in `mix`) | calculator / unit conversion / key-value lookup — pure local functions, exactly gradeable |
 | `glaiveai/glaive-function-calling-v2` | Apache-2.0 | yes (dataset card) | yes | **on** | 113k rows, converter implemented and tested against its real row format |
 | `NousResearch/hermes-function-calling-v1` | Apache-2.0 | yes (dataset card) | yes | **on** | converter verified against a live row preview (ShareGPT + `<tool_call>`/`<tool_response>` tags), multi-call turns split into alternating call/result pairs |
 | `Salesforce/xlam-function-calling-60k` | CC-BY-4.0 | yes (Hub metadata) | yes | off | Hub-gated (needs per-account access acceptance) — a loading obstacle, not a licence problem; catalogued so the licence is on record |
@@ -161,17 +161,17 @@ Neither `glaive` nor `hermes`'s dataset card names the specific model that
 generated its synthetic conversations — recorded as such rather than
 assumed clean of any upstream-model terms.
 
-`tool_items(n, mix, seed, split, tokenizer=None)` mirrors
+`tool_items(n_items, mix=None, seed=0, max_bytes=2048, split="train", tokenizer=None)` mirrors
 `chat_corpus.chat_items`: `allocate_mixture`'s exact largest-remainder
 budgeting, `text_corpus.in_split`'s deterministic content-hash train/test
 split, `chat.fit_to_budget`'s whole-turn budget trimming.
 
 ## 6. Training
 
-Mix `"tool_use"` items alongside `"chat"`/`"text_lm"`/the synthetic physics
+Mix a `"tools"` key alongside `"chat"`/`"text_lm"`/the synthetic physics
 families in `iridium.training.datasets.build_corpus`'s mixture dict — the
 same pattern `"chat"` already uses there. `tool_corpus.tool_items` is the
-function to call for a mixture key.
+function it calls. The items carry the family label `"tool_use"`.
 
 ## 7. Grading
 
@@ -182,8 +182,9 @@ separate deliberately, because a model that happens to state the same
 number the tool would have returned is not evidence it can use tools.
 
 No tool-calling model has been trained yet; no accuracy number is claimed.
-`iridium-50m` trains tool calls as part of its mixture, and
-`python -m iridium battery` grades them once a checkpoint exists.
+The `iridium-50m` mixture includes `agent_episode` tool episodes
+(`iridium/data/agent_corpus.py`), not this family, and
+`python -m iridium battery` grades agent tasks once a checkpoint exists.
 
 ## When the model does not know (`iridium.runtime.abstain`)
 
@@ -193,7 +194,7 @@ No tool-calling model has been trained yet; no accuracy number is claimed.
 depth=...)`; results accumulate as `tool_result` turns) -> only then does it
 stop, and it **asks**: "I couldn't find this ... Do you want me to
 extrapolate?" (`Answer.needs_permission`). `Answerer.extrapolate(question,
-answer)` then answers at full depth and width, labelled "Extrapolated, not
+previous=None)` then answers at full depth and width, labelled "Extrapolated, not
 verified:". Halting inside the core also waits for the previous loop: a token
 stops only when the halting head is confident *and* its prediction matches
 the previous loop's, so no token halts on its first pass. An

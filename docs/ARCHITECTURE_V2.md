@@ -1,6 +1,7 @@
 > **Superseded (kept for history).** This describes a pre-1.0 revision. For
 > current instructions see [the docs index](README.md) and
-> [free-tier training](free-tier-training.md).
+> [free-tier training](free-tier-training.md). Nothing in the current notebooks or
+> package calls `intelligence_preset`; it remains defined in `iridium/config_builder.py`.
 
 # Iridium controller and context revision
 

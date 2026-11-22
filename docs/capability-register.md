@@ -37,12 +37,12 @@ checked.
 |---|---|---|
 | Control core, two stages, indexed ponder loop | implemented | `tests/integration/test_kv_parity.py` |
 | Causal macro-router: top-k stacks, focus, halting | implemented | `tests/unit/test_router.py` |
-| Superstacks with sparse stack-local KV + core bridge | implemented | `test_kv_parity.py` (bit-exact at one loop) |
+| Superstacks with sparse stack-local KV + core bridge | implemented | `test_kv_parity.py` (agrees to FP64 rounding, 1e-13, at one loop) |
 | PonderNet depth ladder inside a stack | implemented | `test_torch_stopping_matches_the_numpy_contract` |
 | Span-coherent routing keeps field grids whole | implemented | `grid_intact_fraction`: 0% per-token, 100% span-coherent |
 | Spectral operator, correct corner blocks, 1/2/3-D | implemented | shift-equivariant to 3e-16; exactly resolution-invariant |
 | Parameter/memory accounting to 9 T | implemented | formula == modules, delta 0 (`test_config_inventory.py`) |
-| Omnimodal codecs: 8 modalities in and out | implemented | `tests/integration/test_model.py`, patchify round-trip exact |
+| Omnimodal codecs: 8 modalities in and out | implemented (no direct test) | `iridium/codecs/spans.py` (`patchify` / `unpatchify`). No `test_model.py` exists, and no patchify round-trip test was found |
 | Flow-matching continuous heads | implemented | trains; sample quality not evaluated |
 | Capacity-based token dropping | **unsupported** | refused as non-causal (`test_capacity_dropping_is_refused_as_non_causal`) |
 | Per-token ponder granularity (copy-through KV) | specified | `model/iridium1.py` docstring; chunk-uniform implemented instead |
@@ -58,13 +58,13 @@ checked.
 | Open-channel flow; Manning and critical depth | implemented | converges to analytic normal depth from both sides |
 | The doubling intervention, end to end | evaluated | measured 1.515647 vs analytic 1.515717 |
 | Dual-system escalation with an evidence ladder | implemented | `physics/verifier.py`; drifting prediction escalates |
-| Resource-limited sandbox | implemented | timeout, memory, network, env-scrub all blocked |
+| Resource-limited sandbox | implemented (partly tested) | `iridium/runtime/sandbox.py`. Tested: timeout and platform run (`tests/unit/test_iridium_50m.py`). Memory, network and env-scrub limits have no test |
 | Sandbox with seccomp / filesystem namespace | **unsupported** | `SandboxResult.isolation` records their absence |
-| Per-stream isolation, no cross-stream state | implemented | output bit-identical with and without neighbours |
-| Focus-weighted scheduling with fairness floor | implemented | budget conserved; per-owner cap holds |
-| Typed action space; deterministic scene editor | implemented | every op has a checked bpy translation |
+| Per-stream isolation, no cross-stream state | implemented | `tests/integration/test_isolation.py::test_a_streams_output_does_not_depend_on_its_neighbours` (bit-identical with and without neighbours) |
+| Focus-weighted scheduling with fairness floor | implemented (no direct test) | `iridium/runtime/scheduler.py`, run through the service in `test_isolation.py`. Budget conservation and the per-owner cap are not tested directly |
+| Typed action space; deterministic scene editor | implemented (no direct test) | `iridium/agency/scene.py`: `to_blender` maps each op to a bpy call; no test exercises the mapping |
 | Real Blender actuation (`bpy` in the loop) | specified | script emitted, never executed here |
-| MXFP4 / FP8 quantization, measured | implemented | 4.25 bits/param; SQNR 18.9 / 31.5 dB |
+| MXFP4 / FP8 quantization, measured | implemented | 4.25 bits/param; SQNR 18.9 / 31.5 dB (`iridium quant`; bit width in `test_config_inventory.py`) |
 | Report reconciliation against an exact metric table | implemented | malformed markers now fail the gate too |
 
 ## Model (dense reference, retained)
@@ -82,7 +82,7 @@ checked.
 | Stopping distribution, per-stop loss, two serving policies | implemented | `tests/unit/test_halting.py` |
 | Trained halting head / adaptive depth | unsupported | semantics tested; no trained stopping behaviour |
 | Parameter and cache inventory at three scales | implemented | `tests/unit/test_inventory.py` |
-| Isolation beyond attention (cache, memory, logs, storage, handles) | specified | backlog; **not** claimed as done |
+| Isolation beyond attention (cache, memory, logs, storage, handles) | specified | Partly tested: cache release and no shared tensor storage between streams (`tests/integration/test_isolation.py`). Memory, logs and handles are untested; **not** claimed as done |
 
 ## Physics
 
@@ -110,9 +110,12 @@ checked.
 | Conditional flow matching, native continuous head | trained + evaluated | quality-vs-steps curve in [`first-slice.md`](first-slice.md) |
 | Step count chosen by measurement, not promise | implemented | `image_quality_vs_steps` |
 | Noise time τ distinct from physical time | implemented | separate embedding; distinct axes in the slice |
-| Text / code / action generation | unsupported | instruction is consumed, never produced |
-| Image editing, inpainting, conditioning dropout, guidance | unsupported | — |
-| Video, speech, sound, long-horizon planning | unsupported | — |
+| Text and chat generation | trained | `chat-34m` run, see the training path below |
+| Action (opcode) generation | trained | nano phase-1 run: first-opcode accuracy 0.000 → 1.000 on 16 items ([`results.md`](results.md)) |
+| Code generation | unsupported | `iridium-50m` trains on code families (`tests/unit/test_iridium_50m.py`); no code output is measured |
+| Conditioning dropout and classifier-free guidance | implemented | `iridium/model/heads.py` (`cfg_dropout`, `guidance_scale`); `tests/unit/test_heads.py::test_cfg_dropout_trains_null_branch_and_guidance_changes_output` |
+| Image editing, inpainting | unsupported | — |
+| Video, speech, sound, long-horizon planning | unsupported | generation only; `iridium-50m` has image and audio input encoders ([`iridium-50m.md`](iridium-50m.md)) |
 | Scientific rendering with artifact lineage | specified | — |
 | Evidence-level gating in the manifest | implemented | schema conditionals in `result_manifest.v1.json` |
 | Numeric reconciliation of report claims | implemented | `tests/unit/test_metrics.py`, incl. the real contradiction fixture |
@@ -122,16 +125,17 @@ checked.
 
 | Capability | Status | Evidence |
 |---|---|---|
-| Resident service, continuous batching, paged cache | specified | — |
+| Resident service: one model, many isolated streams | implemented | `iridium/runtime/service.py`; `tests/integration/test_isolation.py`. Cooperative and single-threaded |
+| Continuous batching, paged cache | specified | — |
 | Compute request → broker arbitration | specified | request schema in arch §8.3; no broker |
 | Scheduling classes, interactive floor, preemption | specified | — |
 | Full duplex, clocks, jitter, interruption | specified | — |
 | Durable memory, restart, idempotent replay | specified | — |
-| Blender bridge, transactions, postconditions, recovery | specified | `action.v1.json` only |
+| Blender bridge, transactions, postconditions, recovery | specified | `action.v1.json`, and `iridium/agency/scene.py` (`to_blender`); no transactions or recovery |
 | GUI/CLI action execution | unsupported | — |
 | Inverse problems from partial observation | unsupported | — |
 | Active experiment proposal | unsupported | research |
-| Self-improvement loops (all three) | specified | — |
+| Self-improvement loops (all three) | specified | candidate-research controller in `iridium/research/` (controller, policy, worker); no test covers it |
 | Scenarios A–G | unsupported | targets, see [`scenarios.md`](scenarios.md) |
 
 ---
@@ -140,9 +144,9 @@ checked.
 
 | Capability | Status | Evidence |
 |---|---|---|
-| `chat-34m` text and chat | trained | one recorded run, 20k steps: validation 1.19 bpb text, 0.87 chat (`CHANGELOG.md`). Not evaluated beyond that loss |
-| `iridium-50m` (four specialists, tools, image and audio input) | implemented | `tests/unit/test_iridium_50m.py`; a full-size step runs on CPU. Not trained |
-| One run across several GPUs, gradients averaged | implemented | `test_two_processes_train_in_lockstep` (two CPU processes end on identical weights). Not timed on GPUs |
+| `chat-34m` text and chat | trained | one recorded run, 20k steps: validation 1.19 bpb text, 0.87 chat (`CHANGELOG.md`). Not evaluated beyond that loss. The preset was later rebuilt as `chat-36m` |
+| `iridium-50m` (four specialists, tools, image and audio input) | implemented | `tests/unit/test_iridium_50m.py`; a full-size step runs on CPU. A live Kaggle run is training it (`CHANGELOG.md`); no finished run or battery result is recorded in this repository |
+| One run across several GPUs, gradients averaged | implemented | `test_two_processes_train_in_lockstep` (two CPU processes end on identical weights). Timed on Kaggle 2xT4: ~9.8k tok/s for both GPUs together (`CHANGELOG.md`) |
 | Ponder loops trained at sampled depths | implemented | `test_sampled_loops_follow_the_probabilities_and_train` |
 | Specialist routing curriculum | implemented | `tests/unit/test_specialist_curriculum.py`; a toy CPU experiment in [`iridium-50m.md`](iridium-50m.md). Untested at full size |
 | Check that each stack wins its own subject | implemented | `test_specialist_matrix_overrides_routing_and_restores_it`; `python -m iridium specialists` |
@@ -150,19 +154,30 @@ checked.
 | Checkpoint per round, safe resume | implemented | `tests/unit/test_checkpointing.py` |
 | Agent tools (files, Python, calculator, web) | implemented | workspace-escape tests; `run_python` is a guard rail, not a security boundary |
 | Constitution: written principles and an output screen | implemented | `iridium/alignment/constitution.py`. No training data and no runtime guard; see [`constitution-plan.md`](constitution-plan.md) |
+| NorMuon and Polar Express Muon (`muon_pe`, `normuon`) | evaluated (toy scale) | `tests/unit/test_muon.py`, `tests/unit/test_muon_variants.py`. 2.1M-parameter CPU ablation, held-out bytes, 1,200 steps, lr 6e-3: NorMuon 0.727 vs AdamW 0.861 ([`iridium-50m.md`](iridium-50m.md)) |
+| Canon layers (`canon`) | evaluated (toy scale) | `iridium/model/layers.py` (`CanonConv`); option sets in `tests/unit/test_core_blocks.py`. Same ablation: 0.792 vs 0.861 with AdamW, but neutral under NorMuon (two-seed mean difference 0.001) |
+| Gated attention (`attn_gate` = `head` / `elem`) | implemented | `iridium/config.py`, `iridium/model/core_blocks.py`; option sets in `tests/unit/test_core_blocks.py`. Toy ablation showed no measurable effect; off in every shipped preset |
+| LittleBit sub-1-bit layers | implemented | `iridium/quant/littlebit.py`; `tests/unit/test_littlebit.py`. Quality loss is large at this model size (`CHANGELOG.md`) |
+| `iridium cloze` (HellaSwag, ARC, OpenBookQA, PIQA as likelihoods) | implemented | `iridium/evaluation/cloze.py`; `tests/unit/test_cloze.py`. No scores are recorded in this repository |
+| Teacher-written subject text (`iridium teacher generate` / `shard`) | implemented | `iridium/data/teacher_corpus.py`; `tests/unit/test_teacher_corpus.py` |
+| Same-subject sequence packing | implemented | `iridium/training/datasets.py` (`BatchLoader`, packed batches); `tests/unit/test_next_run_features.py` |
+| Parallel `data prepare` | implemented | `iridium/training/prepare.py`; `tests/unit/test_prepare_speed.py`. Output is byte-identical to the serial path (`CHANGELOG.md`) |
+| Control presets `iridium-50m-control-random` / `-dense` | implemented | `iridium/presets.py`. The experiment they exist for has no recorded result |
+| Free-after-first-loop routing (`curriculum_first_loop_only`) | implemented | `iridium/config.py`, `iridium/model/iridium1.py`; `tests/unit/test_specialist_curriculum.py`. Opt-in; untested at scale |
 | Model council (several instances debating) | specified | design only |
 
 ---
 
 ## Summary
 
-| Status | Count (approx.) |
+| Status | Count (rows in the tables above) |
 |---|---|
-| implemented (test-backed) | 37 |
-| trained | 4 |
-| evaluated on held-out data | 3 |
-| specified only | 20 |
-| unsupported | 15 |
+| implemented (of which 4 are partly tested or lack a direct test) | 69 |
+| trained | 3 |
+| trained and evaluated | 3 |
+| evaluated (toy-scale rows included) | 3 |
+| specified only | 18 |
+| unsupported | 14 |
 
 The gap between "specified" and "trained" is the honest shape of this project. The
 specification is comprehensive; the implementation covers contracts, the model reference,

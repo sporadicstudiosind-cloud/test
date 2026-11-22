@@ -157,7 +157,7 @@ python -m iridium ladder                         # every rung, 34 M to 8 B and b
 python -m iridium report modern --verify         # accounting checked against the modules
 python -m iridium plan base --gpus 1024          # 4-D parallelism and its cost model
 python -m iridium evaluate --help                # graded accuracy on held-out splits
-python -m iridium chat                           # $IRIDIUM_CHECKPOINT or weights/iridium-inference.pt if set, else the bundled pre-1.0 checkpoint
+python -m iridium chat                           # your checkpoint if $IRIDIUM_CHECKPOINT or weights/iridium-inference.pt exists, else the bundled pre-1.0 one
 python -m iridium chat --checkpoint MODEL.pt --think 3   # more ponder loops
 python -m iridium export --help                  # a smaller inference-only checkpoint
 ```
