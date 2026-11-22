@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **`RouterConfig.curriculum_first_loop_only`** (opt-in): the subject curriculum and
+  subject-label loss bind only the first ponder loop, so later loops can route a window
+  to a different stack (e.g. maths stack, then code stack). Untested at scale.
+- **Kaggle notebook reads an optional `HF_TOKEN` secret** for data streaming (lifts the
+  anonymous Hugging Face rate limit). Third research pass in docs/research-2026-11.md.
 - **Faster `data prepare`.** Families are written in parallel processes (default: every
   core, at most four; `--workers` / `prepare(workers=...)`), largest first, and chat-type
   families tokenize 256 conversations per batched call instead of one turn at a time

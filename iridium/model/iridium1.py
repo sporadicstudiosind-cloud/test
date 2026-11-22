@@ -301,7 +301,8 @@ class Iridium1(nn.Module):
                 decision.stack_index = decision.stack_index.clone()
                 decision.stack_weight = decision.stack_weight.clone()
                 decision.valid = decision.valid.clone() if decision.valid is not None else batch.valid.clone()
-            for row, metadata in enumerate(batch.meta):
+            pinned = loop == 0 or not self.cfg.router.curriculum_first_loop_only
+            for row, metadata in enumerate(batch.meta if pinned else ()):
                 subject = metadata.get("subject")
                 names = self.cfg.stacks.specializations
                 if subject in names:
@@ -318,7 +319,7 @@ class Iridium1(nn.Module):
                         decision.stack_index[row] = index
                         decision.stack_weight[row] = 1. / decision.stack_index.shape[-1]
                         decision.valid[row] = mask
-            if curriculum is not None and not self.cfg.controller_mode:
+            if curriculum is not None and not self.cfg.controller_mode and pinned:
                 self._apply_curriculum(decision, curriculum)
             override = getattr(self, "route_override", None)
             if override is not None:

@@ -130,3 +130,22 @@ def test_specialist_matrix_overrides_routing_and_restores_it():
     model.route_override = "core"
     assert sum(model(batch).stats["stack_stats"][0]["per_stack_tokens"]) == 0
     model.route_override = None
+
+
+def test_first_loop_only_frees_later_loops():
+    # Solo + forced: every token of a labelled window sits on its subject's
+    # stack. With curriculum_first_loop_only that holds on loop 0 only; later
+    # loops take the router's own choice (top-2 over distinct stacks, so
+    # never "subject stack in both slots").
+    for free in (False, True):
+        model, cfg = _model(subject_force=True, solo_p=1.0, curriculum_first_loop_only=free)
+        if cfg.router.max_loops < 2 or cfg.stacks.n_stacks < 2:
+            return
+        model.train()
+        torch.manual_seed(0)
+        out = model(_batch(cfg, ["math"] * 3), n_loops=2)
+        assert bool((out.decisions[0].stack_index == 1).all())
+        pinned = bool((out.decisions[1].stack_index == 1).all())
+        assert pinned is (not free)
+        loss = out.stats["subject_loss"]
+        assert bool(torch.isfinite(loss.detach())) and float(loss.detach()) > 0

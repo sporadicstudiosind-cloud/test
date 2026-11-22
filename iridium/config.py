@@ -526,6 +526,12 @@ class RouterConfig:
     subject_force: bool = False
     solo_p: float = 0.0
     any_p: float = 0.0
+    #: ``curriculum_first_loop_only``: the curriculum and the subject-label
+    #: loss bind only the first ponder loop; later loops route freely, so a
+    #: window can go e.g. math stack -> core -> code stack. Without it every
+    #: loop of a labelled window is pinned to the same stack, and that
+    #: sequential route is never trained.
+    curriculum_first_loop_only: bool = False
     capacity_factor: float = 0.0   # 0 disables token dropping (see docs)
     router_temperature: float = 1.0
 

@@ -129,3 +129,29 @@ SmolLM2), since Llama's licence requires a derived model's name to start with
 "Llama" and Gemma's terms reach models trained on its outputs. For phones, the
 routing's data-dependent shapes are what block ExecuTorch/ONNX export; a
 fixed-capacity dispatch would unlock both.
+
+## Third pass (22 Nov 2026): faster without losing quality
+
+Five searches (GPU, fewer steps, data pipeline, routed/looped compute, inference).
+Most numbers came from abstracts; the ones marked checked were re-read. Already in
+the code: SDPA's memory-efficient kernel with a logged warning if the math fallback is
+picked (`layers._report_cuda_kernel`), NorMuon with Polar Express, Canon, packing,
+parallel prepare with one tokenizer thread per process.
+
+| Idea | Evidence | Verdict here |
+|---|---|---|
+| `HF_TOKEN` for data streaming | HF docs: no token is "the number one reason users get rate limited" | Kaggle notebook now reads an optional `HF_TOKEN` secret |
+| Download parquet, then tokenize locally | HF streaming blog, up to 2x (setup unstated) | worth doing if prepare is network-bound; not built |
+| Batch-size warmup | checked: OLMo 1B, 43% fewer *steps* than a small-batch control ([2505.23971](https://arxiv.org/abs/2505.23971)) | saves steps, not tokens; a T4 is compute-bound, so little wall-clock gain |
+| Constant LR + checkpoint merging (WSM) | checked: beats WSD, but measured continuing a 10.2T-token MoE ([2507.17634](https://arxiv.org/abs/2507.17634)) | EMA 0.999 already averages; not from-scratch evidence |
+| Fused CE / RMSNorm / SwiGLU (Liger) | A100 numbers; Triton on sm_75 unverified | profile a T4 step first |
+| torch.compile, CUDA graphs | routing's data-dependent shapes defeat graphs; one T4 report of no gain | compile fixed-shape blocks only, after profiling |
+| 2 vs 3 ponder loops | LoopCoder-v2 reports 3+ loops regress at 7B (numbers unverified) | test `loop_probs` with 2 loops max |
+| Truncated backprop through loops (Huginn) | last ~8 of ~32 recurrences (secondary sources) | irrelevant at 1-3 loops |
+| Shared-context scoring in cloze eval | catwalk, LLMBox | eval-only speedup; not built |
+| Speculative decoding | needs generation; top-2 routing erodes it (MoE-Spec) | later, for chat serving |
+| Free routing after loop 1 | design argument, untested | `RouterConfig.curriculum_first_loop_only`, opt-in |
+
+Rejected as not lossless or not applicable: PowerSGD (accuracy risk), int4/int8 for
+quality-critical eval, sequence-length warmup (conflicts with packing), token dropping
+(BERT-era only), upcycling (scratch is fine at 50M with a full budget).

@@ -185,6 +185,15 @@ def private_clone_cell(target: str) -> str:
             "    token = UserSecretsClient().get_secret('GITHUB_TOKEN')\n"
             "except Exception:\n"
             "    token = None\n"
+            "# Optional: a free Hugging Face read token (secret HF_TOKEN) lifts the\n"
+            "# anonymous rate limit that throttles data preparation. Never printed.\n"
+            "try:\n"
+            "    _hf = UserSecretsClient().get_secret('HF_TOKEN')\n"
+            "    if _hf:\n"
+            "        os.environ['HF_TOKEN'] = _hf\n"
+            "    del _hf\n"
+            "except Exception:\n"
+            "    pass\n"
         )
         missing_token_hint = (
             "In Kaggle: Add-ons, Secrets, add GITHUB_TOKEN with a "
