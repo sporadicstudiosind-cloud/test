@@ -771,7 +771,11 @@ class Trainer:
         if record.get("tokens_per_second"):
             parts.append(f"{record['tokens_per_second'] / 1000:.1f}k tok/s")
         for device, memory in record.get('gpu_memory', {}).items():
-            parts.append(f"{device}={memory['allocated_gb']:.2f}GB")
+            # "held" is what stays allocated between steps (weights, grads,
+            # optimizer state); "peak" is the most any step has used, which is
+            # what decides whether a larger micro-batch fits.
+            parts.append(f"{device}={memory['allocated_gb']:.2f}GB held, "
+                         f"peak {memory['peak_gb']:.1f}GB")
         return "  ".join(parts)
 
     # -- persistence ------------------------------------------------------
