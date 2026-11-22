@@ -76,7 +76,7 @@ def test_prepare_then_train_from_shards_offline(tmp_path, monkeypatch):
                                  mixture={"text_lm": 0.5, "chat": 0.3, "false_premise": 0.2},
                                  steps=3, batch_size=4, window=64, rounds=1, micro_batch=4)
     monkeypatch.setattr(run_preset, "get_preset", lambda name: preset, raising=False)
-    out = prep.prepare(preset, tmp_path / "data")
+    out = prep.prepare(preset, tmp_path / "data", workers=1)   # patched sources
     assert (out / "text_lm-train.bin").exists() and (out / "chat-train.idx").exists()
     assert (out / "text_lm-test.bin").exists() and (out / "chat-test.bin").exists()
     preset = dataclasses.replace(preset, steps=4)

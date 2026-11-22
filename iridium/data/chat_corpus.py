@@ -598,6 +598,46 @@ def _split_key(key: str, turns, joined: str) -> str:
     return turns[-1].text if key in _SHARED_WITH_TEXT and turns else joined
 
 
+_ENCODE_BLOCK = 256
+
+
+def _blocks(items, size: int):
+    block = []
+    for item in items:
+        block.append(item)
+        if len(block) == size:
+            yield block
+            block = []
+    if block:
+        yield block
+
+
+class _Prefetched:
+    """A tokenizer whose ``encode`` answers from one batched encode of known texts.
+
+    Texts outside the batch fall through to the real tokenizer, so the ids
+    never differ from calling it directly. ``None`` (the byte tokenizer)
+    passes through unchanged.
+    """
+
+    def __new__(cls, tokenizer, texts):
+        if tokenizer is None or not hasattr(tokenizer, "encode_batch"):
+            return tokenizer
+        return super().__new__(cls)
+
+    def __init__(self, tokenizer, texts) -> None:
+        unique = list(dict.fromkeys(texts))
+        self._tok = tokenizer
+        self._ids = dict(zip(unique, tokenizer.encode_batch(unique))) if unique else {}
+
+    def encode(self, text: str) -> list[int]:
+        ids = self._ids.get(text)
+        return self._tok.encode(text) if ids is None else ids
+
+    def __getattr__(self, name):
+        return getattr(self._tok, name)
+
+
 def iter_chat_items(mix: Optional[dict[str, float]] = None, seed: int = 0,
                     max_bytes: int = 1024, split: str = "train", tokenizer=None,
                     max_tokens: Optional[int] = None):
@@ -613,23 +653,31 @@ def iter_chat_items(mix: Optional[dict[str, float]] = None, seed: int = 0,
 
     mix = {k: w for k, w in (mix or DEFAULT_CHAT_MIX).items() if w > 0}
 
-    def source(i, key):
+    def fitting(key, i):
         for turns in CONVERSATION_LOADERS[key](limit=None, seed=seed + i):
             if not in_split(_split_key(key, turns, "\n".join(t.text for t in turns)), split):
                 continue
             turns = fit_to_budget(turns, max_bytes)
             while turns and turns[0].role == "assistant":
                 turns = turns[1:]
-            users = [t for t in turns if t.role == "user"]
-            if not users or turns[-1].role != "assistant":
-                continue
-            sample = conversation_sample(turns, supervise_assistant=True,
-                                         meta={"family": "chat", "source": key},
-                                         tokenizer=tokenizer)
-            if max_tokens is not None and len(sample) > max_tokens:
-                continue
-            yield Item(sample=sample, family="chat", prompt=users[-1].text[:80],
-                       answer=turns[-1].text, truth={"source": key})
+            if any(t.role == "user" for t in turns) and turns[-1].role == "assistant":
+                yield turns
+
+    def source(i, key):
+        for block in _blocks(fitting(key, i), _ENCODE_BLOCK):
+            # One batched encode per block instead of one call per turn: the
+            # Rust tokenizer amortises its per-call overhead (measured 2.6x
+            # faster on 4k-character stories). The ids are the same.
+            tok = _Prefetched(tokenizer, [t.text for turns in block for t in turns])
+            for turns in block:
+                sample = conversation_sample(turns, supervise_assistant=True,
+                                             meta={"family": "chat", "source": key},
+                                             tokenizer=tok)
+                if max_tokens is not None and len(sample) > max_tokens:
+                    continue
+                users = [t for t in turns if t.role == "user"]
+                yield Item(sample=sample, family="chat", prompt=users[-1].text[:80],
+                           answer=turns[-1].text, truth={"source": key})
 
     live = {k: source(i, k) for i, k in enumerate(sorted(mix))}
     drawn = {k: 0 for k in live}

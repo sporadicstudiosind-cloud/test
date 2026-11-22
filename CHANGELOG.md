@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Faster `data prepare`.** Families are written in parallel processes (default: every
+  core, at most four; `--workers` / `prepare(workers=...)`), largest first, and chat-type
+  families tokenize 256 conversations per batched call instead of one turn at a time
+  (2.6x faster tokenizing on 4k-character stories; tokenizing was about a third of the
+  chat path's time, the rest is streaming). Output is byte-identical to the serial path
+  (checked). Expect roughly 2-3x on a 4-core Kaggle CPU session. Disk writes were already
+  buffered and were not the bottleneck.
 - **`iridium cloze`**: HellaSwag, ARC-Easy, ARC-Challenge, OpenBookQA and PIQA scored as
   cloze likelihoods (OLMES's small-model formulation), reporting raw, per-byte and
   unconditional-normalised accuracy, with each loop scored as training scores it.

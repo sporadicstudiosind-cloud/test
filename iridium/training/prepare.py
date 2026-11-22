@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 
 import numpy as np
 import sys
@@ -42,8 +43,22 @@ def plan(preset: Preset, tokens: Optional[int] = None) -> dict[str, int]:
     return {k: v for k, v in quotas.items() if k in SHARDED_FAMILIES and v > 0}
 
 
+def default_workers() -> int:
+    """Processes for :func:`prepare`: every core, at most four (a Kaggle CPU session)."""
+    return max(1, min(4, os.cpu_count() or 1))
+
+
 def prepare(preset: Preset, out: str | Path = "data", *, tokens: Optional[int] = None,
-            seed: int = 0, max_data: bool = False, split: str = "train") -> Path:
+            seed: int = 0, max_data: bool = False, split: str = "train",
+            workers: Optional[int] = None) -> Path:
+    """Write every family's shards.
+
+    Families are independent (each streams its own sources and writes its own
+    files), so with ``workers > 1`` they run in parallel processes, largest
+    first. The output is byte-identical to ``workers=1``: each family's stream
+    depends only on its sources and ``seed``. ``workers=1`` runs in this
+    process, which is what tests that patch the sources need.
+    """
     from ..config import TEXT_ID_OFFSET
     from ..data.chat_corpus import CHAT_SOURCES, DEFAULT_CHAT_MIX, MAX_CHAT_MIX, iter_chat_items
     from ..data.shards import ShardWriter
@@ -70,23 +85,46 @@ def prepare(preset: Preset, out: str | Path = "data", *, tokens: Optional[int] =
     ctx = dict(out_dir=out_dir, rows=rows, tokenizer=tokenizer, window=preset.window,
                text_mix=text_mix, chat_mix=chat_mix, chat_bytes=chat_bytes, seed=seed,
                base_meta=base_meta, max_data=max_data)
-    written = {}
-    for family, need in plan(preset, tokens).items():
-        written[family] = _write_family(family, split, need, **ctx)
+    needs = plan(preset, tokens)
     # A held-out split for validation loss and bits per byte: disjoint from
     # train by the sources' own content-hash split, small enough to evaluate
     # often. Tools are exactly graded elsewhere, so only language is held out.
-    held_out = {}
-    for family, need in plan(preset, tokens).items():
-        if family != "tools":
-            meta = _write_family(family, "test", min(max(need // 200, 64), 1024), **ctx)
-            if meta["items"]:       # a very small source may have nothing held out
-                held_out[family] = meta
+    jobs = [(family, split, need) for family, need in needs.items()]
+    jobs += [(family, "test", min(max(need // 200, 64), 1024))
+             for family, need in needs.items() if family != "tools"]
+    results = _run_jobs(jobs, ctx, default_workers() if workers is None else workers)
+    written = {f: results[(f, split)] for f in needs}
+    held_out = {f: results[(f, "test")] for f in needs
+                if f != "tools" and results[(f, "test")]["items"]}  # a tiny source may hold nothing out
     (out_dir / "prepared.json").write_text(json.dumps(
         {"preset": preset.name, "split": split, "tokens_planned": tokens or preset.tokens,
          "families": written, "held_out": held_out, "id_offset": TEXT_ID_OFFSET},
         indent=2, default=str))
     return out_dir
+
+
+def _run_jobs(jobs, ctx: dict, workers: int) -> dict:
+    """``_write_family`` for each ``(family, split, need)``, keyed by ``(family, split)``."""
+    if workers <= 1 or len(jobs) <= 1:
+        return {(f, s): _write_family(f, s, n, **ctx) for f, s, n in jobs}
+    import concurrent.futures as cf
+    import multiprocessing as mp
+
+    # Largest first, so the longest family is not the one left running alone.
+    order = sorted(jobs, key=lambda j: -j[2])
+    # spawn, not fork: the parent may already hold network sessions and
+    # tokenizer threads, which fork copies in an unsafe state. One tokenizer
+    # thread per process, since the processes already fill the cores.
+    threads = str(max(1, (os.cpu_count() or 1) // workers))
+    with cf.ProcessPoolExecutor(max_workers=min(workers, len(jobs)),
+                                mp_context=mp.get_context("spawn"),
+                                initializer=_worker_init, initargs=(threads,)) as pool:
+        futures = {pool.submit(_write_family, f, s, n, **ctx): (f, s) for f, s, n in order}
+        return {futures[fut]: fut.result() for fut in cf.as_completed(futures)}
+
+
+def _worker_init(threads: str) -> None:
+    os.environ.setdefault("RAYON_NUM_THREADS", threads)
 
 
 def _write_family(family, split, need, *, out_dir, rows, tokenizer, window, text_mix,

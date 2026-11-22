@@ -631,6 +631,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default="data")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--max-data", action="store_true")
+    p.add_argument("--workers", type=int, default=None,
+                   help="families written in parallel (default: cores, at most 4)")
     p.add_argument("--plan", action="store_true", help="print item counts and exit")
     _budget_args(p)
     p.set_defaults(func=cmd_data)
@@ -701,7 +703,8 @@ def cmd_data(args) -> int:
         for family, n in plan(preset).items():
             print(f"{family:<8} {n:>12,} items of up to {preset.window} tokens")
         return 0
-    out = prepare(preset, args.out, seed=args.seed, max_data=args.max_data)
+    out = prepare(preset, args.out, seed=args.seed, max_data=args.max_data,
+                  workers=args.workers)
     print(f"shards written to {out}")
     return 0
 
