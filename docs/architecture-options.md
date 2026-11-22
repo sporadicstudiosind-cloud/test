@@ -20,13 +20,16 @@ binding constraint.
 The `modern` rung (`get_config("modern")`, 743,752,454 parameters) assembles the
 options with published evidence at scale and leaves out the ones without. Its
 computed cache at 1M tokens is 10.7 GB (bf16, three ponder loops, worst-case
-routing), against 75 GB for `test1b`; see `CoreConfig.cache_bytes`.
+routing), against 107 GB for `test1b` under the same accounting (decimal GB);
+see `IridiumConfig.kv_bytes_per_token`.
 
 ## Control core — `CoreConfig`, and superstacks — `SuperstackConfig`
 
 Both accept the same per-layer fields (the superstack ones act on each stack's
 self-attention; the bridge cross-attention onto the core always stays GQA).
-`hyper_streams` is core-only.
+`hyper_streams` and `canon` are core-only. Superstacks also skip rows that no
+token was routed to before running (`SuperstackBank.compact_rows`, on by
+default). That is exact; it is off while a KV cache is live.
 
 | field | values | what it does | evidence / caveat |
 | --- | --- | --- | --- |

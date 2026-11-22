@@ -92,7 +92,8 @@ class Preset:
     rounds: int = 4                    # fresh-data rounds; see run_preset
     #: Sequences per forward pass; the rest of ``batch_size`` is gradient
     #: accumulation. 8 x 1024 tokens of a ~100M routed model fits a 15-16 GB
-    #: card with room for the ponder loop; the trainer halves it on OOM anyway.
+    #: card with room for the ponder loop. On OOM the trainer first splits each
+    #: micro-batch into more forward passes, then halves it.
     micro_batch: int = 8
     #: Probability of training a step at 1, 2, ... ponder loops (see
     #: ``TrainConfig.loop_probs``); empty trains every step at one loop.
@@ -239,14 +240,16 @@ def _iridium_50m(chat34: IridiumConfig) -> Preset:
         "tool use and basic image and audio input.",
         cfg, dict(_IRIDIUM50_MIX), steps=tokens // (batch * window), batch_size=batch,
         window=window, lr=1.5e-3,
-        # A checkpoint every ~250 steps (about 15-30 minutes on two T4s), so a
-        # session ended by the weekly quota, not the 12 h limit, loses little.
+        # A checkpoint every ~250 steps (about 30 minutes at the measured ~9.8k
+        # tok/s on two T4s), so a session ended by the weekly quota, not the
+        # 12 h limit, loses little.
         rounds=300, free_tier="kaggle_2xt4",
         micro_batch=16, loop_probs=(0.7, 0.2, 0.1),
         prepare_tokens=2_500_000_000, tokenizer_sources=dict(TOKENIZER_SOURCES),
-        notes="5B tokens, ~100 per body parameter. About 15 hours on Kaggle's two T4s, "
-              "or two sessions, if one GPU reaches the 68k tok/s noted for chat-36m; "
-              "nothing has timed this model, so read tok/s in the first session's log. "
+        notes="5B tokens, ~100 per body parameter. First measured on Kaggle's two T4s: "
+              "about 9.8k tok/s for both GPUs together (micro-batch 16 fell back to 8 on "
+              "memory), which is about 140 hours of training at that rate. The earlier "
+              "15-hour estimate assumed chat-36m's 68k tok/s on one GPU. "
               "2.5B distinct tokens are written (about 7.5 GB), so the mix is seen about twice.")
 
 
@@ -280,7 +283,7 @@ def _iridium_50m_next(base: Preset) -> Preset:
       AdamW default, Muon more so. Toy-scale optima overshoot what a 76k-step
       run wants, so this is a hedge, not a measurement: sweep it.
     * **Canon layers** in the core (residual causal width-4 convolution after
-      each block norm, ~12k parameters). In the ablation they cut loss 1.315 ->
+      each block norm, ~18k parameters: two per core layer, 6 layers). In the ablation they cut loss 1.315 ->
       1.081 at 300 steps with AdamW, but by 1,200 steps with NorMuon the gain was
       ~0 over two seeds (0.069 with AdamW): mostly faster early learning. Kept as cheap
       insurance. Cached decoding is exact.
@@ -414,10 +417,11 @@ def _presets() -> dict[str, Preset]:
         get_config("modern"), {"text_lm": 0.55, "chat": 0.30, "tools": 0.15},
         steps=100_000, batch_size=64, window=4096, lr=3e-4, optimizer="muon",
         free_tier=None, rounds=50,
-        notes="Costed, not free-tier trainable: fp32 Adam state alone is ~12 GB and "
+        notes="Costed, not free-tier trainable: fp32 training state (weights, gradients "
+              "and Adam moments) is ~12 GB and "
               "the token budget is weeks of a single A100.")
 
-    # -- the size ladder: one general recipe (talk + tools) at five sizes ----
+    # -- the size ladder: one general recipe (talk + tools) at six sizes ----
     # Same mixture everywhere so the sizes are comparable; a subword vocabulary
     # of 32k from 500M up, where the embedding is a small share of parameters.
     from .config_builder import build
@@ -446,10 +450,10 @@ def _presets() -> dict[str, Preset]:
                "if it OOMs. About four days of a free TPU v5e-1."),
         "2b": (dict(d_model=1792, core_layers=14, n_superstacks=3, superstack_layers=14,
                     d_head=128, n_kv_heads=2, d_ff=4864), 120_000, 2048, 3e-4, None,
-               "~8B tokens. Costed only: ~33 GB of optimizer state."),
+               "~8B tokens. Costed only: ~33 GB of training state (weights, gradients, optimizer)."),
         "4b": (dict(d_model=2304, core_layers=14, n_superstacks=3, superstack_layers=18,
                     d_head=128, n_kv_heads=2, d_ff=6144), 240_000, 2048, 2.5e-4, None,
-               "~16B tokens. Costed only: ~64 GB of optimizer state; multi-GPU."),
+               "~16B tokens. Costed only: ~64 GB of training state (weights, gradients, optimizer); multi-GPU."),
     }
     for key, (kw, steps, window, lr, tier, notes) in ladder.items():
         cfg = _with_vocab(build(name=f"iridium-1-{key}", max_seq_len=4096, **kw), 32_768)

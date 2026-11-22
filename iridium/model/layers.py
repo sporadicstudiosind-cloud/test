@@ -4,14 +4,14 @@ Masks stay broadcast over heads. Fully masked rows are zeroed explicitly.
 Optional parameter-free Q/K normalization precedes RoPE; positions remain the
 original stream positions in both core and packed superstack attention.
 
-Three further knobs, all keyword-only, all defaulting to today's behaviour:
+Two further knobs, both keyword-only and both defaulting to today's behaviour:
 ``GroupedQueryAttention``/``TransformerBlock`` take ``window`` (a per-layer
 sliding-window size, for interleaving local and global layers a la Gemma 3 /
-Mistral) and ``softcap`` (Gemma 2 attention-logit softcapping), and grouped
-query attention now expands kv heads via SDPA's ``enable_gqa`` on backends
-that support it instead of always calling ``repeat_interleave`` first. See
-``_attend`` for what forces the manual backend and why, and ``sliding_window_keep``
-for how a window composes with an existing causal/keep mask.
+Mistral) and ``softcap`` (Gemma 2 attention-logit softcapping). Grouped query
+attention lets SDPA's ``enable_gqa`` expand kv heads on non-CUDA backends that
+support it, instead of calling ``repeat_interleave`` first; CUDA always repeats
+them. See ``_attend`` for what forces the manual backend and why, and
+``sliding_window_keep`` for how a window composes with an existing causal/keep mask.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def at_least_fp32(x: torch.Tensor) -> torch.Tensor:
     dtype float64, carrying fp32 rounding inside it. That is worth naming
     precisely because of where it lands. This repo's cache-parity gate runs
     the model in fp64 and demands cached decoding match the uncached forward
-    to 1e-10; a hardcoded ``.float()`` anywhere under it caps the achievable
+    to 1e-13; a hardcoded ``.float()`` anywhere under it caps the achievable
     agreement at fp32 eps, so the gate passes only while both sides happen to
     round identically, and fails the moment anything makes them differ —
     which is what a fused attention kernel on one CI runner did, producing
@@ -235,11 +235,10 @@ def _attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     only ever combine an *additive* bias or a boolean ``-inf`` into the score
     matrix — that is the entire vocabulary of ``attn_mask`` and ``is_causal``
     — and there is no bias that turns ``x`` into ``c * tanh(x / c)``, because
-    that reshapes the whole score distribution rather than shifting it. So
-    softcapping is exactly the case the module docstring means by "some masks
-    ... may not map onto SDPA": it is not the mask that fails to map, it is
-    the score transform, and enabling it deliberately trades the fused
-    kernel's memory/speed win for Gemma 2's cure for logit blowup.
+    that reshapes the whole score distribution rather than shifting it. So the
+    mask is not what blocks SDPA here; the score transform is. Enabling
+    softcapping deliberately trades the fused kernel's memory/speed win for
+    Gemma 2's cure for logit blowup.
     """
     if softcap is not None:
         if n_rep > 1:
@@ -520,9 +519,10 @@ class BridgeCrossAttention(nn.Module):
     head layout.
 
     The K/V projections are applied to the core states supplied by the caller.
-    In deployment those come from the core's residual stream at the dispatch
-    layer, cached once per stream and broadcast; recomputing them per stack
-    layer is the memory/compute trade the planner costs out.
+    In ``Iridium1.forward`` those are the core's loop-0 stage-I states for the
+    whole stream, cached once per stream and shared by every stack and loop;
+    recomputing them per stack layer is the memory/compute trade the planner
+    costs out.
     """
 
     def __init__(
@@ -623,7 +623,8 @@ def position_keep(
 
 
 class TransformerBlock(nn.Module):
-    """Pre-norm self-attention + SwiGLU. The unit both stacks are built from."""
+    """Pre-norm self-attention + SwiGLU: the sequential block. The control core
+    builds this unless ``block_kind`` is ``"parallel"`` (see core_blocks)."""
 
     def __init__(
         self,

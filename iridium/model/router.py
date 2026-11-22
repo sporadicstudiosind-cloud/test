@@ -26,7 +26,7 @@ cross-token dependence. It deliberately does **not** implement capacity-based
 token dropping by default: a capacity cutoff ranks tokens against each other
 within a chunk and reintroduces exactly the non-causality that Mixture-of-Depths
 (Raposo et al. 2024) has to patch with an auxiliary predictor. If capacity is
-enabled, ``capacity_factor > 0``, the class refuses to run in causal mode.
+enabled (``capacity_factor > 0``), ``forward`` raises ``NotImplementedError``.
 
 **C-3 · Load balancing needs the coefficient and all k choices.**
 The Switch Transformer objective is ``alpha * N * sum_i f_i * P_i`` with ``f_i``
@@ -266,9 +266,9 @@ def stopping_distribution(halt_prob: torch.Tensor, dim: int = -1) -> torch.Tenso
 
     ``p_r = lambda_r * prod_{j<r}(1 - lambda_j)`` with the final step absorbing
     the remaining mass so the distribution sums to exactly one. This mirrors
-    ``iridium/model/halting.py``; ``test_ponder.py`` asserts the two agree to
-    float64 precision so the numpy contract and the torch implementation cannot
-    drift apart.
+    ``iridium/model/halting.py``; ``tests/unit/test_router.py::test_torch_stopping_matches_the_numpy_contract``
+    asserts the two agree, so the numpy contract and the torch implementation
+    cannot drift apart.
     """
     # cumprod is promoted by AMP; its zero-handling backward must see a
     # matching input/output dtype. Retain float64 reference calculations.

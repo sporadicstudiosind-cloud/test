@@ -40,16 +40,21 @@ python -m iridium data prepare --preset iridium-50m        # tokenize once, to d
 python -m iridium train --preset iridium-50m --data data --resume auto   # uses every GPU
 python -m iridium battery --checkpoint runs/iridium-50m/iridium-50m-final.pt
 python -m iridium specialists --checkpoint runs/iridium-50m/iridium-50m-final.pt --data data
-python -m iridium cloze --checkpoint runs/iridium-50m/iridium-50m-final.pt   # HellaSwag, ARC, PIQA
+python -m iridium cloze --checkpoint runs/iridium-50m/iridium-50m-final.pt   # HellaSwag, ARC, OpenBookQA, PIQA
 python -m iridium agent --checkpoint runs/iridium-50m/iridium-50m-final.pt --workspace ./sandbox
 ```
 
 A pipeline check before spending quota: add `--tokens 2e6` to `data prepare`
 and `--tokens 2e6 --steps 20` to `train`; it runs in minutes on CPU.
+`data prepare --workers N` writes the families in parallel (default: every
+core, at most four). The notebook also reads an optional `HF_TOKEN` secret,
+which speeds up data streaming.
 
 What to watch in the log: the `val_*_bpb` lines should fall (lower is better),
-and `tok/s` tells you how long the run will really take. The ~15 hour estimate
-for two T4s has not been measured.
+and `tok/s` tells you how long the run will really take. The measured rate on
+Kaggle's two T4s was about 9.8k tokens/s for both together (micro-batch 8 after
+a memory fallback), so 5B tokens take about 140 hours of wall-clock time. The
+table below is arithmetic, not that measurement.
 
 ## The other presets
 
@@ -59,9 +64,12 @@ for two T4s has not been measured.
 preset        pri       params    body  embed   tokens tok/body    T4 h  P100 h  v5e h  status
 ----------------------------------------------------------------------------------------------
 chat-34m        1   36,038,426   30.1M   2.1M     328M       11     4.1     3.6    0.2  trained once (val 1.19 bpb text, 0.87 chat); not evaluated
+iridium-50m-control-dense   1   39,433,400   29.5M   7.9M    5000M      169   101.3    88.2    4.2  verified in theory
 chat-36m        1   46,180,869   35.8M   5.9M     716M       20    14.3    12.5    0.6  verified in theory
 50m             1   52,719,370   45.1M   3.2M     328M        7     7.0     6.1    0.3  verified in theory
 iridium-50m     1   60,273,479   50.4M   7.9M    5000M       99   102.5    89.3    4.2  verified in theory
+iridium-50m-control-random   1   60,291,911   50.4M   7.9M    5000M       99   102.6    89.4    4.2  verified in theory
+iridium-50m-next   1   60,291,911   50.4M   7.9M    5000M       99   102.6    89.4    4.2  verified in theory
 100m            1  108,304,153   94.5M   8.4M     655M        7    21.1    18.4    0.9  verified in theory
 chat-100m       1  108,304,153   94.5M   8.4M     655M        7    21.1    18.4    0.9  verified in theory
 500m            1  497,686,932  449.5M  33.6M    1966M        4   458.6   399.4   18.9  verified in theory
@@ -78,12 +86,23 @@ modern-744m     -  743,752,454  651.4M  67.1M   26214M       40  7055.7  6145.3 
 
 `chat-34m` is the cheapest end-to-end check. `chat-36m` is its rebalanced,
 compute-optimal successor. The `-100m` presets follow the 1.0 priority order:
-talking, tools, omnimodal, STEM, world model. `500m` and up are costed, not
-free-tier trainable. Budgets other than `iridium-50m`'s are below
+talking, tools, omnimodal, STEM, world model. `500m` and `1b` are free-tier
+trainable only on a free TPU v5e-1 (the preset notes estimate about a day and
+four days); `2b`, `4b` and `modern-744m` are costed, not free-tier trainable.
+Apart from `chat-36m` (20 tokens per body parameter, compute-optimal),
+`iridium-50m` (99) and `modern-744m` (40), the budgets are below
 compute-optimal on purpose, because that is what fits in free quota; expect
 plausible prose from those, not an assistant.
 [`docs/free-tier-training.md`](docs/free-tier-training.md) has the tiers,
 quotas and the reasoning behind the numbers.
+
+`iridium-50m-next` is the recipe for the next run: the same data and 5B tokens
+with NorMuon (learning rate 3e-3), Canon layers, sequence packing and a
+decay-phase mixture. It reads `iridium-50m`'s prepared shards (`data_from`), so
+it needs no second `data prepare`, but its checkpoints do not load into
+`iridium-50m`. `iridium-50m-control-random` and `iridium-50m-control-dense`
+test whether the subject stacks earn their parameters: the first sends each
+window to a random stack, the second uses one 12-layer stack.
 
 ## What the architecture is
 
@@ -113,6 +132,10 @@ evidence and cost in [`docs/architecture-options.md`](docs/architecture-options.
   parallel blocks, function-preserving block growth, low-rank dynamic weights.
 - **Embeddings** — per-layer embeddings, hashed n-gram embeddings.
 - **Positions** — M-RoPE grid positions for media and cameras; YaRN extension.
+- **Attention and core layers** — gated attention on global and local layers
+  (`attn_gate`: per head or per channel), and Canon layers in the core (`canon`).
+- **Optimizers** — `muon`, `muon_pe` (Polar Express coefficients) and `normuon`
+  (adds per-neuron normalisation) for hidden matrices; AdamW for the rest.
 - **Speed** — realtime streaming by exiting early inside the control core,
   with lossless self-speculative decoding; typed System-1 routing for cheap
   tokens.
@@ -134,7 +157,7 @@ python -m iridium ladder                         # every rung, 34 M to 8 B and b
 python -m iridium report modern --verify         # accounting checked against the modules
 python -m iridium plan base --gpus 1024          # 4-D parallelism and its cost model
 python -m iridium evaluate --help                # graded accuracy on held-out splits
-python -m iridium chat                           # the bundled pre-1.0 checkpoint
+python -m iridium chat                           # $IRIDIUM_CHECKPOINT or weights/iridium-inference.pt if set, else the bundled pre-1.0 checkpoint
 python -m iridium chat --checkpoint MODEL.pt --think 3   # more ponder loops
 python -m iridium export --help                  # a smaller inference-only checkpoint
 ```
@@ -147,14 +170,15 @@ iridium/
   config.py    the scaling ladder; executable parameter and memory accounting
   model/       control core, router, superstacks, attention variants, heads
   codecs/      typed spans and the omnimodal embedding bank
-  training/    trainer, run_preset, multi-GPU (parallel.py), data mixtures, budget audit
+  training/    trainer, run_preset, multi-GPU (parallel.py), Muon variants (muon.py), data mixtures, budget audit
   data/        licensed text, chat, tool and agent corpora; subjects (domains.py)
   evaluation/  test battery, routing and specialist checks, cloze benchmarks
   alignment/   written principles and an output screen (no training data yet)
   runtime/     device backends, streaming, tools, constrained decoding, serving
   world/       cameras, splats, world state, rollout
   physics/     spectral solvers and verifiers used for exactly-graded data
-  agency/ quant/ parallel/ contracts/ generation/ memory/ research/
+  quant/       MXFP4 (mxfp4.py) and sub-1-bit LittleBit layers (littlebit.py; docs/littlebit.md)
+  agency/ parallel/ contracts/ generation/ memory/ research/
 notebooks/     Colab, Kaggle, Jupyter and TPU notebooks
 docs/          see docs/README.md
 tests/         unit / integration / scientific

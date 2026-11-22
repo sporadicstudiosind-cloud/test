@@ -1,16 +1,18 @@
 """The control core: the only component that sees the whole stream.
 
-Two stages and a loop.
+Two stages and a loop. (In controller mode every layer runs on each cycle in one
+pass instead; see ``Iridium1.forward``.)
 
 * **Stage I** (layers ``0 .. split-1``) builds the representation the router
   reads. It owns the canonical causal KV cache.
 * **Stage II** (layers ``split .. L-1``) integrates whatever came back from the
   superstacks and decides whether the token is finished.
-* **The ponder loop** re-enters at ``loop_entry`` with a loop-index embedding
-  and the original stage input re-injected through a learned gate, so a second
-  pass refines the observation instead of drifting away from it.
+* **The ponder loop** re-enters at ``loop_entry`` (legacy mode) with a loop-index
+  embedding (when ``loop_identity`` is set) and the original stage input
+  re-injected through a learned gate, so a second pass refines the observation
+  instead of drifting away from it.
 
-The cache is keyed by ``(stage, loop_index, layer)``. A layer executed twice by
+The cache is keyed by ``("core", loop_index, layer)``. A layer executed twice by
 the loop occupies two cache slots, because it is two different conditional
 distributions — the second pass sees a residual stream the first one had not
 produced yet. Collapsing them into one slot is the subtle cache bug that makes

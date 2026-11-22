@@ -8,9 +8,12 @@ The last budgeted cycle cannot dispatch work that has no return/integration pass
 Training scores a learned distribution over stopping cycles. Inference selects
 the first confident stop, with a forced final-budget stop. Both still unroll core
 cycles to maintain dense cache histories: this is NOT compute-saving per-token
-halting. Learned input memory is causal and optional. LongContextSession is a
-separate lossy serving path whose long-range recall must be trained and measured.
-This revision has not been executed or tested.
+halting. The optional ``halt_threshold`` path in serving does stop a step's cycles
+early, but only once every token in that step has settled. Learned input memory is
+causal and optional. LongContextSession is a separate lossy serving path whose
+long-range recall must be trained and measured. The unit tests cover this module,
+and it has been trained on Kaggle; the measured throughput is recorded in
+``iridium.presets``.
 """
 
 from __future__ import annotations

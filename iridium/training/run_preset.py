@@ -362,7 +362,7 @@ def held_out_evaluator(shard_dir, cfg, device, batch_size: int, window: int,
     """Validation loss and bits per byte on the held-out shards, or ``None``.
 
     Bits per byte, not loss per token, is the number to compare: it does not
-    depend on the tokenizer, so a 8k- and a 32k-vocabulary run (or a byte-level
+    depend on the tokenizer, so an 8k- and a 32k-vocabulary run (or a byte-level
     one) are on the same scale. ``bpb = loss_per_token / ln 2 * tokens / bytes``
     with tokens and bytes counted over the held-out text when it was written.
     """
