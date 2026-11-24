@@ -226,8 +226,9 @@ def _terminal_text(value: str) -> str:
 
 
 def _thinking_from_args(args):
+    """Adaptive thinking is on by default; a fixed ``--n-loops`` turns it off."""
     think = getattr(args, "think", None)
-    if think is None:
+    if think is None and getattr(args, "n_loops", None) is not None:
         return None
     from .runtime.thinking import ThinkingBudget
     return ThinkingBudget(effort=args.effort, loops=think, spread=args.think_spread)
@@ -541,7 +542,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--think-spread", type=int, default=10)
     p.add_argument("--effort", default="balanced",
                    choices=["instant", "fast", "balanced", "deep", "max"],
-                   help="halting strictness used with --think")
+                   help="how hard to think (always on unless --n-loops is given)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--system", default=None, help="optional system message")
     p.set_defaults(func=cmd_chat)
