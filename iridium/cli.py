@@ -318,6 +318,40 @@ def cmd_chat(args) -> int:
         reply_to(message)
 
 
+def cmd_lens(args) -> int:
+    """Show what each ponder loop predicts, how likely it is to stop, and its routing."""
+    from .codecs.spans import Sample, text_span
+    from .config import TEXT_ID_OFFSET
+    from .runtime.device import detect, inference_autocast
+    from .runtime.loop_lens import format_readings, read_loops
+    from .training.tokenizer_bridge import tokenizer_from_manifest
+
+    path = Path(args.checkpoint).expanduser().resolve()
+    try:
+        info = detect(args.device, "auto")
+        if args.training_checkpoint:
+            # Training checkpoints hold optimizer pickles; load only your own.
+            from .training.trainer import load_checkpoint
+            model, manifest = load_checkpoint(str(path))
+            model.to(info.device)
+        else:
+            model, manifest = _load_chat_checkpoint(path, info.device)
+        tokenizer = tokenizer_from_manifest(manifest)
+        sample = Sample([text_span(args.text, offset=TEXT_ID_OFFSET, tokenizer=tokenizer)])
+        with inference_autocast(info):
+            readings = read_loops(model, sample, n_loops=args.loops, top_k=args.top_k,
+                                  tokenizer=tokenizer, text_offset=TEXT_ID_OFFSET)
+    except (OSError, ValueError, RuntimeError, KeyError) as exc:
+        print(f"lens: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        from dataclasses import asdict
+        print(json.dumps([asdict(r) for r in readings], indent=2))
+    else:
+        print(format_readings(readings))
+    return 0
+
+
 def cmd_agent(args) -> int:
     """Let a checkpoint use tools on a folder. Each tool group is optional."""
     from .data.agent_corpus import agent_system_prompt
@@ -546,6 +580,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--system", default=None, help="optional system message")
     p.set_defaults(func=cmd_chat)
+
+    p = sub.add_parser("lens", help="read the ponder loop: per-loop guesses, halting and routing")
+    p.add_argument("checkpoint")
+    p.add_argument("text")
+    p.add_argument("--loops", type=int, default=None, help="default: the trained max_loops")
+    p.add_argument("--top-k", type=int, default=3)
+    p.add_argument("--device", default="auto")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--training-checkpoint", action="store_true",
+                   help="load a training checkpoint (unsafe pickle; only your own files)")
+    p.set_defaults(func=cmd_lens)
 
     p = sub.add_parser("agent", help="let a checkpoint use file, code and web tools on a folder")
     p.add_argument("--checkpoint", required=True)

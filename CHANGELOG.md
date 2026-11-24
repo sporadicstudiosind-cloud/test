@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Loop lens** (`iridium lens CKPT TEXT`, `iridium/runtime/loop_lens.py`): per position and per ponder loop, the top next-token guesses (final norm + tied head), the halting stop probability, the superstacks routed to, and the loop where the guess settled. Read-only: no parameter or checkpoint-format change.
+- `iridium chat` thinks adaptively by default (`--effort`); `--n-loops` pins a fixed depth.
+
 - **Bug fixes from a codebase review** (eight read-only reviewers, each finding re-checked):
   OOM retry now rebuilds the fp16 GradScaler (a retry after `unscale_` crashed);
   `_prune_rounds` never deletes the checkpoint just written; held-out evaluation uses the
