@@ -1,0 +1,341 @@
+# Changelog
+
+## Unreleased
+
+- **Loop lens** (`iridium lens CKPT TEXT`, `iridium/runtime/loop_lens.py`): per position and per ponder loop, the top next-token guesses (final norm + tied head), the halting stop probability, the superstacks routed to, and the loop where the guess settled. Read-only: no parameter or checkpoint-format change.
+- `iridium chat` thinks adaptively by default (`--effort`); `--n-loops` pins a fixed depth.
+
+- **Bug fixes from a codebase review** (eight read-only reviewers, each finding re-checked):
+  OOM retry now rebuilds the fp16 GradScaler (a retry after `unscale_` crashed);
+  `_prune_rounds` never deletes the checkpoint just written; held-out evaluation uses the
+  same windows every time; serving with `hard_exit` ran exactly one stack layer (it read the
+  partial stopping distribution, whose last entry absorbs all mass); subject-routing loss is
+  averaged over the loops it supervised and skips all-padding rows; `data prepare` for a
+  preset with `data_from` prepares the owner's data; LittleBit's Joint-ITQ works on GPU;
+  NaN physics residuals no longer pass; exact-store URIs must be digests. An OOM at one row
+  per pass now raises instead of halving the micro-batch (which only enlarged each pass).
+  Docs and docstrings brought up to date. Open findings are listed in docs/backlog.md.
+- **Superstacks skip rows with no routed tokens** (`SuperstackBank.compact_rows`, exact; float64
+  test compares forward and gradients). With subject-forced routing every stack used to run the
+  full `[micro-batch, 1024]` including empty rows; saved activations for iridium-50m-next at
+  4x1024 fell from 3.12 to 1.75 GiB (CPU measurement, ~7 GiB at micro-batch 16), and stack
+  compute falls by a similar share.
+- **OOM no longer halves the micro-batch for the rest of the run.** The trainer first retries the
+  update with each micro-batch in more forward passes (same data, same gradient sum), and drops
+  back after 200 quiet steps; halving remains the last resort.
+- **Multi-GPU ranks now exit when their launcher dies.** Interrupting the notebook's
+  train cell SIGKILLs the launcher, which left both rank processes training as orphans
+  (and spending GPU quota). Ranks set `PR_SET_PDEATHSIG` on Linux; checked by killing a
+  launcher stand-in with SIGKILL. First measured iridium-50m speed on Kaggle 2xT4:
+  ~9.8k tok/s for both GPUs together (micro-batch fell back 16 -> 8 on memory), about
+  140 GPU-hours for 5B tokens, not the 15-51 h the preset estimated.
+- **`RouterConfig.curriculum_first_loop_only`** (opt-in): the subject curriculum and
+  subject-label loss bind only the first ponder loop, so later loops can route a window
+  to a different stack (e.g. maths stack, then code stack). Untested at scale.
+- **Kaggle notebook reads an optional `HF_TOKEN` secret** for data streaming (lifts the
+  anonymous Hugging Face rate limit). Third research pass in docs/research-2026-11.md.
+- **Faster `data prepare`.** Families are written in parallel processes (default: every
+  core, at most four; `--workers` / `prepare(workers=...)`), largest first, and chat-type
+  families tokenize 256 conversations per batched call instead of one turn at a time
+  (2.6x faster tokenizing on 4k-character stories; tokenizing was about a third of the
+  chat path's time, the rest is streaming). Output is byte-identical to the serial path
+  (checked). Expect roughly 2-3x on a 4-core Kaggle CPU session. Disk writes were already
+  buffered and were not the bottleneck.
+- **`iridium cloze`**: HellaSwag, ARC-Easy, ARC-Challenge, OpenBookQA and PIQA scored as
+  cloze likelihoods (OLMES's small-model formulation), reporting raw, per-byte and
+  unconditional-normalised accuracy, with each loop scored as training scores it.
+  Multiple-choice letter prompts sit at chance below a few hundred million parameters;
+  these give signal. Over-long answers are skipped and counted, never truncated.
+- **iridium-50m-next now trains with NorMuon at lr 3e-3 and Canon layers in the core.**
+  A 2M-parameter CPU ablation (docs/iridium-50m.md) found the AdamW-matched learning
+  rate under-drove Muon (it lost to AdamW at 3e-3 and won by ~0.15 at matched higher
+  rates), NorMuon ahead of plain Muon at every rate, and Canon layers lowering loss with
+  either optimizer (1.315 -> 1.081 with AdamW). Gated attention, looping, the batch-mean
+  ponder prior and decay-to-zero showed nothing at that length and stay opt-in.
+  At 1,200 steps the best rate fell to ~6e-3 and Canon's gain on top of NorMuon shrank
+  to ~0 over two seeds (0.069 with AdamW); NorMuon still led AdamW by 0.14.
+- **Opt-in architecture options** (off in every shipped preset until measured):
+  `attn_gate` ("head"/"elem"), a sigmoid gate per attention head after SDPA (Qiu et al.,
+  NeurIPS 2025); `canon` on the core, a residual causal width-4 depthwise convolution
+  after each block norm (Physics of LMs 4.1), initialised as the official code and exact
+  under cached decoding through the ponder loop. Parameter formulas updated.
+- **Muon variants**: optimizer `muon_pe` uses Polar Express coefficients (checked against
+  the paper's listing, including its 1.01 normalisation); `normuon` adds NorMuon's
+  per-neuron normalisation with the paper's update scale.
+- `decay_shape="linear"` (with `min_lr_ratio=0`, decay to zero) and
+  `RouterConfig.ponder_global` (ponder prior on the batch-average exit distribution).
+- **`iridium/quant/littlebit.py`**: sub-1-bit LittleBit layers with LittleBit-2's Joint-ITQ
+  initialisation and distillation QAT, written from the papers' equations. At this
+  model size the scale vectors alone cost ~0.115 bpw, and quality loss is large; see
+  docs/littlebit.md.
+- Presets `iridium-50m-control-random` and `iridium-50m-control-dense`: the experiment
+  that says whether the subject stacks earn their parameters.
+- **`iridium-50m-next`, the recipe for the next run** (the live iridium-50m run is
+  untouched: every new option defaults off). Same model, data and 5B tokens, plus:
+  Muon for hidden matrices (AdamW for embeddings, heads, norms and routers; weight decay
+  0.1); same-subject **sequence packing** of short generated items (about 17% of each
+  step was padding); and a **decay-phase mixture** over the last 20% tilted toward each
+  subject's worked questions, runnable code, tool episodes and chat. It reads
+  iridium-50m's prepared shards (`Preset.data_from`). See docs/iridium-50m.md.
+- Muon's Newton-Schulz ran in bf16 on every CUDA card; a T4 only emulates bf16. It now
+  uses bf16 only at compute capability 8.0+ and fp32 otherwise. Routers, halting heads,
+  every `*_head` output and matrices narrower than 16 now take Muon's AdamW path.
+- `iridium train --lr` overrides the peak learning rate, for short sweeps.
+- `iridium teacher generate|shard`: per-subject teacher-written text (sequence-level
+  distillation, so no tokenizer match is needed) from any OpenAI-compatible endpoint.
+  The key is read from an environment variable at call time and never written; output
+  is resumable JSON lines with provenance, sharded as `math_teacher`, `science_teacher`,
+  `code_teacher` and `chat_teacher` (each routed to its stack) plus a manifest. Not in
+  any mixture yet: free tiers yield ~0.2-2M tokens/day and provider terms on training
+  with outputs differ, so check them first.
+- The text-LM harness scored the cross-entropy of the loop-averaged hidden state;
+  training scores each loop's prediction weighted by its stopping probability. It now
+  scores the training objective (identical with one loop).
+- Checkpoints record which corpus was live (`corpus_tag`, `corpus_base`), so the
+  decay-phase mixture continues across resumes instead of restarting.
+- docs/research-2026-11.md: what 29 literature searches found about making a ~50M
+  model smarter and faster to train, with sources and counterpoints.
+- **About 20% less activation memory per sequence**, aiming to fit 16 sequences per pass
+  instead of 8: RMSNorm keeps only its input and one scalar per row for backward (it kept
+  two to three fp32 copies), and SwiGLU recomputes silu instead of storing it. Gradients
+  match plain autograd (fp64 exactly; the full 50m to 4e-8). Gradient averaging copies
+  back in place instead of holding a third set of gradients. Not yet measured on a GPU.
+- iridium-50m checkpoints every ~250 steps (`rounds` 30 -> 300): a session cut off by
+  the weekly GPU quota lost everything since its last round, up to ~5 hours.
+
+### Fixes from a repository-wide bug hunt
+Training (these affect the live iridium-50m run):
+- **Each round reshuffled the data**, so a 30-round run drew with replacement: about a
+  third of the corpus was never seen while the rest repeated. The loader now walks one
+  permutation per epoch and continues from the items already consumed, across rounds,
+  resumes and OOM retries; the count is checkpointed (older checkpoints derive it).
+- **An out-of-memory retry on one GPU desynchronised the two and hung the job.** Ranks
+  now agree before retrying; an OOM after the gradient exchange stops with a message.
+- Resume re-ran the round that had just finished.
+- **The stacks could read padding through the bridge**, whose core states had seen the
+  whole row, so short rows trained with future-token leakage. Padding is now hidden.
+- The loop-count penalty averaged over padding too.
+Data:
+- The battery's held-out sums appeared in agent episodes (3-45 times each per run).
+- `unknowable` trained "I don't know" outside the chat layout the runtime reads, so it
+  could never fire in chat; its held-out split also reused the training keys.
+- 81% of held-out story requests were training stories in `writing_text` (different
+  split hashes for the same rows). Takes effect when data is next prepared.
+Agent and tools:
+- After reading a file over ~1.9 KB the agent lost the question and the file; it now
+  keeps the latest request and shortens tool results instead.
+- The agent could not answer after its last allowed tool call.
+- A context longer than the model's window crashed instead of being shortened.
+- `run_python` could rename, hard-link, truncate or list files outside the workspace.
+- Tool errors are worded the same at runtime as in training.
+Smaller: `iridium evaluate` and `iridium presets <unknown>` fail with a message, not a
+traceback; the server rejects non-object JSON; `build_web_data.py --help` no longer
+overwrites `web/data.json` (regenerated, it was stale); `specialists` scores routes
+correctly in controller mode. `tests/unit/test_bug_hunt_regressions.py` covers these.
+
+### Fix: iridium-50m used far too much GPU memory per step
+- The first Kaggle session ran at about 7.8 s a step (~165 h for the run) and had to
+  drop to 4 sequences per pass. Not a leak: allocated memory between steps was flat.
+- Masked attention on CUDA passed `enable_gqa=True`. FlashAttention cannot take a mask
+  and, on several torch versions, the memory-efficient kernel cannot take the GQA flag,
+  so attention fell back to the math kernel, which keeps each head's fp32 score matrix.
+  CUDA now expands k/v itself (a few MB) and calls the kernel without the flag. The log
+  states once which kernel is in use. Not yet confirmed on a GPU.
+- The text loss is computed 512 rows at a time and recomputed in the backward pass,
+  instead of keeping all logits for every sequence and loop (~13% of a step's
+  activations on CPU). Same losses and gradients to float rounding
+  (`tests/unit/test_training_memory.py`); costs one extra head matmul.
+- iridium-50m's micro-batch default is 16. The model and optimizer are unchanged, so a
+  round checkpoint from the first session resumes.
+
+### Repository brought up to date
+- README, the doc index, the notebook README and the free-tier guide now describe the
+  code as it is: `iridium-50m` as the target, two-GPU training, `--resume auto`, and
+  the one recorded run (`chat-34m`). They no longer say nothing has been trained.
+- **Corrected:** the docs said T4 and P100 train in fp32. The trainer has used fp16
+  autocast with gradient scaling there; `docs/gpu.md` now says so.
+- **Corrected:** hour estimates were labelled "optimistic". chat-34m's recorded run
+  took about half its figure, so they are now labelled as arithmetic that can miss
+  either way.
+- `chat-34m` is marked as trained once; the capability register lists the 1.0 training
+  path; the stray `gallant-faraday-lhycva/` notebook copy (a Colab save with no results) is removed.
+
+### Two-GPU training and trained thinking loops
+
+- **Both Kaggle T4s train at once.** `iridium train --gpus auto` (the default) starts
+  one process per GPU and averages their gradients each step
+  (`iridium/training/parallel.py`). Same batch, same schedule, about half the time per
+  step. Verified on CPU with two processes ending on identical weights; not yet timed
+  on a GPU.
+- **Thinking loops are trained.** `loop_probs` samples 1, 2 or 3 ponder loops per step
+  (70/20/10 for iridium-50m, whose `max_loops` is now 3 and which now tags each pass).
+  Multi-loop steps split their batch so they need no more memory.
+- **Four specialists: maths, chat, code, science**, in that stack order. Chat replaces
+  writing and takes all conversation; every text family now has a stack. Labelled
+  windows always visit their stack (`subject_force`), half of them alone (`solo_p`).
+- **`iridium specialists`** checks that each stack beats the core and the other stacks
+  on its own subject, from held-out data. In a toy experiment every stack passed; see
+  docs/iridium-50m.md for what that does and does not show.
+- **Less waiting on the CPU.** Batches are built on a background thread; iridium-50m
+  runs 16 sequences per forward pass instead of 8; router diagnostics are computed only
+  on logged steps; validation runs under mixed precision. Log lines report `tok/s`.
+- `iridium train` gained `--gpus`, `--time-budget-hours`, `--keep-rounds`, `--micro-batch`.
+- The Kaggle notebook trains through that command and asks for **GPU T4 x2**.
+
+### `iridium-50m`: specialist stacks, agent tools, rebuilt Kaggle notebook
+- New preset: 6-layer core, four subject-routed stacks (science, math, writing,
+  code), body 50.4M, embeddings 7.9M, read-only image and audio input 2.0M. Budget
+  5B tokens. See `docs/iridium-50m.md`. Built and tested, not trained.
+- **Fix: the model could never choose to call a tool.** Generation asks for a reply
+  with an open ASSISTANT marker and reads a call from the first emitted id, but
+  training put an unsupervised TOOL_CALL marker straight after the user turn. Tool
+  calls now train as ASSISTANT then a supervised TOOL_CALL. Any tool data trained
+  before this has the old layout. Tests missed it because they script `generate`.
+- **Fix:** `iridium.runtime.sandbox` could not be imported on Windows (`resource`).
+- **Fix:** a long tool loop could drop its system turn, and so its tool list.
+- **Fix:** a control id generated under `text_only` was fed back as a text token.
+- **Fix:** `IridiumConfig.from_dict` left `spectral_stacks` as a list after JSON.
+- `runtime/agent_tools.py`: optional file, Python, calculator, web and small fun tools.
+- `data/agent_corpus.py`: generated arithmetic, working code, agent episodes that call
+  the real file tools, and basic shapes and tones.
+- `python -m iridium agent`, `battery` and `export`.
+- `CodecConfig.input_media` and `emit_media`; `Preset.prepare_tokens` and
+  `tokenizer_sources`; `train_preset(time_budget_hours=, keep_rounds=)`.
+- The Kaggle notebook and runbook are rebuilt around `iridium-50m`, across sessions.
+- Correction: the entry below says even stack usage meant "no specialisation". It
+  does not: the balance loss asks for even usage, and that run never measured
+  specialisation.
+
+### Fix: first Kaggle training step crashed on GPU
+- `place_model` moved a hardcoded list of submodules to the primary device.
+  The per-layer embedding table (`ple`, added with chat-36m) was not on it,
+  stayed on the CPU, and the first GPU forward pass raised "Expected all
+  tensors to be on the same device ... index is on cuda:0, different from
+  other tensors on cpu". It now walks the module tree, so a new submodule
+  cannot be left behind. `tests/unit/test_place_model_covers_every_module.py`
+  checks every preset on the `meta` device, no GPU needed, and fails on the
+  old code.
+- The notebook clone cell now updates an existing checkout (fetch + reset,
+  refusing if it has local edits) instead of silently reusing stale code,
+  prints the source revision, and asks for a kernel restart when the code
+  changed under modules already imported.
+- `python -m iridium chat` with no `--checkpoint` now prefers
+  `$IRIDIUM_CHECKPOINT`, then `weights/iridium-inference.pt`, before the
+  bundled demo.
+- `tests/unit/test_precision.py`: the fp64-downcast guard matched frames by
+  a `"/iridium/"` substring, which never matches Windows paths, so it passed
+  vacuously there. It now compares against the package directory.
+
+### `chat-36m`: chat-34m rebuilt from what its first run showed
+- The trained chat-34m (20k steps, 330M tokens, val 1.19 bpb text / 0.87 chat)
+  spent 24.4M of a 30M body on four superstacks the router used evenly
+  (usage entropy 1.38 of 1.39: no specialisation), one carrying Fourier blocks
+  no text touches, around a 5.6M shared core; and it saw ~11 tokens per body
+  parameter.
+- New preset `chat-36m`: d384, 10-layer core (15.7M), three plain 4-layer
+  stacks routed top-2 (20.1M), no spectral blocks. Body 35.8M; embeddings
+  5.9M on top (tied 8k token table + Gemma 3n per-layer embeddings,
+  `ple_dim=32`); media codec heads 4.5M, unused by text.
+- `CodecConfig.embed_scale`: Gemma/EmbeddingGemma-style `sqrt(d_model)` input
+  scaling of the tied token table. Off by default; on in chat-36m.
+- Compute-optimal budget: 20 tokens per *body* parameter = 716M tokens,
+  batch 64 x 1024, 10,929 steps, 8 rounds. Mixture 70% text / 25% chat /
+  5% unknowable, chat weighted so Dolly and OASST repeat at most ~4 times.
+- `IridiumConfig.body_params` / `embedding_params`; `--tokens-per-param` and
+  the budget audit now count body parameters (Kaplan-style non-embedding N).
+  `iridium presets` shows body, embeddings and tokens per body parameter.
+- The Kaggle notebook and `docs/kaggle-agent-runbook.md` now train chat-36m.
+
+## 1.0.0 — 2026-09
+
+The first release meant to be *trained by someone else*: every capability is
+reachable from a named preset, sized for free compute, and labelled with how
+much has actually been established. **Status: verified in theory, untrained.**
+
+### Data pipeline rebuilt
+- One tokenizer interface: byte level is just the smallest tokenizer. Rust
+  byte-level BPE (Hugging Face `tokenizers`) is the default, pure Python the
+  fallback; every checkpoint stores its tokenizer; `check_fits` refuses a
+  tokenizer larger than the embedding table.
+- `iridium data prepare`: tokenized, memory-mapped disk shards; training RAM
+  no longer scales with the token budget. Sources stream one at a time.
+- `adamw8`: 8-bit block-wise AdamW in plain PyTorch (CUDA, ROCm, XLA, CPU).
+- `--tokens` / `--tokens-per-param` on `train` and `data prepare`.
+- Held-out shards and validation **bits per byte** every 5% of training
+  (tokenizer-independent, so runs with different vocabularies compare).
+- Chat and tool conversations are packed into windows (+31% real tokens per
+  chat window at 512; more at longer windows); exact duplicates are dropped.
+  No intra-document attention mask yet (GPT-3/Llama 2 style packing).
+- `--hparams deepseek`: lr and batch from DeepSeek LLM's compute-optimal fit,
+  for a one-flag comparison against the preset's own values.
+- Size ladder presets `50m`, `100m`, `500m`, `1b` (8-bit, fits 16 GB), `2b`, `4b`.
+
+### Priorities, as presets
+- `chat-34m`, `chat-100m` (talking + reasoning), `tools-100m` (tool use),
+  `omni-100m` (omnimodal), `stem-100m` (physics / STEM), `world-100m` (world
+  model); `modern-744m` and the `8b` rung are costed but not free-tier trainable.
+- `python -m iridium presets` and `python -m iridium train --preset NAME`
+  (`--dry-run`, `--resume`, `--init`). Training runs in rounds of fresh
+  streamed data with one learning-rate schedule across the whole run.
+- Free-tier hour estimates computed from each config's own FLOPs.
+
+### Tool use
+- A tool-call format on reserved control tokens, licensed and exactly-graded
+  synthetic tool data, and schema-constrained decoding (see `docs/tools.md`).
+
+### Architecture options (all off by default; exact parameter accounting)
+- Layer patterns mixing global, sliding-window, MLA and Gated DeltaNet
+  attention, in the control core and the superstacks.
+- mHC hyper-connection residual streams; DyT / Derf normalisation-free norms;
+  parallel and function-preservingly growable blocks; low-rank dynamic weights.
+- Per-layer embeddings and hashed n-gram embeddings (cache-carried).
+- M-RoPE grid positions for image / video / camera; YaRN context extension.
+- A camera modality; 3D Gaussian splat scenes, persistent world state and
+  action-driven rollout.
+- Realtime streaming via control-core early exit and lossless
+  self-speculative decoding.
+- The 8B rung and XLA / TPU training.
+
+### Training recipe
+- Warmup-stable-decay schedule, Muon, z-loss, optional loss balancing, weight
+  EMA, embeddings excluded from weight decay, fused optimizer steps, document
+  packing, a subword tokenizer sized so no embedding row is dead, and a
+  pre-flight data-budget audit.
+
+### Fixes
+- Sliding-window caches kept every key (and a negative slice start); KV-cache
+  accounting was per-model rather than per-layer-kind; embeddings were weight
+  decayed; context-budget off-by-one; n-gram history lost across cache steps;
+  the typed head ran its trunk twice; the shipped checkpoint failed strict
+  loading; config round-trips dropped tokenizer fields; M-RoPE failed on the
+  meta device; the T4 materialised the full attention score matrix.
+
+### Found by a CPU smoke run of chat-34m (30 steps, 2 rounds)
+- Chat sources underfilled and aborted the run; they now top up from each other.
+- Chat data and chat sessions were byte-encoded under a subword preset, which
+  overflowed the window; the tokenizer now flows through data, chat and CLI.
+- Streaming Gutenberg peaked near 12 GB of host RAM (out of default mixes now);
+  OpenR1 read unused columns (~4 GB, now ~0.7 GB).
+- A 32 x 512 batch did not fit in memory; presets now use micro-batch 8 with
+  accumulation, and CPU/ROCm out-of-memory errors trigger the halving retry.
+- Result: loss 9.05 -> 7.2 (ln 8192 = 9.01 at init); the checkpoint loads in
+  `iridium chat` and decodes through its own tokenizer. A pipeline check, not
+  a quality result.
+
+### Data
+- Chat: smol-smoltalk, OpenR1-Math solutions, Dolly, OASST by default;
+  UltraChat and Tulu 3 opt-in (`--max-data`). Text: Cosmopedia stories and
+  textbooks, FineMath. Tools: glaive and Hermes function calling (Apache 2.0)
+  plus exactly graded synthetic tasks. Every source records its licence.
+
+### Packaging
+- `pyproject.toml` (private: no licence, `Private :: Do Not Upload`),
+  `iridium.__version__`, a CPU CI workflow, a docs index and a free-tier
+  training guide. Notebooks rebuilt around presets.
+
+## Pre-1.0
+
+The ORRERY specification, its migration to the routed Iridium-1 design, the
+trained 0.8 M first slice, the 34 M nano phase-1 checkpoint, the 1.00 B test
+rung and inference server, and the studio notebooks. See `git log` and
+`docs/decisions.md`.
